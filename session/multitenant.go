@@ -18,6 +18,7 @@ import (
 	"xbot/memory"
 	"xbot/memory/flat"
 	"xbot/memory/letta"
+	"xbot/memory/noop"
 	"xbot/storage/sqlite"
 	"xbot/storage/vectordb"
 	"xbot/tools"
@@ -311,6 +312,9 @@ func (m *MultiTenantSession) GetOrCreateSession(channel, chatID string) (*Tenant
 		memProvider = letta.New(tenantID, m.coreSvc, m.archivalSvc, m.memorySvc, m.toolIndexSvc)
 		// 前向兼容：一次性迁移 user_profiles → core memory blocks
 		m.migrateProfileToCoreMemory(tenantID)
+	case "none":
+		// 禁用记忆：不创建文件、不调用 LLM、不写入任何记忆存储
+		memProvider = noop.New()
 	default:
 		// Flat memory: file-based storage under ~/.xbot/memory/{tenantID}/
 		// Use tenantID (numeric) as directory name for filesystem safety
