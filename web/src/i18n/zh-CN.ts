@@ -1,5 +1,5 @@
 /**
- * zh-CN translation resources (Spec 1 设计系统基础).
+ * zh-CN translation resources (Spec 1 设计系统基础 + Spec 3 会话列表).
  */
 const zhCN = {
   common: {
@@ -28,14 +28,40 @@ const zhCN = {
     byTime: '时间',
     byStatus: '状态',
     newSession: '新建会话',
+    newSessionDesc: '创建一个新的会话，可指定工作路径',
+    nameLabel: '会话名称',
+    namePlaceholder: '留空则自动生成',
     workPath: '工作路径',
+    workPathPlaceholder: '输入绝对路径，例如 /root/Code/xbot',
+    searchPlaceholder: '搜索会话...',
     starred: '已标星',
+    star: '标星',
+    unstar: '取消标星',
+    created: '会话已创建',
+    createFailed: '创建会话失败',
+    deleteTitle: '删除会话',
+    deleteConfirm: '确定删除会话「{{name}}」吗？此操作不可撤销。',
+    justNow: '刚刚',
+    minutesAgo: '{{n}} 分钟前',
+    hoursAgo: '{{n}} 小时前',
+    daysAgo: '{{n}} 天前',
+    empty: '还没有会话，点击右上角新建',
+    noResults: '没有匹配的会话',
     status: {
       running: '运行中',
       waiting: '等待输入',
       idle: '空闲',
       error: '异常',
     },
+  },
+  channel: {
+    feishu: '飞书',
+    unknown: '未知渠道',
+  },
+  time: {
+    today: '今天',
+    yesterday: '昨天',
+    earlier: '更早',
   },
   workspace: {
     agent: 'Agent',

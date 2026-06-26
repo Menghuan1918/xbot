@@ -1,5 +1,5 @@
 /**
- * en translation resources (Spec 1 设计系统基础).
+ * en translation resources (Spec 1 设计系统基础 + Spec 3 会话列表).
  * Mirrors the zh-CN structure 1:1.
  */
 import type { Translations } from './zh-CN'
@@ -31,14 +31,40 @@ const en: Translations = {
     byTime: 'Time',
     byStatus: 'Status',
     newSession: 'New Session',
-    workPath: 'Work Path',
+    newSessionDesc: 'Create a new session; optionally set its working directory',
+    nameLabel: 'Session name',
+    namePlaceholder: 'Leave empty to auto-generate',
+    workPath: 'Work path',
+    workPathPlaceholder: 'Enter an absolute path, e.g. /root/Code/xbot',
+    searchPlaceholder: 'Search sessions...',
     starred: 'Starred',
+    star: 'Star',
+    unstar: 'Unstar',
+    created: 'Session created',
+    createFailed: 'Failed to create session',
+    deleteTitle: 'Delete session',
+    deleteConfirm: 'Delete session "{{name}}"? This cannot be undone.',
+    justNow: 'just now',
+    minutesAgo: '{{n}}m ago',
+    hoursAgo: '{{n}}h ago',
+    daysAgo: '{{n}}d ago',
+    empty: 'No sessions yet — create one from the top-right',
+    noResults: 'No matching sessions',
     status: {
       running: 'Running',
       waiting: 'Waiting for input',
       idle: 'Idle',
       error: 'Error',
     },
+  },
+  channel: {
+    feishu: 'Feishu',
+    unknown: 'Unknown channel',
+  },
+  time: {
+    today: 'Today',
+    yesterday: 'Yesterday',
+    earlier: 'Earlier',
   },
   workspace: {
     agent: 'Agent',
