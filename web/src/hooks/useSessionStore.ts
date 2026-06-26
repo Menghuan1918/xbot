@@ -133,6 +133,11 @@ export function useSessionStore(): SessionStore {
   sessionsRef.current = sessions
   const channelRef = useRef(channel)
   channelRef.current = channel
+  // Tracks the chatID we last subscribed to, read live by WS handlers. The
+  // WSProvider's context value snapshots `ws.chatID`, which can lag behind a
+  // subscribe() call (its useMemo key doesn't include chatID); this ref is the
+  // source of truth for "which chat are we currently receiving events for".
+  const subscribedChatIDRef = useRef<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -199,6 +204,7 @@ export function useSessionStore(): SessionStore {
         }
       }
       ws.subscribe(chatID)
+      subscribedChatIDRef.current = chatID
       setActiveSessionId(chatID)
       // Optimistic insert so the new session appears immediately; refresh reconciles.
       setSessions((prev) => [
@@ -233,6 +239,7 @@ export function useSessionStore(): SessionStore {
         return
       }
       ws.subscribe(id)
+      subscribedChatIDRef.current = id
       setActiveSessionId(id)
       setSessions((prev) => prev.map((s) => ({ ...s, isCurrent: s.chatID === id })))
     },
@@ -311,11 +318,16 @@ export function useSessionStore(): SessionStore {
     })
   }, [ws, setStatus, refresh])
 
-  // ask_user → waiting_input (carries chat_id on the message envelope)
+  // ask_user → waiting_input.
+  // The backend ask_user frame does NOT carry chat_id on the envelope (unlike
+  // text frames); the hub routes it only to clients subscribed to the target
+  // chatID. So resolve the target from our live subscribed chatID ref (the
+  // only chat a web client receives ask_user for), and prefer the envelope
+  // chat_id when present (forward-compat with a backend that stamps it).
   useEffect(() => {
     return ws.onMessage((msg) => {
       if (msg.type !== 'ask_user') return
-      const chatID = (msg as AskUserEnvelope).chat_id
+      const chatID = (msg as AskUserEnvelope).chat_id ?? subscribedChatIDRef.current
       if (chatID) setStatus(chatID, 'waiting_input')
     })
   }, [ws, setStatus])
