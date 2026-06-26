@@ -36,3 +36,103 @@ export interface SessionInfo {
   status: SessionStatus
   isCurrent: boolean
 }
+
+/* ---------------------------------------------------------------------------
+ * WebSocket message envelopes (mirrors Go protocol/ws.go).
+ * Added in Spec 2 (布局壳 + Dockview); these are pure data shapes shared by
+ * the WS connection layer (useWSConnection) and consumers.
+ * ------------------------------------------------------------------------- */
+
+/** Server → Client message types (see protocol/ws.go MsgType*). */
+export type WSMessageType =
+  | 'text'
+  | 'progress_structured'
+  | 'stream_content'
+  | 'rpc_response'
+  | 'ask_user'
+  | 'session'
+  | 'user_echo'
+  | 'card'
+  | 'plugin_widgets'
+  | 'runner_status'
+  | 'sync_progress'
+  | '__pong__'
+
+/** Client → Server message types (see protocol/ws.go MsgType*). */
+export type WSClientMessageType =
+  | 'message'
+  | 'cancel'
+  | 'rpc'
+  | 'subscribe'
+  | 'sync'
+  | 'ask_user_response'
+  | 'tui_control_resp'
+
+/** Generic server → client envelope. Fields are optional because different
+ *  message types populate different subsets. */
+export interface WSMessage {
+  type: WSMessageType | string
+  id?: string
+  seq?: number
+  content?: string
+  original_content?: string
+  ts?: number
+  progress?: ProgressEvent | null
+  progress_history?: string
+  channel?: string
+  chat_id?: string
+  sender_id?: string
+  sender_name?: string
+  chat_type?: string
+  session_reset?: boolean
+  metadata?: Record<string, string>
+  result?: unknown
+  error?: string
+  session?: SessionEvent | null
+}
+
+/** Client → server envelope. */
+export interface WSClientMessage {
+  type: WSClientMessageType
+  content?: string
+  file_ids?: string[]
+  file_names?: string[]
+  file_sizes?: number[]
+  upload_keys?: string[]
+  file_mimes?: string[]
+  channel?: string
+  chat_id?: string
+  sender_id?: string
+  sender_name?: string
+  chat_type?: string
+  id?: string
+  method?: string
+  params?: unknown
+}
+
+/** Progress event (mirrors Go protocol/events.go ProgressEvent). */
+export interface ProgressEvent {
+  iteration?: number
+  content?: string
+  reasoning?: string
+  tool_calls?: unknown[]
+  elapsed_wall?: number
+  chat_id?: string
+  seq?: number
+  phase?: string
+  thinking?: string
+  stream_content?: string
+  cwd?: string
+  [key: string]: unknown
+}
+
+/** Session event (mirrors Go protocol/events.go SessionEvent). */
+export interface SessionEvent {
+  channel?: string
+  chat_id?: string
+  action?: string
+  label?: string
+  role?: string
+  instance?: string
+  parent_id?: string
+}

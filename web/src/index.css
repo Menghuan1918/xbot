@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "dockview/dist/styles/dockview.css";
 
 /* dark variant driven by <html class="dark"> */
 @custom-variant dark (&:is(.dark *));
@@ -230,4 +231,32 @@
       sans-serif;
     -webkit-font-smoothing: antialiased;
   }
+}
+
+/*
+ * Dockview theme alignment — map dockview's `--dv-*` variables onto the Spec
+ * semantic tokens so the tab strip, separators and panels follow the VSCode
+ * palette (and the live accent color). Applied under the dockview host so it
+ * overrides `themeVisualStudio`'s defaults without forking the theme.
+ */
+.dv-dockview {
+  --dv-group-view-background-color: var(--bg-primary);
+  --dv-tabs-and-actions-container-background-color: var(--bg-secondary);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg-primary);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg-tertiary);
+  --dv-activegroup-visiblepanel-tab-color: var(--text-primary);
+  --dv-activegroup-hiddenpanel-tab-color: var(--text-secondary);
+  --dv-tab-divider-color: var(--border);
+  --dv-separator-border: var(--border);
+  --dv-icon-hover-background-color: var(--bg-tertiary);
+  --dv-drag-over-border-color: var(--accent);
+  --dv-drag-over-background-color: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* Light theme: dockview's VS theme is dark by default, so retune the panel
+ * surfaces and text to the light palette. */
+:root:not(.dark) .dv-dockview {
+  --dv-group-view-background-color: var(--bg-primary);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg-tertiary);
+  --dv-activegroup-hiddenpanel-tab-color: var(--text-secondary);
 }
