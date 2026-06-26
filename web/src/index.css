@@ -1,62 +1,233 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
-@theme {
-  --color-slate-50: #f5f5f7;
-  --color-slate-100: #e5e5ea;
-  --color-slate-200: #d1d1d6;
-  --color-slate-300: #aeaeb2;
-  --color-slate-400: #8e8e93;
-  --color-slate-500: #6e6e73;
-  --color-slate-600: #48484a;
-  --color-slate-700: #3a3a3c;
-  --color-slate-800: #2c2c2e;
-  --color-slate-900: #151517;
-  --color-slate-950: #000000;
+/* dark variant driven by <html class="dark"> */
+@custom-variant dark (&:is(.dark *));
 
-  --color-gray-50: #f5f5f7;
-  --color-gray-100: #e5e5ea;
-  --color-gray-200: #d1d1d6;
-  --color-gray-300: #aeaeb2;
-  --color-gray-400: #8e8e93;
-  --color-gray-500: #6e6e73;
-  --color-gray-600: #48484a;
-  --color-gray-700: #3a3a3c;
-  --color-gray-800: #2c2c2e;
-  --color-gray-900: #151517;
-  --color-gray-950: #000000;
+/*
+ * Design tokens — VSCode-style palette (Spec 1 设计系统基础).
+ *
+ * Two layers of variables:
+ *   1. Application semantic tokens (--accent, --bg-primary, --border, ...) —
+ *      the Spec contract; ThemeProvider mutates --accent* at runtime to apply
+ *      the user's accent color while keeping the rest of the palette fixed.
+ *   2. shadcn semantic tokens (--background, --foreground, --primary, ...) —
+ *      reference layer 1 so shadcn components render with the VSCode palette.
+ *
+ * Light theme (default :root).
+ */
+:root {
+  /* ── Spec semantic palette (light) ── */
+  --accent: #3388bb;
+  --accent-hover: #2a7aa8;
+  --accent-foreground: #ffffff;
 
-  --color-blue-300: #64d2ff;
-  --color-blue-400: #409cff;
-  --color-blue-500: #007AFF;
-  --color-blue-600: #007AFF;
-  --color-blue-700: #0071e3;
-  --color-blue-800: #0055b3;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f3f3f3;
+  --bg-tertiary: #e4e4e4;
+  --border: #e0e0e0;
+  --text-primary: #1e1e1e;
+  --text-secondary: #6b6b6b;
+  --text-muted: #999999;
 
-  --color-indigo-400: #7c7aff;
-  --color-indigo-500: #5e5ce6;
-  --color-indigo-600: #5856d6;
+  --status-running: #3388bb;
+  --status-waiting: #e6a700;
+  --status-idle: #6b6b6b;
+  --status-error: #d1242f;
 
-  --color-green-400: #30d158;
-  --color-green-900: #1a3a24;
-  --color-red-400: #ff453a;
-  --color-red-800: #5c1a1a;
-  --color-red-900: #3a1010;
-  --color-yellow-400: #ffd60a;
-  --color-yellow-500: #ffcc00;
+  --editor-bg: #ffffff;
+  --editor-gutter: #f0f0f0;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', 'Inter', 'Noto Sans SC', 'PingFang SC', sans-serif;
+  --radius: 0.5rem;
 }
 
-@import "./styles/base.css";
-@import "./styles/mobile.css";
-@import "./styles/markdown.css";
-@import "./styles/tiptap.css";
-@import "./styles/codeblock.css";
-@import "./styles/chat/index.css";
-@import "./styles/sidebar.css";
-@import "./styles/settings.css";
-@import "./styles/bookmark.css";
-@import "./styles/confirm.css";
-@import "./styles/login.css";
-@import "./styles/progress.css";
-@import "./styles/theme.css";
+/* shadcn semantic tokens (light) → VSCode palette */
+:root {
+  --background: var(--bg-primary);
+  --foreground: var(--text-primary);
+  --card: var(--bg-primary);
+  --card-foreground: var(--text-primary);
+  --popover: var(--bg-primary);
+  --popover-foreground: var(--text-primary);
+
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-foreground);
+
+  --secondary: var(--bg-secondary);
+  --secondary-foreground: var(--text-primary);
+
+  --muted: var(--bg-secondary);
+  --muted-foreground: var(--text-secondary);
+
+  --accent: var(--bg-tertiary);
+  --accent-foreground: var(--text-primary);
+
+  --destructive: var(--status-error);
+  --destructive-foreground: #ffffff;
+
+  --border: var(--border);
+  --input: var(--border);
+  --ring: var(--accent);
+
+  --chart-1: var(--accent);
+  --chart-2: #2a7aa8;
+  --chart-3: #e6a700;
+  --chart-4: #6b6b6b;
+  --chart-5: #d1242f;
+
+  --sidebar: var(--bg-secondary);
+  --sidebar-foreground: var(--text-primary);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--accent-foreground);
+  --sidebar-accent: var(--bg-tertiary);
+  --sidebar-accent-foreground: var(--text-primary);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--accent);
+}
+
+/* Dark theme — <html class="dark"> */
+.dark {
+  --accent: #3388bb;
+  --accent-hover: #4499cc;
+  --accent-foreground: #ffffff;
+
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #252526;
+  --bg-tertiary: #2d2d2d;
+  --border: #3c3c3c;
+  --text-primary: #cccccc;
+  --text-secondary: #858585;
+  --text-muted: #6b6b6b;
+
+  --status-running: #3388bb;
+  --status-waiting: #e6a700;
+  --status-idle: #858585;
+  --status-error: #f48771;
+
+  --editor-bg: #1e1e1e;
+  --editor-gutter: #1e1e1e;
+}
+
+.dark {
+  --background: var(--bg-primary);
+  --foreground: var(--text-primary);
+  --card: var(--bg-secondary);
+  --card-foreground: var(--text-primary);
+  --popover: var(--bg-primary);
+  --popover-foreground: var(--text-primary);
+
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-foreground);
+
+  --secondary: var(--bg-tertiary);
+  --secondary-foreground: var(--text-primary);
+
+  --muted: var(--bg-tertiary);
+  --muted-foreground: var(--text-secondary);
+
+  --accent: var(--bg-tertiary);
+  --accent-foreground: var(--text-primary);
+
+  --destructive: var(--status-error);
+  --destructive-foreground: #ffffff;
+
+  --border: var(--border);
+  --input: var(--border);
+  --ring: var(--accent);
+
+  --chart-1: var(--accent);
+  --chart-2: #4499cc;
+  --chart-3: #e6a700;
+  --chart-4: #858585;
+  --chart-5: #f48771;
+
+  --sidebar: var(--bg-secondary);
+  --sidebar-foreground: var(--text-primary);
+  --sidebar-primary: var(--accent);
+  --sidebar-primary-foreground: var(--accent-foreground);
+  --sidebar-accent: var(--bg-tertiary);
+  --sidebar-accent-foreground: var(--text-primary);
+  --sidebar-border: var(--border);
+  --sidebar-ring: var(--accent);
+}
+
+/*
+ * Expose palette to Tailwind v4 utility layer. shadcn components use
+ * bg-background / text-foreground / bg-primary ... mapped to the tokens above.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Spec palette as raw color utilities: bg-bg-primary, text-text-secondary, ... */
+  --color-bg-primary: var(--bg-primary);
+  --color-bg-secondary: var(--bg-secondary);
+  --color-bg-tertiary: var(--bg-tertiary);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-text-muted: var(--text-muted);
+  --color-app-accent: var(--accent);
+  --color-app-accent-hover: var(--accent-hover);
+  --color-app-accent-foreground: var(--accent-foreground);
+  --color-status-running: var(--status-running);
+  --color-status-waiting: var(--status-waiting);
+  --color-status-idle: var(--status-idle);
+  --color-status-error: var(--status-error);
+  --color-editor-bg: var(--editor-bg);
+  --color-editor-gutter: var(--editor-gutter);
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display',
+      'SF Pro Text', 'Helvetica Neue', 'Inter', 'Noto Sans SC', 'PingFang SC',
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+}
