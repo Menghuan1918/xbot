@@ -280,7 +280,12 @@ export function useSessionStore(): SessionStore {
         persistStarred(next)
         return next
       })
-      if (activeSessionId === id) setActiveSessionId(null)
+      if (activeSessionId === id) {
+        setActiveSessionId(null)
+        // Clear the live subscription ref so a stale deleted chat can't be
+        // mistaken as the target of a later ask_user frame.
+        if (subscribedChatIDRef.current === id) subscribedChatIDRef.current = null
+      }
       return true
     },
     [activeSessionId],
