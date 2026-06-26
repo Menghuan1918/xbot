@@ -90,8 +90,8 @@ test.describe('Right sidebar (Spec 6)', () => {
     await page.waitForTimeout(300)
     const lines = page.locator('aside pre > div')
     await expect(lines).not.toHaveCount(0)
-    // At least one added or removed line (green/red rgba background).
-    await expect(page.locator('aside pre > div[style*="rgba"]')).not.toHaveCount(0)
+    // At least one added or removed line (theme-driven diff bg color).
+    await expect(page.locator('aside pre > div[style*="--diff-"]')).not.toHaveCount(0)
   })
 
   test('session config shows info and switches model', async ({ page }) => {

@@ -39,6 +39,11 @@
   --editor-bg: #ffffff;
   --editor-gutter: #f0f0f0;
 
+  /* Diff viewer line tints (Spec 6 §3.5). Green/red at low alpha so they
+   * read as backgrounds over the editor surface in light theme. */
+  --diff-added: rgba(34, 170, 136, 0.16);
+  --diff-removed: rgba(209, 36, 47, 0.16);
+
   --radius: 0.5rem;
 }
 
@@ -107,6 +112,11 @@
 
   --editor-bg: #1e1e1e;
   --editor-gutter: #1e1e1e;
+
+  /* Dark-theme diff tints: slightly higher alpha so they stay visible on the
+   * dark editor surface (VSCode uses ~rgba(155,185,85,.2)/rgba(255,0,0,.2)). */
+  --diff-added: rgba(74, 200, 142, 0.22);
+  --diff-removed: rgba(244, 135, 113, 0.22);
 }
 
 .dark {

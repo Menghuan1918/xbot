@@ -67,10 +67,12 @@ export function DiffViewer() {
   const [original, setOriginal] = useState(SAMPLE_A)
   const [modified, setModified] = useState(SAMPLE_B)
 
-  const diff = useMemo(
-    () => lineDiff(original.split('\n'), modified.split('\n')),
-    [original, modified],
-  )
+  const diff = useMemo(() => {
+    // Treat fully-empty inputs as "no diff" (avoids the degenerate [""] → ["",""]
+    // two-line render and surfaces the empty-state hint). Otherwise LCS the lines.
+    if (original.trim() === '' && modified.trim() === '') return []
+    return lineDiff(original.split('\n'), modified.split('\n'))
+  }, [original, modified])
 
   return (
     <div className="flex h-full flex-col">
@@ -110,9 +112,9 @@ export function DiffViewer() {
 function DiffLine({ op }: { op: DiffOp }) {
   const bg =
     op.kind === 'added'
-      ? 'rgba(34,170,136,0.16)'
+      ? 'var(--diff-added)'
       : op.kind === 'removed'
-        ? 'rgba(209,36,47,0.16)'
+        ? 'var(--diff-removed)'
         : 'transparent'
   const fg = op.kind === 'equal' ? 'var(--text-secondary)' : 'var(--text-primary)'
   const marker = op.kind === 'added' ? '+' : op.kind === 'removed' ? '-' : ' '

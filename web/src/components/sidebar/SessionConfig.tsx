@@ -86,11 +86,7 @@ export function SessionConfig({ onPanelChange }: SessionConfigProps) {
       setModel(next)
       if (!ws.connected) return
       try {
-        await ws.rpc('switch_model', {
-          sender_id: '',
-          model: next,
-          chat_id: activeId ?? '',
-        })
+        await ws.rpc('switch_model', { model: next, chat_id: activeId ?? '' })
         toast.success(t('sidebar.modelSwitched', { model: next }))
       } catch {
         toast.error(t('sidebar.modelSwitchFailed'))
@@ -99,13 +95,40 @@ export function SessionConfig({ onPanelChange }: SessionConfigProps) {
     [ws, activeId, t],
   )
 
-  const persistNumber = useCallback(
-    async (method: string, value: string) => {
-      if (!ws.connected) return
+  // Persisters use the backend's exact payload shape (serverapp/rpc_table.go +
+  // agent/req_types.go): set_user_max_context → { max_context }, set_user_max_
+  // output_tokens → { max_tokens }, set_user_thinking_mode → { mode } (string:
+  // "enabled" or "" for off). A shared `{ value }` would silently decode to the
+  // zero value and drop the edit.
+  const persistMaxContext = useCallback(
+    async (value: string) => {
       const n = Number(value)
-      if (Number.isNaN(n)) return
+      if (!ws.connected || Number.isNaN(n)) return
       try {
-        await ws.rpc(method, { value: n })
+        await ws.rpc('set_user_max_context', { max_context: n })
+      } catch {
+        toast.error(t('sidebar.configSaveFailed'))
+      }
+    },
+    [ws, t],
+  )
+  const persistMaxOutput = useCallback(
+    async (value: string) => {
+      const n = Number(value)
+      if (!ws.connected || Number.isNaN(n)) return
+      try {
+        await ws.rpc('set_user_max_output_tokens', { max_tokens: n })
+      } catch {
+        toast.error(t('sidebar.configSaveFailed'))
+      }
+    },
+    [ws, t],
+  )
+  const persistThinkingMode = useCallback(
+    async (enabled: boolean) => {
+      if (!ws.connected) return
+      try {
+        await ws.rpc('set_user_thinking_mode', { mode: enabled ? 'enabled' : '' })
       } catch {
         toast.error(t('sidebar.configSaveFailed'))
       }
@@ -180,14 +203,14 @@ export function SessionConfig({ onPanelChange }: SessionConfigProps) {
             label={t('sidebar.maxContext')}
             value={maxContext}
             onChange={setMaxContext}
-            onBlur={(v) => void persistNumber('set_user_max_context', v)}
+            onBlur={(v) => void persistMaxContext(v)}
           />
           <NumberField
             id="max-output"
             label={t('sidebar.maxOutput')}
             value={maxOutput}
             onChange={setMaxOutput}
-            onBlur={(v) => void persistNumber('set_user_max_output_tokens', v)}
+            onBlur={(v) => void persistMaxOutput(v)}
           />
           <div className="flex items-center justify-between">
             <Label htmlFor="thinking-mode" className="text-xs text-text-secondary">
@@ -198,7 +221,7 @@ export function SessionConfig({ onPanelChange }: SessionConfigProps) {
               checked={thinkingMode}
               onCheckedChange={(checked) => {
                 setThinkingMode(checked)
-                void persistNumber('set_user_thinking_mode', checked ? '1' : '0')
+                void persistThinkingMode(checked)
               }}
             />
           </div>
