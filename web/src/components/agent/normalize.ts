@@ -8,16 +8,19 @@
 import type { HistProgress } from '@/components/agent/api'
 import type { IterationSnapshot, IterationTool, ToolProgress } from '@/types/agent'
 
-/** Coerce a raw iteration-history entry (from `detail` JSON) into IterationSnapshot. */
+/** Coerce a raw iteration-history entry (from `detail` JSON) into IterationSnapshot.
+ *  Reads `tools` (IterationSnapshot JSON from `detail`/`progress_history`) and
+ *  falls back to `completed_tools` (the slim histIterSnapshot shape from
+ *  GET /api/history active_progress). */
 export function normalizeIteration(raw: unknown): IterationSnapshot | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
-  const tools = Array.isArray(r.tools) ? r.tools : []
+  const rawTools = Array.isArray(r.tools) ? r.tools : Array.isArray(r.completed_tools) ? r.completed_tools : []
   return {
     iteration: typeof r.iteration === 'number' ? r.iteration : 0,
     thinking: typeof r.thinking === 'string' ? r.thinking : undefined,
     reasoning: typeof r.reasoning === 'string' ? r.reasoning : undefined,
-    tools: tools.map(normalizeIterationTool).filter(Boolean) as IterationTool[],
+    tools: rawTools.map(normalizeIterationTool).filter(Boolean) as IterationTool[],
   }
 }
 
@@ -72,8 +75,10 @@ export function historyProgressToLive(p: HistProgress | null): {
   completedTools: ToolProgress[]
   iterations: IterationSnapshot[]
   streamContent: string
+  iteration: number
 } {
-  if (!p) return { activeTools: [], completedTools: [], iterations: [], streamContent: '' }
+  if (!p)
+    return { activeTools: [], completedTools: [], iterations: [], streamContent: '', iteration: 0 }
   const active = (p.active_tools ?? []).map(normalizeTool).filter(Boolean) as ToolProgress[]
   const completed = (p.completed_tools ?? []).map(normalizeTool).filter(Boolean) as ToolProgress[]
   const iterations = (p.iteration_history ?? [])
@@ -84,5 +89,6 @@ export function historyProgressToLive(p: HistProgress | null): {
     completedTools: completed,
     iterations,
     streamContent: p.stream_content ?? '',
+    iteration: typeof p.iteration === 'number' ? p.iteration : 0,
   }
 }

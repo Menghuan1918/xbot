@@ -100,7 +100,7 @@ export function useProgressStream({
         reasoningContent: '',
         activeTools: live.activeTools,
         completedTools: live.completedTools,
-        iteration: 0,
+        iteration: live.iteration,
         iterationHistory: live.iterations,
         streaming: true,
       })

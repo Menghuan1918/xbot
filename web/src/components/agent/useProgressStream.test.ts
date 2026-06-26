@@ -162,7 +162,11 @@ describe('useProgressStream event dispatch', () => {
           stream_content: 'resumed stream',
           active_tools: [{ name: 'Shell', status: 'running' }],
           completed_tools: [{ name: 'Read', status: 'done', summary: 'ok' }],
-          iteration_history: [{ iteration: 1, tools: [{ name: 'Read', status: 'done' }] }],
+          // active_progress iteration_history uses the slim histIterSnapshot
+          // shape (completed_tools, not tools) — verify the fallback works.
+          iteration_history: [
+            { iteration: 1, completed_tools: [{ name: 'Grep', status: 'done' }] },
+          ],
         },
       }),
     )
@@ -174,7 +178,11 @@ describe('useProgressStream event dispatch', () => {
     expect(result.current.liveMessage?.content).toBe('resumed stream')
     expect(result.current.progress.activeTools).toHaveLength(1)
     expect(result.current.progress.completedTools).toHaveLength(1)
+    expect(result.current.progress.iteration).toBe(3)
     expect(result.current.progress.iterationHistory).toHaveLength(1)
+    // normalizeIteration fell back to completed_tools:
+    expect(result.current.progress.iterationHistory[0].tools).toHaveLength(1)
+    expect(result.current.progress.iterationHistory[0].tools[0].name).toBe('Grep')
   })
 
   it('does not hydrate when initialProgress phase is done', () => {

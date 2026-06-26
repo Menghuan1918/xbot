@@ -103,6 +103,12 @@ describe('normalizeIteration', () => {
   it('returns null for non-object', () => {
     expect(normalizeIteration(null)).toBeNull()
   })
+  it('falls back to completed_tools when tools is absent (histIterSnapshot shape)', () => {
+    const out = normalizeIteration({ iteration: 2, completed_tools: [{ name: 'Read', status: 'done' }] })
+    expect(out).not.toBeNull()
+    expect(out!.tools).toHaveLength(1)
+    expect(out!.tools[0].name).toBe('Read')
+  })
 })
 
 describe('defaultOpenForLevel', () => {
