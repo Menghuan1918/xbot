@@ -55,6 +55,12 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
   const hostRef = useRef<HTMLDivElement>(null)
   const apiRef = useRef<DockviewApi | null>(null)
   const seededRef = useRef(false)
+  // The dockview lifecycle only needs the stable imperative methods (bindApi,
+  // openTab); both are useCallback-stable in useTabManager. Depending on the
+  // whole `tabManager` object would re-run this effect on every tabs/state
+  // change (the object identity changes each render) and tear down/recreate the
+  // dockview instance → infinite loop. Depend on the two stable methods instead.
+  const { bindApi, openTab } = tabManager
 
   useEffect(() => {
     const host = hostRef.current
@@ -74,12 +80,12 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
     }
     const api: DockviewApi = (dockview as unknown as { api: DockviewApi }).api
     apiRef.current = api
-    tabManager.bindApi(api)
+    bindApi(api)
 
     if (!seededRef.current) {
       seededRef.current = true
       // Seed the always-present Agent tab (not closable).
-      tabManager.openTab({
+      openTab({
         type: 'agent',
         title: 'Agent',
         icon: 'bot',
@@ -89,13 +95,13 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
     }
 
     return () => {
-      tabManager.bindApi(null)
+      bindApi(null)
       apiRef.current = null
       try { dockview.dispose() } catch { /* ignore */ }
     }
-    // tabManager is stable across renders (useMemo'd); onReady is fire-once.
+    // bindApi/openTab are stable (useCallback) so the dockview mounts once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabManager])
+  }, [bindApi, openTab])
 
   return <div ref={hostRef} className="h-full w-full" />
 }
