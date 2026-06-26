@@ -11,6 +11,15 @@ export type TabType = 'agent' | 'file' | 'terminal'
 export type SessionStatus = 'running' | 'waiting_input' | 'idle' | 'error'
 export type SessionCategory = 'all' | 'channel' | 'time' | 'status'
 
+/**
+ * How Agent intermediate steps (tool calls / reasoning) are shown.
+ * Spec 7 §3.4 — persisted to localStorage under COLLAPSE_LEVEL_STORAGE_KEY.
+ */
+export type CollapseLevel = 'all' | 'minimal' | 'none'
+
+/** localStorage keys for cross-spec UI preferences. */
+export const COLLAPSE_LEVEL_STORAGE_KEY = 'xbot-collapse-level'
+
 export interface Tab {
   id: string
   type: TabType
