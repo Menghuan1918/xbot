@@ -11,7 +11,9 @@ import zhCN from './zh-CN'
 import en from './en'
 import type { Locale } from '@/types/shared'
 
-export const LOCALE_STORAGE_KEY = 'xbot-language'
+export const LOCALE_STORAGE_KEY = 'xbot-locale'
+/** Legacy key used before the Spec 7 rename; migrated on read for continuity. */
+const LEGACY_LOCALE_STORAGE_KEY = 'xbot-language'
 export const DEFAULT_LOCALE: Locale = 'zh-CN'
 
 export const resources = {
@@ -25,6 +27,12 @@ function detectInitialLocale(): Locale {
   try {
     const saved = localStorage.getItem(LOCALE_STORAGE_KEY)
     if (saved === 'zh-CN' || saved === 'en') return saved
+    // Migrate the legacy 'xbot-language' key once, then persist the new key.
+    const legacy = localStorage.getItem(LEGACY_LOCALE_STORAGE_KEY)
+    if (legacy === 'zh-CN' || legacy === 'en') {
+      try { localStorage.setItem(LOCALE_STORAGE_KEY, legacy) } catch { /* ignore */ }
+      return legacy
+    }
   } catch { /* ignore */ }
   try {
     const nav = navigator.language.toLowerCase()

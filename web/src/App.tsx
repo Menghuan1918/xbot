@@ -19,6 +19,7 @@ import {
   PaletteIcon,
   LanguagesIcon,
   BotIcon,
+  SettingsIcon,
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -40,12 +41,15 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { useTheme } from '@/hooks/useTheme'
 import { useI18n } from '@/providers/i18n'
 import type { Locale, Theme } from '@/types/shared'
+import { SettingsDialog } from '@/components/settings/SettingsDialog'
+import { useState } from 'react'
 
 const ACCENT_PRESETS = ['#3388BB', '#22AA88', '#BB3388', '#AA8822', '#8866CC']
 
 export default function App() {
   const { theme, setTheme, accentColor, setAccentColor } = useTheme()
   const { t, locale, setLocale } = useI18n()
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const onToggleTheme = (checked: boolean) => {
     const next: Theme = checked ? 'dark' : 'light'
@@ -74,7 +78,22 @@ export default function App() {
               <BotIcon className="size-6 text-primary" />
               <h1 className="text-lg font-semibold">{t('designSystem.title')}</h1>
             </div>
-            <Badge variant="secondary">{import.meta.env.MODE}</Badge>
+            <div className="flex items-center gap-2">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label={t('settings.title')}
+                    onClick={() => setSettingsOpen(true)}
+                  >
+                    <SettingsIcon className="size-5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t('settings.title')}</TooltipContent>
+              </Tooltip>
+              <Badge variant="secondary">{import.meta.env.MODE}</Badge>
+            </div>
           </header>
 
           <Separator />
@@ -165,6 +184,8 @@ export default function App() {
 
         <Toaster />
       </div>
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </TooltipProvider>
   )
 }
