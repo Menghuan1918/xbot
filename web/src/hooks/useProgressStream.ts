@@ -24,6 +24,7 @@ import { useSyncExternalStore } from 'react'
 
 import { ProgressStore } from '@/components/agent/progressStore'
 import {
+  historyProgressToLive,
   normalizeIteration,
   normalizeTool,
   parseIterations,
@@ -36,6 +37,7 @@ import {
   type LiveProgress,
   type ToolProgress,
 } from '@/types/agent'
+import type { HistProgress } from '@/components/agent/api'
 import type { WSMessage } from '@/types/shared'
 
 interface UseProgressStreamOptions {
@@ -43,6 +45,13 @@ interface UseProgressStreamOptions {
   chatID: string | null
   /** Called with the finalized assistant text when a `text` event arrives. */
   onAssistantComplete?: (finalText: string, iterations: IterationSnapshot[]) => void
+  /**
+   * Optional live-progress snapshot from history (active_progress). When the
+   * tracked chat is busy (phase != done) this hydrates the store so a page
+   * refresh resumes the progress panel instead of showing an empty stream.
+   * Spec 4 §3.8.
+   */
+  initialProgress?: HistProgress | null
 }
 
 export interface UseProgressStreamResult {
@@ -56,6 +65,7 @@ export interface UseProgressStreamResult {
 export function useProgressStream({
   chatID,
   onAssistantComplete,
+  initialProgress,
 }: UseProgressStreamOptions): UseProgressStreamResult {
   const ws = useWSConnection()
   const storeRef = useRef<ProgressStore | null>(null)
@@ -78,9 +88,24 @@ export function useProgressStream({
   const [liveId] = useState(() => `live-${Math.random().toString(36).slice(2, 9)}`)
 
   useEffect(() => {
-    // Reset progress whenever the tracked chat changes.
+    // Reset progress whenever the tracked chat changes, then hydrate from the
+    // history active_progress snapshot if the session is still busy (phase !=
+    // done). This resumes the progress panel after a page refresh (Spec §3.8).
     store.reset()
-  }, [store, chatID])
+    const snap = initialProgress
+    if (snap && snap.phase && snap.phase !== 'done') {
+      const live = historyProgressToLive(snap)
+      store.replace({
+        streamContent: live.streamContent,
+        reasoningContent: '',
+        activeTools: live.activeTools,
+        completedTools: live.completedTools,
+        iteration: 0,
+        iterationHistory: live.iterations,
+        streaming: true,
+      })
+    }
+  }, [store, chatID, initialProgress])
 
   useEffect(() => {
     // Reset on (un)mount.
@@ -92,9 +117,12 @@ export function useProgressStream({
 
   useEffect(() => {
     const offMessage = ws.onMessage((msg: WSMessage) => {
-      if (msg.chat_id && chatIDRef.current && msg.chat_id !== chatIDRef.current) {
-        // Some events (session) broadcast to all clients and don't carry a
-        // matching chat_id; only filter when chat_id is present and differs.
+      // Filter by chatID when the event carries one. `text`/`stream_content`/
+      // `progress_structured` carry a top-level chat_id, but `session` events
+      // broadcast to all clients and only embed it in msg.session.chat_id — so
+      // check both to avoid another chat's idle/busy finalizing this stream.
+      const eventChatID = msg.chat_id ?? msg.session?.chat_id
+      if (chatIDRef.current && eventChatID && eventChatID !== chatIDRef.current) {
         return
       }
       handleProgressMessage(msg, store, completeRef)

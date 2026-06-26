@@ -5,6 +5,7 @@
  * Shared by useChatMessages (history hydration) and useProgressStream (live
  * events) so the two paths never diverge on how a tool/iteration is parsed.
  */
+import type { HistProgress } from '@/components/agent/api'
 import type { IterationSnapshot, IterationTool, ToolProgress } from '@/types/agent'
 
 /** Coerce a raw iteration-history entry (from `detail` JSON) into IterationSnapshot. */
@@ -57,5 +58,31 @@ export function parseIterations(json: string | undefined | null): IterationSnaps
     return parsed.map(normalizeIteration).filter(Boolean) as IterationSnapshot[]
   } catch {
     return []
+  }
+}
+
+/**
+ * Normalize a history `active_progress` snapshot into live tool lists +
+ * iterations + stream content, so a busy session resumed after a page refresh
+ * can hydrate the ProgressStore (Spec 4 §3.8: "if processing=true → show the
+ * progress panel").
+ */
+export function historyProgressToLive(p: HistProgress | null): {
+  activeTools: ToolProgress[]
+  completedTools: ToolProgress[]
+  iterations: IterationSnapshot[]
+  streamContent: string
+} {
+  if (!p) return { activeTools: [], completedTools: [], iterations: [], streamContent: '' }
+  const active = (p.active_tools ?? []).map(normalizeTool).filter(Boolean) as ToolProgress[]
+  const completed = (p.completed_tools ?? []).map(normalizeTool).filter(Boolean) as ToolProgress[]
+  const iterations = (p.iteration_history ?? [])
+    .map(normalizeIteration)
+    .filter(Boolean) as IterationSnapshot[]
+  return {
+    activeTools: active,
+    completedTools: completed,
+    iterations,
+    streamContent: p.stream_content ?? '',
   }
 }

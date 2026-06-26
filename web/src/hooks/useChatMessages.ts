@@ -22,9 +22,9 @@ import {
   type HistProgress,
   type UploadResponse,
 } from '@/components/agent/api'
-import { normalizeIteration, normalizeTool, parseIterations } from '@/components/agent/normalize'
+import { parseIterations } from '@/components/agent/normalize'
 import { useWSConnection } from '@/hooks/useWSConnection'
-import type { ChatMessage, IterationSnapshot, ToolProgress } from '@/types/agent'
+import type { ChatMessage, IterationSnapshot } from '@/types/agent'
 import type { WSMessage } from '@/types/shared'
 
 interface UseChatMessagesOptions {
@@ -176,27 +176,6 @@ export function useChatMessages({
   }
 }
 
-/** Normalize a history active_progress snapshot into live tool lists + iterations. */
-export function historyProgressToLive(p: HistProgress | null): {
-  activeTools: ToolProgress[]
-  completedTools: ToolProgress[]
-  iterations: IterationSnapshot[]
-  streamContent: string
-} {
-  if (!p) return { activeTools: [], completedTools: [], iterations: [], streamContent: '' }
-  const active = (p.active_tools ?? [])
-    .map(normalizeTool)
-    .filter(Boolean) as ToolProgress[]
-  const completed = (p.completed_tools ?? [])
-    .map(normalizeTool)
-    .filter(Boolean) as ToolProgress[]
-  const iterations = (p.iteration_history ?? [])
-    .map(normalizeIteration)
-    .filter(Boolean) as IterationSnapshot[]
-  return {
-    activeTools: active,
-    completedTools: completed,
-    iterations,
-    streamContent: p.stream_content ?? '',
-  }
-}
+// historyProgressToLive has moved to @/components/agent/normalize so useChatMessages
+// does not duplicate the normalization logic. Re-export for any existing callers.
+export { historyProgressToLive } from '@/components/agent/normalize'

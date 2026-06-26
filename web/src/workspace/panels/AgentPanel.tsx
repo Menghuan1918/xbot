@@ -52,6 +52,7 @@ export function AgentPanel({ params }: PanelProps) {
 
   const { progress, liveMessage, isStreaming } = useProgressStream({
     chatID,
+    initialProgress: chat.initialProgress,
     onAssistantComplete: (finalText, iterations) => {
       chat.appendAssistant(finalText, iterations)
     },
@@ -59,13 +60,8 @@ export function AgentPanel({ params }: PanelProps) {
 
   const askUser = useAskUser({ chatID })
 
-  // Busy state: actively streaming, or history resumed with pending stream content.
-  const resumedBusy =
-    !isStreaming &&
-    Boolean(chat.initialProgress?.stream_content) &&
-    Boolean(chat.initialProgress?.phase) &&
-    chat.initialProgress!.phase !== 'done'
-  const busy = isStreaming || resumedBusy
+  // Busy while streaming (live or hydrated from a resumed session).
+  const busy = isStreaming
 
   return (
     <div className="flex h-full flex-col">
