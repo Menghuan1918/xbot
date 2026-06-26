@@ -59,13 +59,13 @@
   --muted: var(--bg-secondary);
   --muted-foreground: var(--text-secondary);
 
-  --accent: var(--bg-tertiary);
-  --accent-foreground: var(--text-primary);
+  /* `--accent` / `--accent-foreground` inherit the Spec theme color defined
+     in the palette block above (== brand #3388BB); do not shadow them here. */
 
   --destructive: var(--status-error);
   --destructive-foreground: #ffffff;
 
-  --border: var(--border);
+  /* `--border` inherits the Spec palette value; `--input` references it. */
   --input: var(--border);
   --ring: var(--accent);
 
@@ -125,13 +125,13 @@
   --muted: var(--bg-tertiary);
   --muted-foreground: var(--text-secondary);
 
-  --accent: var(--bg-tertiary);
-  --accent-foreground: var(--text-primary);
+  /* `--accent` / `--accent-foreground` inherit the Spec theme color from the
+     .dark palette block above; do not shadow them here. */
 
   --destructive: var(--status-error);
   --destructive-foreground: #ffffff;
 
-  --border: var(--border);
+  /* `--border` inherits the Spec dark palette value; `--input` references it. */
   --input: var(--border);
   --ring: var(--accent);
 
