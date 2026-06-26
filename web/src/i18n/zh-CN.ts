@@ -46,6 +46,17 @@ const zhCN = {
     splitRight: '右侧分屏',
     closeTab: '关闭标签',
   },
+  file: {
+    editMode: '编辑模式',
+    previewMode: '预览模式',
+    zoom: '点击放大',
+    imageLoadFailed: '图片加载失败',
+    openExampleFile: '打开示例文件',
+    exampleMd: '示例 Markdown',
+    exampleTs: '示例 TypeScript',
+    exampleGo: '示例 Go',
+    exampleImage: '示例图片',
+  },
   settings: {
     appearance: '外观',
     theme: '主题',

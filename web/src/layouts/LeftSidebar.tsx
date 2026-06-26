@@ -5,6 +5,10 @@
  * Width is controlled by AppShell (resizable + collapsible); this component
  * just fills its allotted space with a header + placeholder body so the
  * layout is exercisable now.
+ *
+ * `bodyContent` (optional) replaces the placeholder body — Spec 5 uses it to
+ * drop an "open example file" entry into the files view before Spec 6 ships
+ * the file browser. `children` stays the header actions slot.
  */
 import type { ReactNode } from 'react'
 import { useI18n } from '@/providers/i18n'
@@ -14,9 +18,11 @@ interface LeftSidebarProps {
   view: SidebarView
   /** Optional header actions rendered on the right of the title bar. */
   children?: ReactNode
+  /** Optional body content; falls back to the per-view placeholder. */
+  bodyContent?: ReactNode
 }
 
-export function LeftSidebar({ view, children }: LeftSidebarProps) {
+export function LeftSidebar({ view, children, bodyContent }: LeftSidebarProps) {
   const { t } = useI18n()
   const title = titleFor(view, t)
   return (
@@ -25,8 +31,8 @@ export function LeftSidebar({ view, children }: LeftSidebarProps) {
         <span>{title}</span>
         {children}
       </header>
-      <div className="flex flex-1 items-center justify-center text-sm text-text-muted">
-        <Placeholder view={view} />
+      <div className="flex flex-1 flex-col overflow-auto text-sm text-text-muted">
+        {bodyContent ?? <Placeholder view={view} />}
       </div>
     </aside>
   )
@@ -36,14 +42,22 @@ function Placeholder({ view }: { view: SidebarView }) {
   const { t } = useI18n()
   switch (view) {
     case 'sessions':
-      return <span>{`${t('sidebar.sessions')} — Spec 3`}</span>
+      return <BodyCentered>{`${t('sidebar.sessions')} — Spec 3`}</BodyCentered>
     case 'search':
-      return <span>{`${t('common.search')} — Spec 6`}</span>
+      return <BodyCentered>{`${t('common.search')} — Spec 6`}</BodyCentered>
     case 'files':
-      return <span>{`${t('sidebar.files')} — Spec 6`}</span>
+      return <BodyCentered>{`${t('sidebar.files')} — Spec 6`}</BodyCentered>
     case 'settings':
       return null
   }
+}
+
+function BodyCentered({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex flex-1 items-center justify-center text-sm text-text-muted">
+      <span>{children}</span>
+    </div>
+  )
 }
 
 function titleFor(view: SidebarView, t: (k: string) => string): string {

@@ -49,6 +49,17 @@ const en: Translations = {
     splitRight: 'Split Right',
     closeTab: 'Close Tab',
   },
+  file: {
+    editMode: 'Edit mode',
+    previewMode: 'Preview mode',
+    zoom: 'Click to zoom',
+    imageLoadFailed: 'Image failed to load',
+    openExampleFile: 'Open example file',
+    exampleMd: 'Example Markdown',
+    exampleTs: 'Example TypeScript',
+    exampleGo: 'Example Go',
+    exampleImage: 'Example image',
+  },
   settings: {
     appearance: 'Appearance',
     theme: 'Theme',
