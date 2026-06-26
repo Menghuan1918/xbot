@@ -53,7 +53,6 @@ const en: Translations = {
     title: 'Settings',
     // navigation
     nav: {
-      general: 'General',
       appearance: 'Appearance',
       collapse: 'Collapse',
       language: 'Language',
@@ -65,9 +64,7 @@ const en: Translations = {
     light: 'Light',
     accentColor: 'Accent Color',
     accentCustom: 'Custom',
-    accentCustomHint: 'Enter a hex color, e.g. #3388BB',
     accentInvalid: 'Invalid color',
-    preview: 'Preview',
     // collapse
     collapseProcess: 'Collapse intermediate steps',
     collapseLevel: 'Collapse level',
@@ -81,8 +78,6 @@ const en: Translations = {
     // language
     language: 'Language',
     languageDesc: 'Interface display language',
-    chinese: '中文',
-    english: 'English',
     // llm
     model: 'Model',
     modelDesc: 'Select the active LLM model',

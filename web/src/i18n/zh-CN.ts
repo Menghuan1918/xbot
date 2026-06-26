@@ -50,7 +50,6 @@ const zhCN = {
     title: '设置',
     // navigation
     nav: {
-      general: '通用',
       appearance: '外观',
       collapse: '折叠',
       language: '语言',
@@ -62,9 +61,7 @@ const zhCN = {
     light: '浅色',
     accentColor: '主题色',
     accentCustom: '自定义',
-    accentCustomHint: '输入十六进制色值，如 #3388BB',
     accentInvalid: '无效的颜色值',
-    preview: '预览',
     // collapse
     collapseProcess: '折叠中间过程',
     collapseLevel: '折叠程度',
@@ -78,8 +75,6 @@ const zhCN = {
     // language
     language: '语言',
     languageDesc: '界面显示语言',
-    chinese: '中文',
-    english: 'English',
     // llm
     model: '模型',
     modelDesc: '选择当前使用的 LLM 模型',

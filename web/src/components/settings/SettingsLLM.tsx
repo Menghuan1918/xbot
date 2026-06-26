@@ -73,6 +73,9 @@ function NumberField({
 export function SettingsLLM({ settings }: SettingsLLMProps) {
   const { t } = useI18n()
   const { data, loading, error, saving } = settings
+  // Disable editing while a save is in flight or when the initial load failed
+  // (e.g. disconnected) so users can't mutate from an empty/stale state.
+  const disabled = saving || !!error
 
   const [thinking, setThinking] = useState(data.thinkingMode)
   useEffect(() => setThinking(data.thinkingMode), [data.thinkingMode])
@@ -97,7 +100,7 @@ export function SettingsLLM({ settings }: SettingsLLMProps) {
         {loading ? (
           <Skeleton className="h-9 w-full max-w-[320px]" />
         ) : (
-          <Select value={data.model} onValueChange={onModelChange} disabled={saving}>
+          <Select value={data.model} onValueChange={onModelChange} disabled={disabled}>
             <SelectTrigger className="w-full max-w-[320px]">
               <SelectValue placeholder={t('settings.model')} />
             </SelectTrigger>
@@ -120,7 +123,7 @@ export function SettingsLLM({ settings }: SettingsLLMProps) {
         {loading ? (
           <Skeleton className="h-9 w-[200px]" />
         ) : (
-          <NumberField value={data.maxContext} disabled={saving} onCommit={settings.setMaxContext} />
+          <NumberField value={data.maxContext} disabled={disabled} onCommit={settings.setMaxContext} />
         )}
       </SettingsSection>
 
@@ -134,7 +137,7 @@ export function SettingsLLM({ settings }: SettingsLLMProps) {
         ) : (
           <NumberField
             value={data.maxOutputTokens}
-            disabled={saving}
+            disabled={disabled}
             onCommit={settings.setMaxOutputTokens}
           />
         )}
@@ -153,7 +156,7 @@ export function SettingsLLM({ settings }: SettingsLLMProps) {
             spellCheck={false}
             autoComplete="off"
             placeholder={t('settings.thinkingModeDesc')}
-            disabled={saving}
+            disabled={disabled}
             onChange={(e) => setThinking(e.target.value)}
             onBlur={commitThinking}
             onKeyDown={(e) => {
