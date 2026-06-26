@@ -73,7 +73,6 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   '.sql': 'sql',
   '.md': 'markdown',
   '.markdown': 'markdown',
-  '.dockerfile': 'dockerfile',
 }
 
 export function languageOf(fileName: string): string {
