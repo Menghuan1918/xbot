@@ -108,6 +108,10 @@ export interface WSClientMessage {
   id?: string
   method?: string
   params?: unknown
+  /** ask_user_response payload: answers keyed by question index. */
+  answers?: Record<string, string>
+  /** ask_user_response: true to cancel the prompt. */
+  cancelled?: boolean
 }
 
 /** Progress event (mirrors Go protocol/events.go ProgressEvent). */
@@ -123,6 +127,15 @@ export interface ProgressEvent {
   thinking?: string
   stream_content?: string
   cwd?: string
+  // Extended fields present in the backend payload (events.go ActiveTools /
+  // CompletedTools / IterationHistory / ReasoningStreamContent / Questions /
+  // RequestID). Typed as unknown[] / unknown so consumers normalize them.
+  active_tools?: unknown[]
+  completed_tools?: unknown[]
+  iteration_history?: unknown[]
+  reasoning_stream_content?: string
+  questions?: unknown[]
+  request_id?: string
   [key: string]: unknown
 }
 

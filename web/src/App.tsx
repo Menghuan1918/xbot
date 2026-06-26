@@ -1,12 +1,12 @@
 /**
- * App — application root (Spec 3 wiring).
+ * App — application root.
  *
- * The design-system demo scaffold (Spec 1) is replaced by the real AppShell.
- * Providers (theme / i18n) wrap App in main.tsx; WSProvider and the global
- * tooltip provider live here so the shell and its session panel can use the
- * WebSocket connection and shadcn tooltips.
+ * Renders the three-column AppShell (ActivityBar + sidebars + Dockview workspace
+ * hosting the Agent panel). Theme/i18n providers wrap in main.tsx; the WS
+ * provider wraps the shell so all panels can reach the WebSocket connection.
  */
 import { TooltipProvider } from '@/components/ui/tooltip'
+import { Toaster } from '@/components/ui/sonner'
 import { WSProvider } from '@/providers/WSProvider'
 import { AppShell } from '@/layouts/AppShell'
 
@@ -16,6 +16,7 @@ export default function App() {
       <WSProvider>
         <AppShell />
       </WSProvider>
+      <Toaster />
     </TooltipProvider>
   )
 }
