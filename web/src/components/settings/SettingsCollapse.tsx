@@ -21,7 +21,7 @@ const LEVELS: { value: CollapseLevel; labelKey: string; descKey: string }[] = [
 
 export function SettingsCollapse() {
   const { t } = useI18n()
-  const { collapseLevel, setCollapseLevel } = useCollapseLevel()
+  const { level: collapseLevel, setLevel: setCollapseLevel } = useCollapseLevel()
 
   return (
     <div className="flex flex-col">
