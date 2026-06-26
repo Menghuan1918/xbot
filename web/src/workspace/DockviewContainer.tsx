@@ -4,7 +4,7 @@
  *
  * `dockview` (v7) ships only a framework-agnostic core — there is no
  * `<DockviewReact>`. So we:
- *   1. create a `DockviewComponent` on a host div in a layout effect,
+ *   1. create a `DockviewComponent` on a host div in a mount-once effect,
  *   2. register `createComponent`/`createTabComponent` factories that mount
  *      React (createRoot) on the dockview-provided `element`,
  *   3. hand the resulting `DockviewApi` up to the parent's `useTabManager`
@@ -15,8 +15,15 @@
  * calls `dispose()` on the renderer, which unmounts the React root. KISS: no
  * state syncing back into React — the tab manager derives its state from
  * dockview's panel events instead.
+ *
+ * Context bridging: dockview hands the renderer its own detached DOM element,
+ * so each `createRoot` is an isolated React tree that does NOT inherit the
+ * app's Context providers. We re-wrap every panel/tab in `ThemeContext` +
+ * `I18nContext` providers, reading the live values via a ref kept in sync
+ * from the outer tree, so panels see the current theme/locale without a
+ * second provider instance of their own.
  */
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type ReactNode, type RefObject } from 'react'
 import {
   DockviewComponent,
   themeVisualStudio,
@@ -34,6 +41,11 @@ import { AgentPanel } from '@/workspace/panels/AgentPanel'
 import { FilePanel } from '@/workspace/panels/FilePanel'
 import { TerminalPanel } from '@/workspace/panels/TerminalPanel'
 import { TabHeader } from '@/workspace/TabHeader'
+import { ThemeContext } from '@/providers/theme'
+import { I18nContext, type I18nContextValue } from '@/providers/i18n'
+import { useTheme } from '@/hooks/useTheme'
+import { useI18n } from '@/providers/i18n'
+import type { ThemeContextValue } from '@/types/theme'
 import type { PanelParams } from '@/types/tab'
 import type { TabManager } from '@/hooks/useTabManager'
 
@@ -51,10 +63,43 @@ const CONTENT_COMPONENTS = {
   terminal: TerminalPanel,
 } as const
 
+/** Live outer-tree context values handed to each isolated panel root. */
+interface ContextRefs {
+  theme: ThemeContextValue
+  i18n: I18nContextValue
+}
+
 export function DockviewContainer({ tabManager, onReady }: DockviewContainerProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const apiRef = useRef<DockviewApi | null>(null)
   const seededRef = useRef(false)
+  // Hold the latest tabManager so the mount-once effect reads fresh methods
+  // without re-running when the memoized tabManager identity changes on tab
+  // state updates (which would otherwise tear down + rebuild the dockview).
+  const tabManagerRef = useRef(tabManager)
+  tabManagerRef.current = tabManager
+
+  // Keep the live theme/i18n context values for the isolated panel roots.
+  const themeValue = useTheme()
+  const i18nValue = useI18n()
+  const ctxRef = useRef<ContextRefs>({ theme: themeValue, i18n: i18nValue })
+  ctxRef.current.theme = themeValue
+  ctxRef.current.i18n = i18nValue
+
+  // Panel content/tabs render in isolated React roots (dockview hands each a
+  // detached element), so they do NOT re-render when the outer tree's theme or
+  // locale changes. Force every live panel + tab renderer to re-read the
+  // (just-updated) ctx ref and re-render. MonacoEditor re-applies its theme in
+  // its own effect; i18n consumers pick up the new strings here too.
+  useEffect(() => {
+    const api = apiRef.current
+    if (!api) return
+    for (const panel of api.panels) {
+      // Re-running panel.update triggers ReactContentRenderer.update() and the
+      // tab header's update(); an empty params event keeps the logical params.
+      panel.update({ params: panel.params as Record<string, unknown> })
+    }
+  }, [themeValue, i18nValue])
 
   useEffect(() => {
     const host = hostRef.current
@@ -62,8 +107,8 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
 
     const options: DockviewComponentOptions = {
       theme: themeVisualStudio,
-      createComponent: (opts) => new ReactContentRenderer(opts.name),
-      createTabComponent: () => new ReactTabRenderer(),
+      createComponent: (opts) => new ReactContentRenderer(opts.name, ctxRef),
+      createTabComponent: () => new ReactTabRenderer(ctxRef),
     }
 
     let dockview: DockviewComponent
@@ -74,12 +119,13 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
     }
     const api: DockviewApi = (dockview as unknown as { api: DockviewApi }).api
     apiRef.current = api
-    tabManager.bindApi(api)
+    const mgr = tabManagerRef.current
+    mgr.bindApi(api)
 
     if (!seededRef.current) {
       seededRef.current = true
       // Seed the always-present Agent tab (not closable).
-      tabManager.openTab({
+      mgr.openTab({
         type: 'agent',
         title: 'Agent',
         icon: 'bot',
@@ -89,18 +135,28 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
     }
 
     return () => {
-      tabManager.bindApi(null)
+      tabManagerRef.current.bindApi(null)
       apiRef.current = null
       try { dockview.dispose() } catch { /* ignore */ }
     }
-    // tabManager is stable across renders (useMemo'd); onReady is fire-once.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabManager])
+    // Mount-once: dockview owns the panels; rebuilding it on every tabManager
+    // identity change would dispose live panels. onReady is fire-once.
+  }, [])
 
   return <div ref={hostRef} className="h-full w-full" />
 }
 
 /* ── React ↔ dockview renderers ── */
+
+/** Wrap a node in the app's theme/i18n providers for an isolated React root. */
+function withProviders(node: ReactNode, ctxRef: RefObject<ContextRefs>): ReactNode {
+  const ctx = ctxRef.current
+  return (
+    <ThemeContext.Provider value={ctx.theme}>
+      <I18nContext.Provider value={ctx.i18n}>{node}</I18nContext.Provider>
+    </ThemeContext.Provider>
+  )
+}
 
 /**
  * Mounts a content panel React component on the dockview element.
@@ -111,9 +167,11 @@ class ReactContentRenderer implements IContentRenderer {
   private root: Root | null = null
   private params: GroupPanelPartInitParameters | null = null
   private readonly name: string
+  private readonly ctxRef: RefObject<ContextRefs>
 
-  constructor(name: string) {
+  constructor(name: string, ctxRef: RefObject<ContextRefs>) {
     this.name = name
+    this.ctxRef = ctxRef
     this.element = document.createElement('div')
     this.element.className = 'h-full w-full overflow-hidden'
   }
@@ -134,11 +192,14 @@ class ReactContentRenderer implements IContentRenderer {
     const Component = CONTENT_COMPONENTS[this.name as keyof typeof CONTENT_COMPONENTS]
     if (!Component) return
     this.root.render(
-      <Component
-        params={this.params.params as PanelParams}
-        api={this.params.api}
-        containerApi={this.params.containerApi}
-      />,
+      withProviders(
+        <Component
+          params={this.params.params as PanelParams}
+          api={this.params.api}
+          containerApi={this.params.containerApi}
+        />,
+        this.ctxRef,
+      ),
     )
   }
 
@@ -159,8 +220,10 @@ class ReactTabRenderer implements ITabRenderer {
   private root: Root | null = null
   private params: TabPartInitParameters | null = null
   private activeSub: DockviewIDisposable | null = null
+  private readonly ctxRef: RefObject<ContextRefs>
 
-  constructor() {
+  constructor(ctxRef: RefObject<ContextRefs>) {
+    this.ctxRef = ctxRef
     this.element = document.createElement('div')
     this.element.className = 'relative flex h-full min-w-0 items-center'
   }
@@ -194,12 +257,15 @@ class ReactTabRenderer implements ITabRenderer {
     if (!this.root || !this.params) return
     const panelParams = this.params.params as PanelParams
     this.root.render(
-      <TabHeader
-        params={panelParams}
-        api={this.params.api}
-        isActive={isActive}
-        onActivate={() => this.params?.api.setActive()}
-      />,
+      withProviders(
+        <TabHeader
+          params={panelParams}
+          api={this.params.api}
+          isActive={isActive}
+          onActivate={() => this.params?.api.setActive()}
+        />,
+        this.ctxRef,
+      ),
     )
   }
 

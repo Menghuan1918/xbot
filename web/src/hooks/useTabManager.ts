@@ -17,7 +17,7 @@
  * parallel list and keeping it in sync would duplicate that source of truth
  * and race on drag/drop. Deriving avoids the duplication (KISS).
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DockviewApi, IDockviewPanel } from 'dockview'
 import type { Tab } from '@/types/shared'
 import type { PanelParams } from '@/types/tab'
@@ -184,15 +184,18 @@ export function useTabManager(): TabManager {
     }
   }, [])
 
-  return {
-    tabs,
-    activeTabId,
-    openTab,
-    closeTab,
-    setActiveTab,
-    splitRight,
-    bindApi,
-  }
+  return useMemo<TabManager>(
+    () => ({
+      tabs,
+      activeTabId,
+      openTab,
+      closeTab,
+      setActiveTab,
+      splitRight,
+      bindApi,
+    }),
+    [tabs, activeTabId, openTab, closeTab, setActiveTab, splitRight, bindApi],
+  )
 }
 
 function logicalKey(input: Pick<Tab, 'type' | 'data'>): string {
