@@ -1,0 +1,73 @@
+<h2>方案 C 分解：基础 + 功能切片</h2>
+<p class="subtitle">7 个子 spec 的依赖关系和并行执行计划</p>
+
+<!-- Dependency Graph -->
+<div style="margin-top:20px;padding:20px;border-radius:12px;background:var(--bg-secondary);border:1px solid var(--border)">
+<h3 style="font-size:14px;margin:0 0 16px">📋 依赖关系图</h3>
+
+<!-- Phase 1 -->
+<div style="margin-bottom:24px">
+<div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:8px">Phase 1 — 基础（阻塞，必须先完成）</div>
+<div style="display:flex;gap:12px">
+<div style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--accent);background:rgba(51,136,187,0.08)">
+<strong style="font-size:13px">Spec 1: 设计系统基础</strong><br>
+<span style="font-size:11px;color:var(--text-secondary)">shadcn 初始化 · 主题引擎(深/浅/主题色#3388BB) · i18n 框架 · Lucide 图标 · Framer Motion · 全局 CSS 变量 · shadcn 基础组件安装</span>
+</div>
+<div style="flex:1;padding:12px;border-radius:8px;border:2px solid var(--accent);background:rgba(51,136,187,0.08)">
+<strong style="font-size:13px">Spec 2: 布局壳 + Dockview</strong><br>
+<span style="font-size:11px;color:var(--text-secondary)">三栏布局(左会话栏/中工作区/右侧拉栏) · Dockview 集成 · Tab 管理(Agent/文件/终端) · 分屏逻辑(右侧弹出) · WS 连接层重构</span>
+</div>
+</div>
+<div style="text-align:center;font-size:20px;color:var(--text-secondary);margin:4px 0">⬇</div>
+</div>
+
+<!-- Phase 2 -->
+<div>
+<div style="font-size:12px;color:var(--accent);font-weight:700;margin-bottom:8px">Phase 2 — 功能切片（5 个并行执行）</div>
+<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px">
+<div style="padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-primary)">
+<strong style="font-size:12px">Spec 3</strong><br>
+<span style="font-size:10px;color:var(--text-secondary)">会话列表<br>四分类/标星<br>新建+切路径</span>
+</div>
+<div style="padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-primary)">
+<strong style="font-size:12px">Spec 4</strong><br>
+<span style="font-size:10px;color:var(--text-secondary)">Agent 工作区<br>会话渲染<br>折叠/流式</span>
+</div>
+<div style="padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-primary)">
+<strong style="font-size:12px">Spec 5</strong><br>
+<span style="font-size:10px;color:var(--text-secondary)">文件 Tab<br>Monaco 编辑器<br>MD预览/图片</span>
+</div>
+<div style="padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-primary)">
+<strong style="font-size:12px">Spec 6</strong><br>
+<span style="font-size:10px;color:var(--text-secondary)">右侧边栏<br>文件浏览器/搜索<br>Diff/会话配置</span>
+</div>
+<div style="padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--bg-primary)">
+<strong style="font-size:12px">Spec 7</strong><br>
+<span style="font-size:10px;color:var(--text-secondary)">设置面板<br>主题/外观<br>折叠偏好</span>
+</div>
+</div>
+</div>
+</div>
+
+<!-- Shared Contracts -->
+<div style="margin-top:16px;padding:16px;border-radius:12px;background:var(--bg-secondary);border:1px solid var(--border)">
+<h3 style="font-size:14px;margin:0 0 12px">🔗 共享契约（Spec 1&2 定义，3-7 使用）</h3>
+<div style="font-size:12px;color:var(--text-secondary);line-height:1.8">
+<code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">ThemeProvider</code> — 深色/浅色/主题色，CSS 变量驱动<br>
+<code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">I18nProvider</code> — zh-CN / en 翻译键值<br>
+<code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">useWSConnection()</code> — WS 连接、消息收发、重连<br>
+<code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">useTabManager()</code> — Tab 增删/切换/分屏<br>
+<code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">useSessionStore()</code> — 会话列表/标星/分类<br>
+<code style="background:var(--bg-primary);padding:2px 6px;border-radius:4px">UI 组件库</code> — shadcn Button/Dialog/Input/Tooltip 等
+</div>
+</div>
+
+<!-- Execution Plan -->
+<div style="margin-top:16px;padding:16px;border-radius:12px;background:var(--bg-secondary);border:1px solid var(--border)">
+<h3 style="font-size:14px;margin:0 0 12px">⚡ 执行计划</h3>
+<div style="font-size:13px;color:var(--text-secondary);line-height:1.8">
+<strong>Step 1:</strong> Spec 1 + Spec 2 顺序执行（Spec 2 依赖 Spec 1 的组件库）<br>
+<strong>Step 2:</strong> Spec 3-7 并行执行（各自独立 worktree，互不冲突）<br>
+<strong>Step 3:</strong> 合并各分支 → 集成验收 → 主题/布局一致性检查
+</div>
+</div>

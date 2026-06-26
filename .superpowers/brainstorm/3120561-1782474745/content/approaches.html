@@ -1,0 +1,56 @@
+<h2>实现方案对比</h2>
+<p class="subtitle">三种架构分解策略 — 点击选择你倾向的方案</p>
+
+<div class="options" style="display:grid;gap:16px;margin-top:24px">
+
+<!-- Approach A -->
+<div class="option" data-choice="a" onclick="toggleSelect(this)" style="border:2px solid var(--border);border-radius:12px;padding:20px;cursor:pointer">
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+<div class="letter" style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">A</div>
+<h3 style="margin:0;font-size:16px">水平切分（按功能）</h3>
+</div>
+<p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px">每个子 spec 是一个完整的垂直功能（会话列表、Agent输出、文件Tab等），完成即可独立使用。</p>
+<div style="font-size:12px;color:var(--text-secondary)">
+<strong>顺序：</strong> 基础设计系统 → 布局壳 → [会话管理 | Agent工作区 | 文件Tab | 右侧边栏 | 设置面板] 并行<br>
+<strong>优点：</strong> 每个交付物是可用功能<br>
+<strong>缺点：</strong> 需先完成共享布局/主题基础
+</div>
+</div>
+
+<!-- Approach B -->
+<div class="option" data-choice="b" onclick="toggleSelect(this)" style="border:2px solid var(--border);border-radius:12px;padding:20px;cursor:pointer">
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+<div class="letter" style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">B</div>
+<h3 style="margin:0;font-size:16px">垂直切分（按层）</h3>
+</div>
+<p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px">先做所有 UI 外壳，再接入数据层，最后加交互逻辑。</p>
+<div style="font-size:12px;color:var(--text-secondary)">
+<strong>顺序：</strong> 所有UI壳 → 所有数据集成 → 所有交互逻辑<br>
+<strong>优点：</strong> 关注点分离清晰<br>
+<strong>缺点：</strong> 全部层完成后才有可用功能，反馈周期长
+</div>
+</div>
+
+<!-- Approach C -->
+<div class="option" data-choice="c" onclick="toggleSelect(this)" style="border:2px solid var(--accent);border-radius:12px;padding:20px;cursor:pointer;background:var(--accent-bg,rgba(51,136,187,0.08))">
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+<div class="letter" style="width:32px;height:32px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;flex-shrink:0">C</div>
+<h3 style="margin:0;font-size:16px">混合切分（基础 + 功能切片）⭐ 推荐</h3>
+</div>
+<p style="font-size:13px;color:var(--text-secondary);margin:0 0 12px">先构建基础（设计系统 + 布局壳），再以功能切片并行开发。</p>
+<div style="font-size:12px;color:var(--text-secondary)">
+<strong>顺序：</strong> 基础+布局 → [会话管理 ∥ Agent工作区 ∥ 文件Tab ∥ 右侧边栏 ∥ 设置面板] 并行<br>
+<strong>优点：</strong> 坚实基础使后续并行开发更一致；每个切片可独立验证<br>
+<strong>缺点：</strong> 基础阶段是阻塞性的，但耗时短
+</div>
+</div>
+
+</div>
+
+<div style="margin-top:24px;padding:16px;border-radius:8px;background:var(--bg-secondary);font-size:13px">
+<strong>推荐方案 C 的理由：</strong><br>
+1. 基础设计系统（shadcn + 主题 + i18n）是所有组件的依赖，必须先完成<br>
+2. 布局壳（dockview 集成 + 三栏布局）是所有面板的容器，也需先完成<br>
+3. 这两个基础 spec 完成后，5 个功能切片可以并行开发，大幅缩短总工期<br>
+4. 每个切片有清晰的验收标准，适合用 *-dev skill 独立执行
+</div>
