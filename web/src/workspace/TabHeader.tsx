@@ -1,13 +1,12 @@
 /**
- * TabHeader — custom VSCode-style tab header (Spec 2 §3.3).
+ * TabHeader — custom VSCode-style tab header.
  *
  * Rendered by the dockview `ReactTabRenderer`. Layout: [icon] [title] [close].
  * The close button only appears when `params.closable` is true (agent tabs are
  * not closable) and on hover/focus; the active tab gets a top accent bar.
  *
- * Clicking the tab activates the panel; clicking the close button calls
- * `api.close()`. The dockview bridge also intercepts middle-click close and
- * keyboard shortcuts upstream, so this only handles the visible button.
+ * Agent tabs are never closable — middle-click and the close button are both
+ * suppressed for `closable=false` tabs.
  */
 import { X } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
@@ -24,6 +23,13 @@ const ICONS: Record<string, IconComponent> = {
   terminal: SquareTerminal,
 }
 
+/** Per-tab-type fallback icon (avoids calling a function during render). */
+const TYPE_ICONS: Record<PanelParams['type'], IconComponent> = {
+  agent: Bot,
+  file: FileText,
+  terminal: SquareTerminal,
+}
+
 export interface TabHeaderProps {
   params: PanelParams
   api: DockviewPanelApi
@@ -34,16 +40,21 @@ export interface TabHeaderProps {
 }
 
 export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps) {
-  const Icon = (params.icon ? ICONS[params.icon] : null) ?? defaultIcon(params.type)
+  const Icon = (params.icon ? ICONS[params.icon] : null) ?? TYPE_ICONS[params.type]
 
   return (
     <div
       className="group/tab flex h-full min-w-0 items-center gap-1.5 px-3 text-[13px]"
       onMouseDown={(e) => {
-        // Left-click activates; middle-click closes (when closable).
-        if (e.button === 1 && params.closable) {
-          e.preventDefault()
-          api.close()
+        // Left-click activates; middle-click closes (only when closable).
+        if (e.button === 1) {
+          if (params.closable) {
+            e.preventDefault()
+            api.close()
+          } else {
+            // Prevent middle-click from doing anything on non-closable tabs.
+            e.preventDefault()
+          }
         }
       }}
       onClick={(e) => {
@@ -89,15 +100,4 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
       )}
     </div>
   )
-}
-
-function defaultIcon(type: PanelParams['type']): IconComponent {
-  switch (type) {
-    case 'agent':
-      return Bot
-    case 'file':
-      return FileText
-    case 'terminal':
-      return SquareTerminal
-  }
 }

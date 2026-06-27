@@ -7,7 +7,7 @@
  *
  * The left ActivityBar owns session-list toggle + theme + settings. Settings opens
  * a SettingsDialog Sheet (Spec 7) — NOT a sidebar view. The right sidebar hosts
- * file browser / search / diff / session config panels, each switchable via its
+ * file browser / search / info / terminal panels, each switchable via its
  * own RightActivityBar (Spec 6).
  */
 import { useCallback, useState } from 'react'
@@ -65,7 +65,6 @@ export function AppShell() {
       {/* Right sidebar — animated expand/collapse (Spec 6). */}
       <RightSidebar
         activePanel={activePanel}
-        onPanelChange={setActivePanel}
         tabManager={tabManager}
         terminalManager={terminal}
       />

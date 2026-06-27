@@ -1,6 +1,5 @@
 /**
- * RightSidebar — the right panel container (Spec 6 §3.2), replacing Spec 2's
- * empty shell.
+ * RightSidebar — the right panel container.
  *
  * VSCode-style right sidebar:
  *   - collapsed by default (activePanel === null ⇒ not rendered; the right
@@ -10,7 +9,7 @@
  *   - panels cross-fade via Framer Motion AnimatePresence
  *
  * The container is a pure layout/animation shell; each panel is its own
- * component (FileExplorer, FileSearch, DiffViewer, SessionConfig). The shared
+ * component (FileExplorer, FileSearch, SessionInfo, TerminalList). The shared
  * tabManager is passed down so the file browser/search can open file tabs in
  * the same Dockview instance.
  */
@@ -20,17 +19,15 @@ import { AnimatePresence, motion } from 'framer-motion'
 import { useI18n } from '@/providers/i18n'
 import { FileExplorer } from './FileExplorer'
 import { FileSearch } from './FileSearch'
-import { DiffViewer } from './DiffViewer'
-import { SessionConfig } from './SessionConfig'
+import { SessionInfo } from './SessionInfo'
 import { TerminalList } from './TerminalList'
 import type { TabManager } from '@/hooks/useTabManager'
 import type { TerminalManager } from '@/hooks/useTerminal'
 
-export type SidebarPanel = 'files' | 'search' | 'diff' | 'config' | 'terminal'
+export type SidebarPanel = 'files' | 'search' | 'info' | 'terminal'
 
 export interface RightSidebarProps {
   activePanel: SidebarPanel | null
-  onPanelChange: (panel: SidebarPanel | null) => void
   tabManager: TabManager
   terminalManager: TerminalManager
 }
@@ -39,7 +36,7 @@ const DEFAULT_WIDTH = 280
 const MIN_WIDTH = 200
 const MAX_WIDTH = 500
 
-export function RightSidebar({ activePanel, onPanelChange, tabManager, terminalManager }: RightSidebarProps) {
+export function RightSidebar({ activePanel, tabManager, terminalManager }: RightSidebarProps) {
   const { t } = useI18n()
   const [width, setWidth] = useState(DEFAULT_WIDTH)
   const dragging = useRef(false)
@@ -103,7 +100,7 @@ export function RightSidebar({ activePanel, onPanelChange, tabManager, terminalM
                 transition={{ duration: 0.15 }}
                 className="h-full"
               >
-                {renderPanel(panel, tabManager, terminalManager, onPanelChange)}
+                {renderPanel(panel, tabManager, terminalManager)}
               </motion.div>
             </AnimatePresence>
           </div>
@@ -126,17 +123,14 @@ function renderPanel(
   panel: SidebarPanel,
   tabManager: TabManager,
   terminalManager: TerminalManager,
-  onPanelChange: (panel: SidebarPanel | null) => void,
 ) {
   switch (panel) {
     case 'files':
       return <FileExplorer tabManager={tabManager} />
     case 'search':
       return <FileSearch tabManager={tabManager} />
-    case 'diff':
-      return <DiffViewer />
-    case 'config':
-      return <SessionConfig onPanelChange={onPanelChange} />
+    case 'info':
+      return <SessionInfo />
     case 'terminal':
       return <TerminalList terminalManager={terminalManager} />
   }
@@ -148,10 +142,8 @@ function titleFor(panel: SidebarPanel, t: (k: string) => string): string {
       return t('sidebar.files')
     case 'search':
       return t('sidebar.search')
-    case 'diff':
-      return t('sidebar.diff')
-    case 'config':
-      return t('sidebar.config')
+    case 'info':
+      return t('sidebar.info')
     case 'terminal':
       return t('sidebar.terminal')
   }

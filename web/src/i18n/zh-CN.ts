@@ -21,6 +21,7 @@ const zhCN = {
     search: '搜索',
     diff: '差异',
     config: '配置',
+    info: '信息',
     terminal: '终端',
     terminalUnavailable: '终端不可用',
     terminalNew: '新建终端',

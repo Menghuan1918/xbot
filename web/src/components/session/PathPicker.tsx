@@ -1,32 +1,20 @@
 /**
  * PathPicker — Remote-picker style path selector with autocomplete.
  *
+ * Uses a plain Input + absolute-positioned dropdown (no Radix Popover) to
+ * avoid focus/z-index conflicts when used inside a Dialog.
+ *
  * Features:
  *   - Input field showing the current path value
  *   - Debounced (300ms) autocomplete of subdirectories using GET /api/fs/list
- *   - Popover dropdown with clickable candidates
+ *   - Dropdown with clickable candidates
  *   - Keyboard navigation: ↑/↓ to move, Enter to select, Esc to close
  *   - Starts from `/` — typing shows matching subdirs of the parent path
- *
- * The autocomplete works by:
- *   1. Parsing the current input to find the "directory part" (everything up
- *      to the last `/`) and the "prefix" (after the last `/`).
- *   2. Listing that directory's entries (dirs only).
- *   3. Filtering entries whose name starts with the prefix.
- *
- * If the input is a valid directory path (ends with `/`), all subdirs are shown
- * without prefix filtering.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronRight, Folder, Loader2 } from 'lucide-react'
 
 import { Input } from '@/components/ui/input'
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from '@/components/ui/popover'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { useI18n } from '@/providers/i18n'
 import { useDebounce } from '@/hooks/useDebounce'
 import { listDir, type FsEntry } from '@/hooks/useFileSystem'
@@ -51,15 +39,15 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
   const [entries, setEntries] = useState<FsEntry[]>([])
   const [loading, setLoading] = useState(false)
   const [highlightIdx, setHighlightIdx] = useState(-1)
+  const wrapperRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   const debouncedValue = useDebounce(value, DEBOUNCE_MS)
 
-  // Parse the input into a directory to list and a prefix to filter by.
   const { dirPath, prefix } = parseInput(debouncedValue)
 
-  // Fetch subdirectories when the debounced value changes.
+  // Fetch subdirectories when the debounced value changes and dropdown is open.
   useEffect(() => {
     if (!open) return
     abortRef.current?.abort()
@@ -76,7 +64,6 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
         setHighlightIdx(-1)
       })
       .catch(() => {
-        // Ignore aborted requests and network errors.
         if (!ac.signal.aborted) setEntries([])
       })
       .finally(() => {
@@ -84,6 +71,18 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
       })
     return () => ac.abort()
   }, [dirPath, prefix, open])
+
+  // Close dropdown on outside click.
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
 
   const selectEntry = useCallback(
     (entry: FsEntry) => {
@@ -97,14 +96,13 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
 
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (!open || entries.length === 0) return
-      if (e.key === 'ArrowDown') {
+      if (e.key === 'ArrowDown' && open && entries.length > 0) {
         e.preventDefault()
         setHighlightIdx((prev) => (prev + 1) % entries.length)
-      } else if (e.key === 'ArrowUp') {
+      } else if (e.key === 'ArrowUp' && open && entries.length > 0) {
         e.preventDefault()
         setHighlightIdx((prev) => (prev <= 0 ? entries.length - 1 : prev - 1))
-      } else if (e.key === 'Enter' && highlightIdx >= 0) {
+      } else if (e.key === 'Enter' && open && highlightIdx >= 0) {
         e.preventDefault()
         selectEntry(entries[highlightIdx])
       } else if (e.key === 'Escape') {
@@ -115,32 +113,26 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
   )
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Input
-          ref={inputRef}
-          value={value}
-          onChange={(e) => {
-            onChange(e.target.value)
-            setOpen(true)
-          }}
-          onFocus={() => setOpen(true)}
-          onKeyDown={(e) => {
-            onKeyDown(e)
-            externalOnKeyDown?.(e)
-          }}
-          placeholder={placeholder ?? t('session.workPathPlaceholder')}
-          className={cn(compact ? 'h-8' : 'h-9', 'text-sm', className)}
-          aria-label={t('session.workPath')}
-        />
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        sideOffset={2}
-        className="w-[var(--radix-popover-trigger-width)] min-w-[200px] p-0"
-      >
-        <ScrollArea className="max-h-[240px]">
-          <div className="py-1 text-sm">
+    <div ref={wrapperRef} className="relative">
+      <Input
+        ref={inputRef}
+        value={value}
+        onChange={(e) => {
+          onChange(e.target.value)
+          setOpen(true)
+        }}
+        onFocus={() => setOpen(true)}
+        onKeyDown={(e) => {
+          onKeyDown(e)
+          externalOnKeyDown?.(e)
+        }}
+        placeholder={placeholder ?? t('session.workPathPlaceholder')}
+        className={cn(compact ? 'h-8' : 'h-9', 'text-sm', className)}
+        aria-label={t('session.workPath')}
+      />
+      {open && (
+        <div className="absolute left-0 right-0 top-full z-50 mt-1 overflow-hidden rounded-md border bg-bg-secondary shadow-lg">
+          <div className="max-h-[240px] overflow-y-auto py-1 text-sm">
             {loading ? (
               <div className="flex items-center gap-2 px-3 py-2 text-text-muted">
                 <Loader2 className="size-3.5 animate-spin" />
@@ -175,9 +167,9 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
               })
             )}
           </div>
-        </ScrollArea>
-      </PopoverContent>
-    </Popover>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -196,17 +188,13 @@ function parseInput(input: string): { dirPath: string; prefix: string } {
 
   // If it ends with '/', the whole thing is a directory path.
   if (trimmed.endsWith('/')) {
-    // Remove trailing slashes (except for root).
-    const cleaned = trimmed.replace(/\/+$/, '') || '/'
-    return { dirPath: cleaned, prefix: '' }
+    const clean = trimmed.replace(/\/+$/, '') || '/'
+    return { dirPath: clean, prefix: '' }
   }
 
   const lastSlash = trimmed.lastIndexOf('/')
   if (lastSlash <= 0) {
     return { dirPath: '/', prefix: trimmed }
   }
-  return {
-    dirPath: trimmed.slice(0, lastSlash),
-    prefix: trimmed.slice(lastSlash + 1),
-  }
+  return { dirPath: trimmed.slice(0, lastSlash), prefix: trimmed.slice(lastSlash + 1) }
 }

@@ -1,12 +1,11 @@
 /**
- * RightActivityBar — the icon column that toggles the right sidebar panels
- * (Spec 6 §3.2, mirrors Spec 2's left ActivityBar pattern).
+ * RightActivityBar — the icon column that toggles the right sidebar panels.
  *
- * Four panels: files / search / diff / config. Clicking a panel toggles the
+ * Four panels: files / search / info / terminal. Clicking a panel toggles the
  * sidebar (collapses if already open). Pure presentational — AppShell owns the
  * active state and passes a setter.
  */
-import { Files, Search, GitCompare, SlidersHorizontal, SquareTerminal } from 'lucide-react'
+import { Files, Search, Info, SquareTerminal } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
 import { useI18n } from '@/providers/i18n'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
@@ -22,8 +21,7 @@ interface RightActivityBarProps {
 const PANELS: { panel: SidebarPanel; icon: IconComponent; labelKey: string }[] = [
   { panel: 'files', icon: Files, labelKey: 'sidebar.files' },
   { panel: 'search', icon: Search, labelKey: 'sidebar.search' },
-  { panel: 'diff', icon: GitCompare, labelKey: 'sidebar.diff' },
-  { panel: 'config', icon: SlidersHorizontal, labelKey: 'sidebar.config' },
+  { panel: 'info', icon: Info, labelKey: 'sidebar.info' },
   { panel: 'terminal', icon: SquareTerminal, labelKey: 'sidebar.terminal' },
 ]
 

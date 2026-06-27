@@ -24,6 +24,7 @@ const en: Translations = {
     search: 'Search',
     diff: 'Diff',
     config: 'Config',
+    info: 'Info',
     terminal: 'Terminal',
     terminalUnavailable: 'Terminal unavailable',
     terminalNew: 'New Terminal',
