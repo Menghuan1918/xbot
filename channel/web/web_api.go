@@ -1609,6 +1609,9 @@ func (wc *WebChannel) handleChatDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Destroy any PTY terminals owned by this chat session.
+	wc.terminals().CleanupChat(chatID)
+
 	// If deleting current chat, reset to default session
 	wc.userCurrentSessionMu.Lock()
 	if sel, ok := wc.userCurrentSession[senderID]; ok && sel.ChatID == chatID {
