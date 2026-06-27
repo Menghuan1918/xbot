@@ -43,7 +43,9 @@ function panelToTab(panel: IDockviewPanel): Tab | null {
         ? { filePath: params.filePath }
         : params.type === 'agent'
           ? { filePath: params.sessionId }
-          : undefined,
+          : params.type === 'terminal'
+            ? { terminalId: params.terminalId }
+            : undefined,
   }
 }
 
@@ -131,6 +133,7 @@ export function useTabManager(): TabManager {
       icon: input.icon,
       sessionId: input.type === 'agent' ? input.data?.filePath : undefined,
       filePath: input.type === 'file' ? input.data?.filePath : undefined,
+      terminalId: input.type === 'terminal' ? input.data?.terminalId : undefined,
       closable: input.closable,
     }
     api.addPanel({ id: panelId, title: input.title, component: input.type, params, position })
@@ -201,13 +204,15 @@ export function useTabManager(): TabManager {
 function logicalKey(input: Pick<Tab, 'type' | 'data'>): string {
   if (input.type === 'file' && input.data?.filePath) return `file:${input.data.filePath}`
   if (input.type === 'agent' && input.data?.filePath) return `agent:${input.data.filePath}`
-  if (input.type === 'terminal') return 'terminal'
+  // Terminal tabs key on their unique frontend terminal id so each terminal
+  // gets its own tab (multi-terminal). A missing terminalId → no dedup.
+  if (input.type === 'terminal' && input.data?.terminalId) return `terminal:${input.data.terminalId}`
   return ''
 }
 
 function logicalKeyFromParams(p: PanelParams): string {
   if (p.type === 'file') return p.filePath ? `file:${p.filePath}` : ''
   if (p.type === 'agent') return p.sessionId ? `agent:${p.sessionId}` : ''
-  if (p.type === 'terminal') return 'terminal'
+  if (p.type === 'terminal') return p.terminalId ? `terminal:${p.terminalId}` : ''
   return ''
 }

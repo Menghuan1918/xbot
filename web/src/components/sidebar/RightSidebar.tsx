@@ -22,21 +22,24 @@ import { FileExplorer } from './FileExplorer'
 import { FileSearch } from './FileSearch'
 import { DiffViewer } from './DiffViewer'
 import { SessionConfig } from './SessionConfig'
+import { TerminalList } from './TerminalList'
 import type { TabManager } from '@/hooks/useTabManager'
+import type { TerminalManager } from '@/hooks/useTerminal'
 
-export type SidebarPanel = 'files' | 'search' | 'diff' | 'config'
+export type SidebarPanel = 'files' | 'search' | 'diff' | 'config' | 'terminal'
 
 export interface RightSidebarProps {
   activePanel: SidebarPanel | null
   onPanelChange: (panel: SidebarPanel | null) => void
   tabManager: TabManager
+  terminalManager: TerminalManager
 }
 
 const DEFAULT_WIDTH = 280
 const MIN_WIDTH = 200
 const MAX_WIDTH = 500
 
-export function RightSidebar({ activePanel, onPanelChange, tabManager }: RightSidebarProps) {
+export function RightSidebar({ activePanel, onPanelChange, tabManager, terminalManager }: RightSidebarProps) {
   const { t } = useI18n()
   const [width, setWidth] = useState(DEFAULT_WIDTH)
   const dragging = useRef(false)
@@ -100,7 +103,7 @@ export function RightSidebar({ activePanel, onPanelChange, tabManager }: RightSi
                 transition={{ duration: 0.15 }}
                 className="h-full"
               >
-                {renderPanel(panel, tabManager, onPanelChange)}
+                {renderPanel(panel, tabManager, terminalManager, onPanelChange)}
               </motion.div>
             </AnimatePresence>
           </div>
@@ -122,6 +125,7 @@ export function RightSidebar({ activePanel, onPanelChange, tabManager }: RightSi
 function renderPanel(
   panel: SidebarPanel,
   tabManager: TabManager,
+  terminalManager: TerminalManager,
   onPanelChange: (panel: SidebarPanel | null) => void,
 ) {
   switch (panel) {
@@ -133,6 +137,8 @@ function renderPanel(
       return <DiffViewer />
     case 'config':
       return <SessionConfig onPanelChange={onPanelChange} />
+    case 'terminal':
+      return <TerminalList terminalManager={terminalManager} />
   }
 }
 
@@ -146,5 +152,7 @@ function titleFor(panel: SidebarPanel, t: (k: string) => string): string {
       return t('sidebar.diff')
     case 'config':
       return t('sidebar.config')
+    case 'terminal':
+      return t('sidebar.terminal')
   }
 }
