@@ -1,18 +1,18 @@
 /**
- * FileExplorer — mock file browser (Spec 6 §3.3).
+ * FileExplorer — file browser for the agent's working directory.
  *
- * Renders the in-memory mock tree with expand/collapse directories, file-type
- * icons (Lucide), and a click → openTab in the shared workspace. A context menu
- * offers "copy path" and "open in tab". The tree is small (mock), so it renders
- * directly — virtualization (Spec §3.3) only matters at scale and would only
- * add complexity here (KISS).
+ * Renders the file tree from the `list_files` RPC (via useFileTree), which
+ * auto-refreshes when the CWD changes. Expand/collapse directories, file-type
+ * icons (Lucide), and click → openTab in the shared workspace. A context menu
+ * offers "copy path" and "open in tab".
  *
  * Expand state is keyed by directory path so it survives re-renders.
  */
 import { useCallback, useState } from 'react'
-import { ChevronRight, ChevronDown, FolderOpen } from 'lucide-react'
+import { ChevronRight, ChevronDown, FolderOpen, Loader2 } from 'lucide-react'
 
 import { useI18n } from '@/providers/i18n'
+import { useFileTree } from '@/hooks/useFileTree'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   ContextMenu,
@@ -22,7 +22,7 @@ import {
 } from '@/components/ui/context-menu'
 import { toast } from 'sonner'
 import type { TabManager } from '@/hooks/useTabManager'
-import { mockFileTree, type FileNode } from './mockFileTree'
+import type { FileNode } from '@/types/file'
 import { FileNodeIcon } from './FileNodeIcon'
 
 interface FileExplorerProps {
@@ -31,7 +31,8 @@ interface FileExplorerProps {
 
 export function FileExplorer({ tabManager }: FileExplorerProps) {
   const { t } = useI18n()
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set(['/src']))
+  const { tree, loading, error } = useFileTree()
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
 
   const toggle = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -55,10 +56,28 @@ export function FileExplorer({ tabManager }: FileExplorerProps) {
     [tabManager],
   )
 
+  if (loading && tree.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center gap-2 text-text-secondary">
+        <Loader2 className="size-4 animate-spin" />
+        <span className="text-sm">{t('sidebar.loadingFiles')}</span>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
+        <p className="text-sm text-text-secondary">{t('sidebar.loadFailed')}</p>
+        <p className="text-xs text-text-muted">{error}</p>
+      </div>
+    )
+  }
+
   return (
     <ScrollArea className="h-full">
       <div className="py-1 text-sm">
-        {mockFileTree.map((node) => (
+        {tree.map((node) => (
           <FileTreeNode
             key={node.path}
             node={node}
@@ -68,7 +87,7 @@ export function FileExplorer({ tabManager }: FileExplorerProps) {
             onOpenFile={openFile}
           />
         ))}
-        {mockFileTree.length === 0 && (
+        {tree.length === 0 && !loading && (
           <div className="px-3 py-6 text-center text-xs text-text-muted">{t('sidebar.empty')}</div>
         )}
       </div>

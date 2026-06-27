@@ -1,5 +1,5 @@
 /**
- * FileSearch — fuzzy file search over the mock tree (Spec 6 §3.4).
+ * FileSearch — fuzzy file search over the workspace file tree.
  *
  * Search box + debounced (200ms) result list. Matching is case-insensitive
  * substring over file name and path; results sort by whether the match is in
@@ -10,10 +10,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Search, X } from 'lucide-react'
 
 import { useI18n } from '@/providers/i18n'
+import { useFileTree } from '@/hooks/useFileTree'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import type { TabManager } from '@/hooks/useTabManager'
-import { flattenFiles, mockFileTree, type FileNode } from './mockFileTree'
+import type { FileNode } from '@/types/file'
 import { FileNodeIcon } from './FileNodeIcon'
 
 interface FileSearchProps {
@@ -24,6 +25,7 @@ const DEBOUNCE_MS = 200
 
 export function FileSearch({ tabManager }: FileSearchProps) {
   const { t } = useI18n()
+  const { flatFiles } = useFileTree()
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
 
@@ -36,18 +38,17 @@ export function FileSearch({ tabManager }: FileSearchProps) {
   const results = useMemo<FileNode[]>(() => {
     const q = debounced.trim().toLowerCase()
     if (!q) return []
-    const files = flattenFiles(mockFileTree)
-    const matched = files.filter(
+    const matched = flatFiles.filter(
       (f) => f.name.toLowerCase().includes(q) || f.path.toLowerCase().includes(q),
     )
-    // Sort: name-match first, then path asc. Stable enough for a mock tree.
+    // Sort: name-match first, then path asc.
     return matched.sort((a, b) => {
       const an = a.name.toLowerCase().includes(q) ? 0 : 1
       const bn = b.name.toLowerCase().includes(q) ? 0 : 1
       if (an !== bn) return an - bn
       return a.path.localeCompare(b.path)
     })
-  }, [debounced])
+  }, [debounced, flatFiles])
 
   const openFile = useCallback(
     (node: FileNode) => {

@@ -1,0 +1,118 @@
+/**
+ * CwdProvider — tracks the agent's current working directory (CWD).
+ *
+ * Initialization: on WS connect, calls `get_cwd` RPC to get the initial CWD.
+ * Live tracking: subscribes to `progress_structured` WS events and reads
+ * `progress.cwd` (populated by the backend in engine_run.go on each iteration).
+ * Also detects completed `Cd` tool calls as a fallback when `cwd` is absent.
+ *
+ * Children access CWD via `useCwd()`; file browser/search auto-refresh
+ * when the CWD changes (they depend on `cwd` from the context).
+ */
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react'
+
+import { useWSConnection } from '@/hooks/useWSConnection'
+import type { WSMessage } from '@/types/shared'
+
+interface CwdContextValue {
+  /** The current working directory, or null before the first `get_cwd` resolves. */
+  cwd: string | null
+  /** True while the initial CWD is loading. */
+  loading: boolean
+}
+
+const CwdContext = createContext<CwdContextValue>({
+  cwd: null,
+  loading: true,
+})
+
+export function CwdProvider({ children }: { children: ReactNode }) {
+  const ws = useWSConnection()
+  const [cwd, setCwd] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const connectedRef = useRef(false)
+
+  // Fetch initial CWD via RPC when the WS connects.
+  useEffect(() => {
+    if (!ws.connected) {
+      connectedRef.current = false
+      return
+    }
+    // Avoid re-fetching on every re-render; only fetch on connect transitions.
+    if (connectedRef.current) return
+    connectedRef.current = true
+
+    let cancelled = false
+    setLoading(true)
+    ws
+      .rpc<{ dir?: string }>('get_cwd')
+      .then((res) => {
+        if (cancelled) return
+        if (res?.dir) setCwd(res.dir)
+      })
+      .catch(() => {
+        // RPC failed (e.g. no session yet); CWD stays null.
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [ws, ws.connected])
+
+  // Track CWD changes from progress events.
+  useEffect(() => {
+    const off = ws.onMessage((msg: WSMessage) => {
+      if (msg.type !== 'progress_structured') return
+      const p = msg.progress
+      if (!p) return
+
+      // Primary: use the `cwd` field populated by the backend.
+      if (typeof p.cwd === 'string' && p.cwd) {
+        setCwd(p.cwd)
+        return
+      }
+
+      // Fallback: detect completed Cd tool calls.
+      const completed = p.completed_tools
+      if (!Array.isArray(completed)) return
+      for (const tool of completed) {
+        if (!tool || typeof tool !== 'object') continue
+        const t = tool as Record<string, unknown>
+        if (t.name !== 'Cd') continue
+        // Cd tool args is a JSON string: {"path": "..."} or a plain string.
+        const args = typeof t.args === 'string' ? t.args : ''
+        if (!args) continue
+        try {
+          const parsed = JSON.parse(args)
+          const path = typeof parsed === 'string' ? parsed : parsed?.path
+          if (typeof path === 'string' && path) {
+            setCwd(path)
+          }
+        } catch {
+          // args may be a plain string path
+          setCwd(args)
+        }
+      }
+    })
+    return off
+  }, [ws])
+
+  const value = useMemo<CwdContextValue>(() => ({ cwd, loading }), [cwd, loading])
+
+  return <CwdContext.Provider value={value}>{children}</CwdContext.Provider>
+}
+
+export function useCwd(): CwdContextValue {
+  return useContext(CwdContext)
+}

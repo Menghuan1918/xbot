@@ -1,7 +1,7 @@
 /**
  * SessionSidebar — the left session panel (Spec 3 §3.1).
  *
- * Replaces Spec 2's placeholder left-sidebar body for the "sessions" view.
+ * Replaces Spec 2's empty left-sidebar body for the "sessions" view.
  * Wires useSessionStore to the search box, category switcher, the list, and
  * the new-session dialog. Pure presentational composition on top of the store.
  */

@@ -2,7 +2,7 @@
  * AgentPanel — the Agent workspace panel (Spec 4 §3.1, §3.5).
  *
  * Wires the message + progress + ask-user hooks for one chat and composes the
- * message list, input, and ask-user surface. Replaces the Spec 2 placeholder.
+ * message list, input, and ask-user surface.
  *
  * Chat identity:
  *   - When the dockview tab carries a `sessionId`, that is the chatID (future

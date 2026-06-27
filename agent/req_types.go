@@ -76,6 +76,8 @@ const (
 	MethodSetCompressionThreshold      = "set_compression_threshold"
 	MethodApplyRuntimeSettings         = "apply_runtime_settings"
 	MethodGetCwd                       = "get_cwd"
+	MethodListFiles                    = "list_files"
+	MethodReadFile                     = "read_file"
 )
 
 // --- Settings ---

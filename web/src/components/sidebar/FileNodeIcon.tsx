@@ -7,7 +7,7 @@
  * are handled by the caller (FolderOpen); this only handles file leaves.
  */
 import { File, FileCode, FileJson, FileText, Hash } from 'lucide-react'
-import type { FileNode } from './mockFileTree'
+import type { FileNode } from '@/types/file'
 
 export function FileNodeIcon({
   node,

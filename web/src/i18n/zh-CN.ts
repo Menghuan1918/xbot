@@ -48,6 +48,8 @@ const zhCN = {
     thinkingMode: '思考模式',
     configSaveFailed: '配置保存失败',
     disconnectedHint: '未连接到服务端，显示的是示例数据',
+    loadingFiles: '加载文件列表…',
+    loadFailed: '文件列表加载失败',
   },
   session: {
     all: '全部',
@@ -98,6 +100,11 @@ const zhCN = {
     edit: '编辑',
     splitRight: '右侧分屏',
     closeTab: '关闭标签',
+    terminalNotAvailable: '终端暂不可用',
+  },
+  file: {
+    imageLoadFailed: '图片加载失败',
+    zoom: '点击放大',
   },
   agent: {
     inputPlaceholder: '给 Agent 发消息…（Ctrl+Enter 发送）',

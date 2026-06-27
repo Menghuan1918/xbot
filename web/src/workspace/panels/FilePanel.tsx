@@ -1,15 +1,14 @@
 /**
  * FilePanel — file editor/preview panel (Spec 5).
  *
- * Replaces the Spec 2 placeholder. Decides how a file renders from its name:
+ * Decides how a file renders from its name:
  *
  *   - Markdown (.md/.markdown) → default preview, toggle to editor.
  *   - Image (.png/.jpg/.gif/.webp/.svg) → image preview, no toggle.
  *   - Everything else → Monaco editor, no toggle (only markdown is previewable).
  *
- * Content is front-end only (Spec 5 §2): edits live in component state and are
- * not persisted. `useFileContent` supplies mock content per extension; swapping
- * in a real file API later only touches that hook.
+ * Content is loaded via the `read_file` WS RPC (through useFileContent).
+ * Edits live in component state and are not persisted.
  */
 import { useEffect, useMemo, useState } from 'react'
 import { Loader2 } from 'lucide-react'
@@ -26,6 +25,7 @@ import {
   type FileViewMode,
 } from '@/components/file/fileTypes'
 import { useFileContent } from '@/hooks/useFileContent'
+import { useI18n } from '@/providers/i18n'
 import type { PanelProps } from '@/workspace/panels/types'
 
 /** "basename" of a posix path, defensive against undefined. */
@@ -42,7 +42,7 @@ export function FilePanel({ params }: PanelProps) {
   const canToggle = canTogglePreview(fileName)
   const language = useMemo(() => languageOf(fileName), [fileName])
 
-  const { content, loading, setContent, imageUrl } = useFileContent(filePath)
+  const { content, loading, error, setContent, imageUrl } = useFileContent(filePath)
   const [mode, setMode] = useState<FileViewMode>(() => defaultViewMode(fileName))
 
   // Re-seed the view mode if the file ever changes (dockview reuses a panel
@@ -56,10 +56,14 @@ export function FilePanel({ params }: PanelProps) {
     return (
       <div className="flex h-full flex-col bg-bg-primary">
         <FileToolbar fileName={fileName} mode="preview" canToggle={false} />
-        {loading || !imageUrl ? (
+        {loading ? (
           <PanelLoading />
-        ) : (
+        ) : imageUrl ? (
           <ImagePreview src={imageUrl} fileName={fileName} className="flex-1" />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-text-secondary">
+            {fileName}
+          </div>
         )}
       </div>
     )
@@ -76,6 +80,10 @@ export function FilePanel({ params }: PanelProps) {
       <div className="min-h-0 flex-1">
         {loading ? (
           <PanelLoading />
+        ) : error ? (
+          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-secondary">
+            {error}
+          </div>
         ) : canToggle && mode === 'preview' ? (
           <MarkdownPreview source={content} />
         ) : (
@@ -87,10 +95,11 @@ export function FilePanel({ params }: PanelProps) {
 }
 
 function PanelLoading() {
+  const { t } = useI18n()
   return (
     <div className="flex h-full items-center justify-center gap-2 text-text-secondary">
       <Loader2 className="size-4 animate-spin" />
-      <span className="text-sm">Loading…</span>
+      <span className="text-sm">{t('common.loading')}</span>
     </div>
   )
 }

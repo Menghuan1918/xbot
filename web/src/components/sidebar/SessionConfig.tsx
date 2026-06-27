@@ -4,11 +4,11 @@
  * Two parts:
  *   1. Session info (id, channel, work path, times, message count) — sourced
  *      from useSessionStore. When no session is active the panel shows a
- *      placeholder (Spec 3 owns the real list; this stays usable standalone).
+ *      hint (Spec 3 owns the real list; this stays usable standalone).
  *   2. LLM config — model list via `list_models`, current model via
  *      `get_settings`, switch via `switch_model`; plus max-context,
- *      max-output-tokens, thinking_mode. RPC failures (e.g. no backend) fall
- *      back to mock values so the UI is always exercisable.
+ *      max-output-tokens, thinking_mode. RPC failures fall back to defaults
+ *      so the UI is always usable.
  *
  * Per Spec 6 the data source is the WS rpc surface; the panel does NOT touch
  * user_settings/CLIRuntimeSettingKeys. KISS: edits are local state persisted
@@ -19,6 +19,7 @@ import { toast } from 'sonner'
 
 import { useI18n } from '@/providers/i18n'
 import { useWSConnection } from '@/hooks/useWSConnection'
+import { useCwd } from '@/providers/CwdProvider'
 import { useSessionStore } from '@/hooks/useSessionStore'
 import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
@@ -37,7 +38,7 @@ interface SessionConfigProps {
   onPanelChange: (panel: SidebarPanel | null) => void
 }
 
-const MOCK_MODELS = ['gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4', 'claude-haiku-4']
+const FALLBACK_MODELS = ['gpt-4o', 'gpt-4o-mini', 'claude-sonnet-4', 'claude-haiku-4']
 
 export function SessionConfig({ onPanelChange }: SessionConfigProps) {
   // onPanelChange is exposed for future header actions (e.g. collapse button).
@@ -45,13 +46,14 @@ export function SessionConfig({ onPanelChange }: SessionConfigProps) {
 
   const { t } = useI18n()
   const ws = useWSConnection()
+  const { cwd } = useCwd()
   const session = useSessionStore()
 
   const activeId = session.activeSessionId
   const current = activeId ? session.sessions.find((s) => s.chatID === activeId) : undefined
 
-  const [models, setModels] = useState<string[]>(MOCK_MODELS)
-  const [model, setModel] = useState<string>(MOCK_MODELS[0])
+  const [models, setModels] = useState<string[]>(FALLBACK_MODELS)
+  const [model, setModel] = useState<string>(FALLBACK_MODELS[0])
   const [maxContext, setMaxContext] = useState('200000')
   const [maxOutput, setMaxOutput] = useState('8192')
   const [thinkingMode, setThinkingMode] = useState(true)
@@ -65,7 +67,7 @@ export function SessionConfig({ onPanelChange }: SessionConfigProps) {
       const list = (await ws.rpc<string[]>('list_models')) ?? []
       if (Array.isArray(list) && list.length) setModels(list)
     } catch {
-      /* keep mock models */
+      /* keep fallback models */
     }
     try {
       const settings = (await ws.rpc<Record<string, string>>('get_settings')) ?? {}
@@ -151,7 +153,7 @@ export function SessionConfig({ onPanelChange }: SessionConfigProps) {
                 label={t('sidebar.channel')}
                 value={current?.channel ?? 'web'}
               />
-              <InfoRow label={t('sidebar.workPath')} value={'/root/Code/xbot'} mono />
+              <InfoRow label={t('sidebar.workPath')} value={cwd ?? '—'} mono />
               {current?.lastActive && (
                 <InfoRow label={t('sidebar.lastActive')} value={current.lastActive} />
               )}

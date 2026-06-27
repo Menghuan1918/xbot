@@ -135,6 +135,7 @@ export function useChatMessages({
       setMessages((prev) => [...prev, { id, role: 'user', content: text }])
       ws.send({
         type: 'message',
+        chat_id: chatIDRef.current ?? undefined,
         content: text,
         upload_keys: attachments?.uploadKeys,
         file_names: attachments?.fileNames,

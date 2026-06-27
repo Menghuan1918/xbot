@@ -51,6 +51,8 @@ const en: Translations = {
     thinkingMode: 'Thinking mode',
     configSaveFailed: 'Failed to save config',
     disconnectedHint: 'Not connected to the server; showing sample data',
+    loadingFiles: 'Loading files…',
+    loadFailed: 'Failed to load files',
   },
   session: {
     all: 'All',
@@ -101,6 +103,11 @@ const en: Translations = {
     edit: 'Edit',
     splitRight: 'Split Right',
     closeTab: 'Close Tab',
+    terminalNotAvailable: 'Terminal not available',
+  },
+  file: {
+    imageLoadFailed: 'Image failed to load',
+    zoom: 'Click to zoom',
   },
   agent: {
     inputPlaceholder: 'Message the Agent… (Ctrl+Enter to send)',
