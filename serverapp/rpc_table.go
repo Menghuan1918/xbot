@@ -165,6 +165,34 @@ func registerSettingsHandlers(t RPCTable, h *RPCContext) {
 		// SetCWD internally refreshes plugin workDir with correct tenantID
 		return h.Ag.SetCWD(p.Channel, p.ChatID, p.Dir)
 	})
+	t["get_cwd"] = rpc1(func(ctx context.Context, p struct {
+		Channel string `json:"channel"`
+		ChatID  string `json:"chat_id"`
+	}) (any, error) {
+		bizID := rpcBizID(ctx)
+		channel := p.Channel
+		chatID := p.ChatID
+		if channel == "" {
+			channel = "web"
+		}
+		if chatID == "" {
+			chatID = bizID
+		}
+		// Look up the session's current working directory.
+		if h.Ag.MultiSession() != nil {
+			if sess, err := h.Ag.MultiSession().GetOrCreateSession(channel, chatID); err == nil {
+				if cwd := sess.GetCurrentDir(); cwd != "" {
+					return map[string]any{"dir": cwd}, nil
+				}
+			}
+		}
+		// Fall back to the configured work directory.
+		workDir := h.Cfg.Agent.WorkDir
+		if workDir == "" {
+			workDir = "."
+		}
+		return map[string]any{"dir": workDir}, nil
+	})
 	t["get_settings"] = rpc1(func(ctx context.Context, p struct {
 		Namespace string `json:"namespace"`
 		SenderID  string `json:"sender_id"`

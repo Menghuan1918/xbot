@@ -353,6 +353,12 @@ func (wc *WebChannel) Start() error {
 	// File API
 	mux.HandleFunc("/api/files/upload", wc.authMiddleware(wc.handleFileUpload))
 
+	// File System API (browse, read, search, stat)
+	mux.HandleFunc("/api/fs/list", wc.authMiddleware(wc.handleFsList))
+	mux.HandleFunc("/api/fs/read", wc.authMiddleware(wc.handleFsRead))
+	mux.HandleFunc("/api/fs/search", wc.authMiddleware(wc.handleFsSearch))
+	mux.HandleFunc("/api/fs/stat", wc.authMiddleware(wc.handleFsStat))
+
 	// Sessions API
 	mux.HandleFunc("/api/sessions", wc.authMiddleware(wc.handleSessions))
 	mux.HandleFunc("/api/sessions/messages", wc.authMiddleware(wc.handleSessionMessages))

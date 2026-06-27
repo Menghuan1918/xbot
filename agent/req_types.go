@@ -75,6 +75,7 @@ const (
 	MethodSetMaxContextTokens          = "set_max_context_tokens"
 	MethodSetCompressionThreshold      = "set_compression_threshold"
 	MethodApplyRuntimeSettings         = "apply_runtime_settings"
+	MethodGetCwd                       = "get_cwd"
 )
 
 // --- Settings ---
@@ -97,6 +98,15 @@ type setCWDReq struct {
 	Channel string `json:"channel"`
 	ChatID  string `json:"chat_id"`
 	Dir     string `json:"dir"`
+}
+
+type getCwdReq struct {
+	Channel string `json:"channel"`
+	ChatID  string `json:"chat_id"`
+}
+
+type getCwdResp struct {
+	Dir string `json:"dir"`
 }
 
 // --- Context / Runtime ---
