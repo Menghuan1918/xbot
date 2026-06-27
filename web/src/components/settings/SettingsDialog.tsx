@@ -5,11 +5,13 @@
  * content area. Width is fixed at 480px. The Sheet is controlled (open /
  * onOpenChange) so the launcher owns visibility.
  *
- * Categories: 外观 / 折叠 / 语言 / LLM 配置. The LLM panel mounts its hook
+ * Categories: 外观 / 折叠 / 语言 / LLM 配置 / 账号. The LLM panel mounts its hook
  * lazily (only when selected) so a disconnected server doesn't fire RPCs on
- * every panel open.
+ * every panel open. The Account panel shows current username + logout button.
  */
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { LogOut } from 'lucide-react'
 
 import {
   Sheet,
@@ -18,16 +20,19 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet'
+import { Button } from '@/components/ui/button'
 import { useI18n } from '@/providers/i18n'
+import { useAuth } from '@/hooks/useAuth'
 import { cn } from '@/lib/utils'
 
 import { SettingsAppearance } from './SettingsAppearance'
 import { SettingsCollapse } from './SettingsCollapse'
 import { SettingsGeneral } from './SettingsGeneral'
 import { SettingsLLM } from './SettingsLLM'
+import { SettingsSection } from './SettingsSection'
 import { useLLMSettings } from '@/hooks/useLLMSettings'
 
-type Category = 'appearance' | 'collapse' | 'language' | 'llm'
+type Category = 'appearance' | 'collapse' | 'language' | 'llm' | 'account'
 
 interface SettingsDialogProps {
   open: boolean
@@ -43,8 +48,44 @@ function SettingsLLMPanel() {
   return <SettingsLLM settings={settings} />
 }
 
+/**
+ * Account panel — shows current username + logout button. After logout,
+ * navigates to /login (AuthGuard will redirect if needed).
+ */
+function SettingsAccountPanel({ onLoggedOut }: { onLoggedOut: () => void }) {
+  const { t } = useI18n()
+  const { user, logout } = useAuth()
+
+  const handleLogout = async () => {
+    await logout()
+    onLoggedOut()
+  }
+
+  return (
+    <div className="flex flex-col">
+      <SettingsSection title={t('settings.nav.account')} description={t('auth.currentUser')}>
+        <div className="flex flex-col gap-3">
+          <p className="text-sm text-foreground">
+            {user?.username || '—'}
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleLogout}
+            className="w-fit gap-2"
+          >
+            <LogOut className="size-4" />
+            {t('auth.logout')}
+          </Button>
+        </div>
+      </SettingsSection>
+    </div>
+  )
+}
+
 export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const { t } = useI18n()
+  const navigate = useNavigate()
   const [active, setActive] = useState<Category>('appearance')
 
   const nav: { key: Category; labelKey: string }[] = [
@@ -52,6 +93,7 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
     { key: 'collapse', labelKey: 'nav.collapse' },
     { key: 'language', labelKey: 'nav.language' },
     { key: 'llm', labelKey: 'nav.llm' },
+    { key: 'account', labelKey: 'nav.account' },
   ]
 
   return (
@@ -92,6 +134,9 @@ export function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
             {active === 'collapse' ? <SettingsCollapse /> : null}
             {active === 'language' ? <SettingsGeneral /> : null}
             {active === 'llm' ? <SettingsLLMPanel /> : null}
+            {active === 'account' ? (
+              <SettingsAccountPanel onLoggedOut={() => navigate('/login', { replace: true })} />
+            ) : null}
           </div>
         </div>
       </SheetContent>
