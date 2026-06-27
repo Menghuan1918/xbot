@@ -19,11 +19,13 @@ import { RightActivityBar } from '@/components/sidebar/RightActivityBar'
 import { SettingsDialog } from '@/components/settings/SettingsDialog'
 import { DockviewContainer } from '@/workspace/DockviewContainer'
 import { useTabManager } from '@/hooks/useTabManager'
+import { useTerminal } from '@/hooks/useTerminal'
 
 const LEFT_WIDTH = 260
 
 export function AppShell() {
   const tabManager = useTabManager()
+  const terminal = useTerminal(tabManager)
   const [activeView, setActiveView] = useState<SidebarView | null>('sessions')
   const [activePanel, setActivePanel] = useState<SidebarPanel | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -65,6 +67,7 @@ export function AppShell() {
         activePanel={activePanel}
         onPanelChange={setActivePanel}
         tabManager={tabManager}
+        terminalManager={terminal}
       />
 
       {/* Right ActivityBar — always visible, toggles right panels. */}

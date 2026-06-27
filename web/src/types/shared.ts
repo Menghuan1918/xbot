@@ -34,6 +34,8 @@ export interface TabData {
   content?: string
   language?: string
   previewMode?: boolean
+  /** Frontend terminal id (TerminalSession.id) for terminal tabs. */
+  terminalId?: string
 }
 
 export interface SessionInfo {

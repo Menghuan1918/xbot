@@ -15,6 +15,8 @@ export interface PanelParams {
   icon?: string
   sessionId?: string
   filePath?: string
+  /** Frontend terminal id (TerminalSession.id) for terminal tabs. */
+  terminalId?: string
   /** False suppresses the close button and blocks closeTab (agent tabs). */
   closable: boolean
 }
