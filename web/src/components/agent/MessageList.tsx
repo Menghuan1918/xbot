@@ -84,7 +84,7 @@ export function MessageList({
   }, [rows.length, liveProgress?.streamContent])
 
   return (
-    <div className="relative flex-1 overflow-hidden">
+    <div className="relative min-h-0 flex-1 overflow-hidden">
       <div
         ref={scrollRef}
         onScroll={onScroll}

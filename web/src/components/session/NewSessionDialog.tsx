@@ -22,7 +22,6 @@ import { Label } from '@/components/ui/label'
 import { PathPicker } from '@/components/session/PathPicker'
 import { toast } from 'sonner'
 import { useI18n } from '@/providers/i18n'
-import { useCwd } from '@/hooks/useCwd'
 
 interface NewSessionDialogProps {
   open: boolean
@@ -32,19 +31,18 @@ interface NewSessionDialogProps {
 
 export function NewSessionDialog({ open, onOpenChange, onCreate }: NewSessionDialogProps) {
   const { t } = useI18n()
-  const { cwd } = useCwd()
   const [label, setLabel] = useState('')
   const [workPath, setWorkPath] = useState('')
   const [busy, setBusy] = useState(false)
 
-  // Reset the form whenever the dialog opens; seed workPath with current CWD.
+  // Reset the form whenever the dialog opens; seed workPath with '/'.
   useEffect(() => {
     if (open) {
       setLabel('')
-      setWorkPath(cwd ?? '')
+      setWorkPath('/')
       setBusy(false)
     }
-  }, [open, cwd])
+  }, [open])
 
   const submit = async () => {
     setBusy(true)
