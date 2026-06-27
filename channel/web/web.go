@@ -219,6 +219,9 @@ type WebChannel struct {
 	// OSS provider for file storage (local or qiniu)
 	ossProvider OSSProvider
 
+	// PTY terminal manager — lazily initialised, owns all active terminals.
+	terminalMgr *TerminalManager
+
 	// Event stream buffer — per chatID monotonic seq + ring buffer for replay
 	evtBuf   map[string]*eventStream
 	evtBufMu sync.Mutex
@@ -370,6 +373,11 @@ func (wc *WebChannel) Start() error {
 	mux.HandleFunc("/api/chats/{chatID}", wc.authMiddleware(wc.handleChatDelete))
 	mux.HandleFunc("/api/context-info", wc.authMiddleware(wc.handleContextInfo))
 
+	// Terminal PTY API
+	mux.HandleFunc("/api/terminal/create", limitBodySize(wc.authMiddleware(wc.handleTerminalCreate)))
+	mux.HandleFunc("/api/terminal/", wc.authMiddleware(wc.handleTerminalRoute))
+	mux.HandleFunc("/ws/terminal", wc.handleTerminalWS)
+
 	// Cross-channel browsing API
 	mux.HandleFunc("/api/channels", wc.authMiddleware(wc.handleChannels))
 
@@ -420,6 +428,11 @@ func (wc *WebChannel) Start() error {
 func (wc *WebChannel) Stop() {
 	log.Info("Web channel stopping...")
 	close(wc.stopCh)
+
+	// Destroy all active PTY terminals.
+	if wc.terminalMgr != nil {
+		wc.terminalMgr.CleanupAll()
+	}
 
 	wc.hub.stopAll()
 
