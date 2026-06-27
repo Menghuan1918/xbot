@@ -54,7 +54,7 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
         {message.content ? (
           <MarkdownRenderer content={message.content} />
         ) : (
-          // Pure tool-only turn with no final text: show a subtle placeholder.
+          // Pure tool-only turn with no final text: show a subtle hint.
           !showProgress && (
             <span className="text-sm text-text-muted">{t('agent.emptyAssistant')}</span>
           )

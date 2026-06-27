@@ -1,105 +1,82 @@
 /**
- * useFileContent — file content loader backed by GET /api/fs/read (Spec §3.8).
+ * useFileContent — file content loader via the `read_file` WS RPC.
  *
- * Replaces the previous mock implementation. Handles:
- *   - Text files: returns content + language for Monaco
- *   - Binary files: sets isBinary=true, content stays empty (UI shows "Binary file")
- *   - Image files: fetches a blob URL for ImagePreview
+ * Calls the backend `read_file` RPC (serverapp/rpc_table.go) to load file
+ * content for the editor/preview components. The RPC reads from the session's
+ * CWD, so the file path must be relative to the agent's working directory.
  *
- * State shape (kept identical to the mock version so FilePanel doesn't change):
+ * State shape:
  *   - `content`  — current text (editable; FilePanel writes back via setContent)
- *   - `loading`  — true during the async load
+ *   - `loading`  — true during the async RPC load
  *   - `setContent` — imperative setter for the editor's onChange path
- *   - `imageUrl` — resolved image src (blob URL), or null
- *   - `isBinary` — true when the backend reports a binary file
- *   - `language` — Monaco language id from the backend (or extension fallback)
+ *   - `imageUrl` — reserved for future image support (null for now)
  */
 import { useCallback, useEffect, useState } from 'react'
 
-import { isImageFile, languageOf } from '@/components/file/fileTypes'
-import { readFile, fetchImageBlobUrl } from '@/hooks/useFileSystem'
+import { isImageFile } from '@/components/file/fileTypes'
+import { useCwd } from '@/providers/CwdProvider'
+import { useWSConnection } from '@/hooks/useWSConnection'
 
 export interface UseFileContentResult {
   content: string
   loading: boolean
+  error: string | null
   setContent: (next: string) => void
   imageUrl: string | null
-  isBinary: boolean
-  language: string
+}
+
+interface ReadFileResponse {
+  content?: string
+  language?: string
 }
 
 export function useFileContent(filePath: string): UseFileContentResult {
+  const ws = useWSConnection()
+  const { cwd } = useCwd()
   const [content, setContent] = useState('')
-  const [imageUrl, setImageUrl] = useState<string | null>(null)
-  const [isBinary, setIsBinary] = useState(false)
-  const [language, setLanguage] = useState('plaintext')
+  const [imageUrl] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
 
-    // For image files, fetch a blob URL instead of JSON content.
+    // Image files are not text-loadable via the RPC; skip loading.
     if (isImageFile(filePath)) {
-      fetchImageBlobUrl(filePath)
-        .then((url) => {
-          if (cancelled) {
-            URL.revokeObjectURL(url)
-            return
-          }
-          setImageUrl(url)
-          setContent('')
-          setIsBinary(false)
-          setLanguage(languageOf(filePath))
-          setLoading(false)
-        })
-        .catch(() => {
-          if (cancelled) return
-          setImageUrl(null)
-          setLoading(false)
-        })
-    } else {
-      readFile(filePath)
-        .then((res) => {
-          if (cancelled) return
-          if (res.isBinary) {
-            setContent('')
-            setIsBinary(true)
-            setLanguage('plaintext')
-          } else {
-            setContent(res.content)
-            setIsBinary(false)
-            setLanguage(res.language || languageOf(filePath))
-          }
-          setImageUrl(null)
-          setLoading(false)
-        })
-        .catch(() => {
-          if (cancelled) return
-          setLoading(false)
-        })
+      setLoading(false)
+      setContent('')
+      return
     }
+
+    if (!ws.connected || !cwd) {
+      setLoading(false)
+      setError(null)
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+    ws
+      .rpc<ReadFileResponse>('read_file', { path: filePath })
+      .then((res) => {
+        if (cancelled) return
+        setContent(res?.content ?? '')
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setError(e instanceof Error ? e.message : String(e))
+        setContent('')
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
 
     return () => {
       cancelled = true
     }
-  }, [filePath])
-
-  // Revoke the object URL when the path changes or component unmounts.
-  useEffect(() => {
-    return () => {
-      if (imageUrl) URL.revokeObjectURL(imageUrl)
-    }
-  }, [imageUrl])
+  }, [filePath, ws, ws.connected, cwd])
 
   const setContentFn = useCallback((next: string) => setContent(next), [])
 
-  return {
-    content,
-    loading,
-    setContent: setContentFn,
-    imageUrl,
-    isBinary,
-    language,
-  }
+  return { content, loading, error, setContent: setContentFn, imageUrl }
 }

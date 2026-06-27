@@ -5,14 +5,13 @@
  *
  *   - Markdown (.md/.markdown) → default preview, toggle to editor.
  *   - Image (.png/.jpg/.gif/.webp/.svg) → image preview, no toggle.
- *   - Binary → "Binary file" notice, no editor.
  *   - Everything else → Monaco editor, no toggle (only markdown is previewable).
  *
- * `useFileContent` fetches real content from GET /api/fs/read. Edits live in
- * component state and are not persisted.
+ * Content is loaded via the `read_file` WS RPC (through useFileContent).
+ * Edits live in component state and are not persisted.
  */
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, FileText } from 'lucide-react'
+import { Loader2 } from 'lucide-react'
 
 import { MonacoEditor } from '@/components/file/MonacoEditor'
 import { MarkdownPreview } from '@/components/file/MarkdownPreview'
@@ -37,20 +36,14 @@ function baseName(filePath?: string): string {
 }
 
 export function FilePanel({ params }: PanelProps) {
-  const { t } = useI18n()
   const filePath = params.filePath ?? ''
   const fileName = useMemo(() => baseName(filePath), [filePath])
   const isImage = isImageFile(fileName)
   const canToggle = canTogglePreview(fileName)
-  const extLanguage = useMemo(() => languageOf(fileName), [fileName])
+  const language = useMemo(() => languageOf(fileName), [fileName])
 
-  const { content, loading, setContent, imageUrl, isBinary, language: apiLanguage } =
-    useFileContent(filePath)
+  const { content, loading, error, setContent, imageUrl } = useFileContent(filePath)
   const [mode, setMode] = useState<FileViewMode>(() => defaultViewMode(fileName))
-
-  // Prefer the backend-reported language (it knows the true type); fall back to
-  // extension-based detection for files opened before the API responds.
-  const monacoLanguage = apiLanguage || extLanguage
 
   // Re-seed the view mode if the file ever changes (dockview reuses a panel
   // instance when its params update). Image files ignore `mode` entirely.
@@ -63,10 +56,14 @@ export function FilePanel({ params }: PanelProps) {
     return (
       <div className="flex h-full flex-col bg-bg-primary">
         <FileToolbar fileName={fileName} mode="preview" canToggle={false} />
-        {loading || !imageUrl ? (
+        {loading ? (
           <PanelLoading />
-        ) : (
+        ) : imageUrl ? (
           <ImagePreview src={imageUrl} fileName={fileName} className="flex-1" />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-text-secondary">
+            {fileName}
+          </div>
         )}
       </div>
     )
@@ -83,16 +80,14 @@ export function FilePanel({ params }: PanelProps) {
       <div className="min-h-0 flex-1">
         {loading ? (
           <PanelLoading />
-        ) : isBinary ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 text-text-secondary">
-            <FileText className="size-10 opacity-40" />
-            <span className="text-sm">{t('file.binaryFile')}</span>
-            <span className="text-xs text-text-muted">{fileName}</span>
+        ) : error ? (
+          <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-secondary">
+            {error}
           </div>
         ) : canToggle && mode === 'preview' ? (
           <MarkdownPreview source={content} />
         ) : (
-          <MonacoEditor value={content} language={monacoLanguage} onChange={setContent} />
+          <MonacoEditor value={content} language={language} onChange={setContent} />
         )}
       </div>
     </div>
@@ -100,10 +95,11 @@ export function FilePanel({ params }: PanelProps) {
 }
 
 function PanelLoading() {
+  const { t } = useI18n()
   return (
     <div className="flex h-full items-center justify-center gap-2 text-text-secondary">
       <Loader2 className="size-4 animate-spin" />
-      <span className="text-sm">Loading…</span>
+      <span className="text-sm">{t('common.loading')}</span>
     </div>
   )
 }

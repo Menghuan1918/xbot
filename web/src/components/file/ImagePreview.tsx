@@ -5,8 +5,8 @@
  * caption row shows the file name. Clicking the image (or pressing Enter on
  * the button) opens a fullscreen-ish Dialog with the image scaled up.
  *
- * Source is the mock placeholder from `useFileContent.imageUrl`; a real backend
- * would supply a fetchable URL instead.
+ * Source is the image URL from `useFileContent.imageUrl`; a real backend
+ * file-serving endpoint would supply a fetchable URL.
  */
 import { useState } from 'react'
 import { ImageOff } from 'lucide-react'
@@ -18,7 +18,7 @@ import {
 import { useI18n } from '@/providers/i18n'
 
 export interface ImagePreviewProps {
-  /** Resolved image URL (mock placeholder or real). */
+  /** Resolved image URL (or null when not available). */
   src: string
   /** File name shown as a caption. */
   fileName: string

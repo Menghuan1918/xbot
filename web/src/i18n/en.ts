@@ -66,6 +66,8 @@ const en: Translations = {
     disconnectedHint: 'Not connected to the server; showing sample data',
     refresh: 'Refresh',
     toggleHidden: 'Toggle hidden files',
+    loadingFiles: 'Loading files…',
+    loadFailed: 'Failed to load files',
   },
   session: {
     all: 'All',
@@ -121,6 +123,7 @@ const en: Translations = {
     edit: 'Edit',
     splitRight: 'Split Right',
     closeTab: 'Close Tab',
+    terminalNotAvailable: 'Terminal not available',
   },
   agent: {
     inputPlaceholder: 'Message the Agent… (Ctrl+Enter to send)',

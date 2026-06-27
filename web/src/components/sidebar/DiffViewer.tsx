@@ -4,7 +4,7 @@
  * Two editable areas (original / modified) on top, a rendered diff below.
  * Uses a lightweight line-level LCS diff — no heavy Monaco here (Monaco itself
  * is Spec 5; pulling it in just for diff would balloon the bundle for a
- * mock-driven sidebar). The diff colors lines:
+ * lightweight sidebar). The diff colors lines:
  *   - removed  (in original, not in modified)  → red background
  *   - added    (in modified, not in original)    → green background
  *   - unchanged                              → muted
@@ -19,7 +19,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 
 type DiffOp = { kind: 'equal' | 'added' | 'removed'; text: string }
 
-/** Line-level diff via LCS DP. O(n*m) is fine for the small mock inputs. */
+/** Line-level diff via LCS DP. O(n*m) is fine for small inputs. */
 function lineDiff(a: string[], b: string[]): DiffOp[] {
   const n = a.length
   const m = b.length

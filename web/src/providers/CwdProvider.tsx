@@ -1,100 +1,118 @@
 /**
- * CwdProvider — React context that owns the current working directory (CWD).
+ * CwdProvider — tracks the agent's current working directory (CWD).
  *
- * Two sources keep CWD in sync:
- *   1. WS RPC `get_cwd` — fetched on mount and on session switch (chatID change)
- *   2. Progress events — the backend includes a `cwd` field in ProgressEvent
- *      when the agent changes directory (via the Cd tool). We listen for it
- *      and update the context value in real time.
+ * Initialization: on WS connect, calls `get_cwd` RPC to get the initial CWD.
+ * Live tracking: subscribes to `progress_structured` WS events and reads
+ * `progress.cwd` (populated by the backend in engine_run.go on each iteration).
+ * Also detects completed `Cd` tool calls as a fallback when `cwd` is absent.
  *
- * Consumers: FileExplorer (root directory), PathPicker (initial value),
- * FileSearch (search root), NewSessionDialog (default work path).
+ * Children access CWD via `useCwd()`; file browser/search auto-refresh
+ * when the CWD changes (they depend on `cwd` from the context).
  */
 import {
   createContext,
-  useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react'
+
 import { useWSConnection } from '@/hooks/useWSConnection'
-import { invalidateFsCache } from '@/hooks/useFileSystem'
+import type { WSMessage } from '@/types/shared'
 
 export interface CwdContextValue {
-  /** Current working directory (absolute path), or null while loading. */
+  /** The current working directory, or null before the first `get_cwd` resolves. */
   cwd: string | null
-  /** Manually set CWD (e.g. when user types in PathPicker). */
-  setCwd: (dir: string) => void
-  /** Re-fetch CWD from the server via WS RPC get_cwd. */
-  refreshCwd: () => Promise<void>
-  /** True while the initial CWD fetch is in flight. */
+  /** True while the initial CWD is loading. */
   loading: boolean
 }
 
-const CwdContext = createContext<CwdContextValue | undefined>(undefined)
+const CwdContext = createContext<CwdContextValue>({
+  cwd: null,
+  loading: true,
+})
 
 export function CwdProvider({ children }: { children: ReactNode }) {
   const ws = useWSConnection()
-  const [cwd, setCwdState] = useState<string | null>(null)
+  const [cwd, setCwd] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const lastChatID = useRef<string | null>(null)
+  const connectedRef = useRef(false)
 
-  const fetchCwd = useCallback(async () => {
-    if (!ws.connected) return
-    try {
-      const res = await ws.rpc<{ dir?: string }>('get_cwd')
-      if (res?.dir) {
-        setCwdState(res.dir)
+  // Fetch initial CWD via RPC when the WS connects.
+  useEffect(() => {
+    if (!ws.connected) {
+      connectedRef.current = false
+      return
+    }
+    // Avoid re-fetching on every re-render; only fetch on connect transitions.
+    if (connectedRef.current) return
+    connectedRef.current = true
+
+    let cancelled = false
+    setLoading(true)
+    ws
+      .rpc<{ dir?: string }>('get_cwd')
+      .then((res) => {
+        if (cancelled) return
+        if (res?.dir) setCwd(res.dir)
+      })
+      .catch(() => {
+        // RPC failed (e.g. no session yet); CWD stays null.
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [ws, ws.connected])
+
+  // Track CWD changes from progress events.
+  useEffect(() => {
+    const off = ws.onMessage((msg: WSMessage) => {
+      if (msg.type !== 'progress_structured') return
+      const p = msg.progress
+      if (!p) return
+
+      // Primary: use the `cwd` field populated by the backend.
+      if (typeof p.cwd === 'string' && p.cwd) {
+        setCwd(p.cwd)
+        return
       }
-    } catch {
-      // Non-fatal: keep previous CWD or null.
-    } finally {
-      setLoading(false)
-    }
-  }, [ws])
 
-  // Fetch CWD on mount and when the subscribed chatID changes.
-  useEffect(() => {
-    const currentChatID = ws.chatID
-    if (currentChatID !== lastChatID.current) {
-      lastChatID.current = currentChatID
-      void fetchCwd()
-    }
-  }, [ws.chatID, fetchCwd])
-
-  // Listen for CWD changes in progress events (agent Cd tool).
-  useEffect(() => {
-    return ws.onProgress((event) => {
-      if (event.cwd && event.cwd !== cwd) {
-        setCwdState(event.cwd)
-        invalidateFsCache()
+      // Fallback: detect completed Cd tool calls.
+      const completed = p.completed_tools
+      if (!Array.isArray(completed)) return
+      for (const tool of completed) {
+        if (!tool || typeof tool !== 'object') continue
+        const t = tool as Record<string, unknown>
+        if (t.name !== 'Cd') continue
+        // Cd tool args is a JSON string: {"path": "..."} or a plain string.
+        const args = typeof t.args === 'string' ? t.args : ''
+        if (!args) continue
+        try {
+          const parsed = JSON.parse(args)
+          const path = typeof parsed === 'string' ? parsed : parsed?.path
+          if (typeof path === 'string' && path) {
+            setCwd(path)
+          }
+        } catch {
+          // args may be a plain string path
+          setCwd(args)
+        }
       }
     })
-  }, [ws, cwd])
+    return off
+  }, [ws])
 
-  const setCwd = useCallback((dir: string) => {
-    setCwdState(dir)
-    invalidateFsCache()
-  }, [])
+  const value = useMemo<CwdContextValue>(() => ({ cwd, loading }), [cwd, loading])
 
-  const refreshCwd = useCallback(async () => {
-    setLoading(true)
-    await fetchCwd()
-  }, [fetchCwd])
-
-  return (
-    <CwdContext.Provider value={{ cwd, setCwd, refreshCwd, loading }}>
-      {children}
-    </CwdContext.Provider>
-  )
+  return <CwdContext.Provider value={value}>{children}</CwdContext.Provider>
 }
 
 export function useCwd(): CwdContextValue {
-  const ctx = useContext(CwdContext)
-  if (!ctx) {
-    throw new Error('useCwd must be used within a <CwdProvider>')
-  }
-  return ctx
+  return useContext(CwdContext)
 }
