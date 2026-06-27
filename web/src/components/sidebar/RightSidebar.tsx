@@ -128,7 +128,7 @@ function renderPanel(
     case 'files':
       return <FileExplorer tabManager={tabManager} />
     case 'search':
-      return <FileSearch tabManager={tabManager} />
+      return <FileSearch tabManager={tabManager} onPanelChange={onPanelChange} />
     case 'diff':
       return <DiffViewer />
     case 'config':

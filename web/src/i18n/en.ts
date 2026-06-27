@@ -51,6 +51,8 @@ const en: Translations = {
     thinkingMode: 'Thinking mode',
     configSaveFailed: 'Failed to save config',
     disconnectedHint: 'Not connected to the server; showing sample data',
+    refresh: 'Refresh',
+    toggleHidden: 'Toggle hidden files',
   },
   session: {
     all: 'All',
@@ -87,6 +89,11 @@ const en: Translations = {
   channel: {
     feishu: 'Feishu',
     unknown: 'Unknown channel',
+  },
+  file: {
+    binaryFile: 'Binary file',
+    imageLoadFailed: 'Failed to load image',
+    zoom: 'Click to zoom',
   },
   time: {
     today: 'Today',

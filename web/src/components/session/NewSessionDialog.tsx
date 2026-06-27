@@ -19,8 +19,10 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { PathPicker } from '@/components/session/PathPicker'
 import { toast } from 'sonner'
 import { useI18n } from '@/providers/i18n'
+import { useCwd } from '@/hooks/useCwd'
 
 interface NewSessionDialogProps {
   open: boolean
@@ -30,18 +32,19 @@ interface NewSessionDialogProps {
 
 export function NewSessionDialog({ open, onOpenChange, onCreate }: NewSessionDialogProps) {
   const { t } = useI18n()
+  const { cwd } = useCwd()
   const [label, setLabel] = useState('')
   const [workPath, setWorkPath] = useState('')
   const [busy, setBusy] = useState(false)
 
-  // Reset the form whenever the dialog opens.
+  // Reset the form whenever the dialog opens; seed workPath with current CWD.
   useEffect(() => {
     if (open) {
       setLabel('')
-      setWorkPath('')
+      setWorkPath(cwd ?? '')
       setBusy(false)
     }
-  }, [open])
+  }, [open, cwd])
 
   const submit = async () => {
     setBusy(true)
@@ -74,11 +77,10 @@ export function NewSessionDialog({ open, onOpenChange, onCreate }: NewSessionDia
           </div>
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="new-session-path">{t('session.workPath')}</Label>
-            <Input
-              id="new-session-path"
+            <PathPicker
               value={workPath}
-              onChange={(e) => setWorkPath(e.target.value)}
-              placeholder={t('session.workPathPlaceholder')}
+              onChange={setWorkPath}
+              compact
               onKeyDown={(e) => {
                 if (e.key === 'Enter') void submit()
               }}

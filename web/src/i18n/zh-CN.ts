@@ -48,6 +48,8 @@ const zhCN = {
     thinkingMode: '思考模式',
     configSaveFailed: '配置保存失败',
     disconnectedHint: '未连接到服务端，显示的是示例数据',
+    refresh: '刷新',
+    toggleHidden: '显示/隐藏 隐藏文件',
   },
   session: {
     all: '全部',
@@ -84,6 +86,11 @@ const zhCN = {
   channel: {
     feishu: '飞书',
     unknown: '未知渠道',
+  },
+  file: {
+    binaryFile: '二进制文件',
+    imageLoadFailed: '图片加载失败',
+    zoom: '点击放大',
   },
   time: {
     today: '今天',

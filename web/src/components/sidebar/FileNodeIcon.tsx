@@ -1,22 +1,22 @@
 /**
- * FileNodeIcon — renders the Lucide file-type icon for a FileNode.
+ * FileNodeIcon — renders the Lucide file-type icon for a file entry.
  *
- * Each icon is rendered explicitly per language (no `const Icon = fileIcon(...)`
- * assignment) so the react-hooks/static-components rule stays happy — resolved
- * icon components shouldn't be assigned to a `const` during render. Directories
- * are handled by the caller (FolderOpen); this only handles file leaves.
+ * Derives the language from the file extension (via `languageOf`) so it no
+ * longer depends on a pre-populated `language` field. Directories are handled
+ * by the caller (FolderOpen); this only handles file leaves.
  */
 import { File, FileCode, FileJson, FileText, Hash } from 'lucide-react'
-import type { FileNode } from './mockFileTree'
+import { languageOf } from '@/components/file/fileTypes'
 
-export function FileNodeIcon({
-  node,
-  className = 'size-4 shrink-0 text-text-secondary',
-}: {
-  node: FileNode
+export interface FileNodeIconProps {
+  /** File name (or full path) — used to infer the language via extension. */
+  fileName: string
   className?: string
-}) {
-  switch (node.language) {
+}
+
+export function FileNodeIcon({ fileName, className = 'size-4 shrink-0 text-text-secondary' }: FileNodeIconProps) {
+  const language = languageOf(fileName)
+  switch (language) {
     case 'typescript':
     case 'javascript':
       return <FileCode className={className} />
