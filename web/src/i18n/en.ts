@@ -157,6 +157,7 @@ const en: Translations = {
     processed: 'Processed {{iterations}} iterations · {{tools}} tools',
     toolGenerating: 'generating args…',
     reasoningStreaming: 'thinking…',
+    thinkingChars: 'Thought {{count}} characters',
   },
   settings: {
     title: 'Settings',

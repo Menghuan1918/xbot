@@ -154,6 +154,7 @@ const zhCN = {
     processed: '已处理 {{iterations}} 次迭代 · 调用 {{tools}} 个工具',
     toolGenerating: '正在生成参数…',
     reasoningStreaming: '思考中…',
+    thinkingChars: '思考了 {{count}} 字符',
   },
   settings: {
     title: '设置',

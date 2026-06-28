@@ -1,16 +1,15 @@
 /**
  * useFileTree — fetches the file tree for the current working directory.
  *
- * Calls the `list_files` WS RPC (serverapp/rpc_table.go) when the WS is
- * connected and the CWD is available. Auto-refreshes when the CWD changes
- * (via the CwdProvider) so the browser/search always reflect the agent's
- * working directory.
+ * Uses the REST API (GET /api/fs/list) via useFileSystem's listDir() to
+ * fetch directory entries. Builds a nested FileNode[] tree from the flat
+ * results. Auto-refreshes when the CWD changes.
  */
 import { useCallback, useEffect, useState } from 'react'
 
 import { useCwd } from '@/providers/CwdProvider'
-import { useWSConnection } from '@/hooks/useWSConnection'
 import { flattenFiles, type FileNode } from '@/types/file'
+import { invalidateFsCache, listDir, joinPath } from '@/hooks/useFileSystem'
 
 interface UseFileTreeResult {
   /** Nested file tree from the CWD root. */
@@ -23,33 +22,63 @@ interface UseFileTreeResult {
   reload: () => void
 }
 
-interface ListFilesResponse {
-  entries?: FileNode[]
+/** Build a nested FileNode[] by recursively listing directories (lazy: 2 levels). */
+async function buildTree(cwd: string): Promise<FileNode[]> {
+  const entries = await listDir(cwd)
+  const nodes: FileNode[] = []
+  for (const entry of entries) {
+    const path = joinPath(cwd, entry.name)
+    const node: FileNode = {
+      name: entry.name,
+      path,
+      type: entry.isDir ? 'directory' : 'file',
+    }
+    if (entry.isDir) {
+      // Lazy: don't recurse automatically — children will be loaded on expand.
+      // But pre-load first level for a better UX.
+      try {
+        const children = await listDir(path)
+        node.children = children.map((child) => {
+          const childPath = joinPath(path, child.name)
+          const childNode: FileNode = {
+            name: child.name,
+            path: childPath,
+            type: child.isDir ? 'directory' : 'file',
+          }
+          return childNode
+        })
+      } catch {
+        node.children = []
+      }
+    }
+    nodes.push(node)
+  }
+  return nodes
 }
 
 export function useFileTree(): UseFileTreeResult {
-  const ws = useWSConnection()
   const { cwd } = useCwd()
   const [tree, setTree] = useState<FileNode[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const reload = useCallback(async () => {
-    if (!ws.connected || !cwd) return
+    if (!cwd) return
     setLoading(true)
     setError(null)
     try {
-      const res = await ws.rpc<ListFilesResponse>('list_files', { path: '' })
-      setTree(res?.entries ?? [])
+      invalidateFsCache()
+      const result = await buildTree(cwd)
+      setTree(result)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
       setTree([])
     } finally {
       setLoading(false)
     }
-  }, [ws, ws.connected, cwd])
+  }, [cwd])
 
-  // Re-fetch when the WS connects or the CWD changes.
+  // Re-fetch when the CWD changes.
   useEffect(() => {
     void reload()
   }, [reload])

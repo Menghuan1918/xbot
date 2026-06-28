@@ -32,9 +32,12 @@ export const IterationGroup = memo(function IterationGroup({
 
   return (
     <div className="flex flex-col gap-1">
-      {/* T: reasoning (always folded by default) */}
+      {/* T: reasoning (always folded by default) — show character count, not T0/T1 */}
       {iteration.reasoning && (
-        <FoldedLine title={`T${iteration.iteration}`} defaultOpen={false}>
+        <FoldedLine
+          title={t('agent.thinkingChars', { count: iteration.reasoning.length })}
+          defaultOpen={false}
+        >
           <ReasoningBlock content={iteration.reasoning} />
         </FoldedLine>
       )}

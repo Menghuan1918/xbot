@@ -341,3 +341,34 @@
  * The virtualizer already keeps the DOM light, but this protects the live
  * streaming card and any non-virtualized fallback from layout thrash. */
 .agent-msg-card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+
+/* ── Shimmer "正在思考" effect ──────────────────────────────────────────────
+ * A sliding gradient light band from left to right, similar to skeleton
+ * screen loading. Used by ShimmerThinking component during streaming.
+ */
+@keyframes shimmer {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.shimmer-overlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--shimmer-color, rgba(255,255,255,0.08)) 50%,
+    transparent 100%
+  );
+  animation: shimmer 1.8s ease-in-out infinite;
+}
+
+/* ── Fold/expand animation ───────────────────────────────────────────────────
+ * Smooth height/opacity transition for FoldedLine content.
+ */
+.fold-content {
+  animation: foldExpand 0.2s ease-out;
+}
+@keyframes foldExpand {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}

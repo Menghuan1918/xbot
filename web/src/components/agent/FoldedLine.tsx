@@ -55,7 +55,7 @@ export const FoldedLine = memo(function FoldedLine({
         <span className="min-w-0 flex-1 truncate">{title}</span>
       </button>
       {open && children && (
-        <div className={cn('ml-4', contentClassName)}>{children}</div>
+        <div className={cn('ml-4 fold-content', contentClassName)}>{children}</div>
       )}
     </div>
   )

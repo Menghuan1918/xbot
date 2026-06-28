@@ -61,9 +61,12 @@ export const LiveIteration = memo(function LiveIteration({
 
   return (
     <div className="flex flex-col gap-1">
-      {/* Streaming T */}
+      {/* Streaming T — show character count instead of T0/T1 */}
       {hasReasoning && (
-        <FoldedLine title={t('agent.reasoningStreaming')} defaultOpen={false}>
+        <FoldedLine
+          title={t('agent.thinkingChars', { count: progress.reasoningStreamContent.length })}
+          defaultOpen={false}
+        >
           <ReasoningBlock
             content={progress.reasoningStreamContent}
             streaming
