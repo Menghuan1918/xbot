@@ -224,11 +224,9 @@ export class WSConnectionImpl implements WSConnection {
 
       case 'progress_structured':
       case 'stream_content':
+        // Both types carry their payload in msg.progress (per protocol/ws.go).
+        // stream_content's content is in progress.stream_content, not top-level.
         if (msg.progress) this.progressHandlers.forEach((h) => h(msg.progress!))
-        else if (msg.type === 'stream_content' && msg.content) {
-          // stream_content may carry content directly; wrap minimally.
-          this.progressHandlers.forEach((h) => h({ stream_content: msg.content }))
-        }
         this.messageHandlers.forEach((h) => h(msg))
         return
 

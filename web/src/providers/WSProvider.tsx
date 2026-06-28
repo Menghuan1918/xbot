@@ -47,7 +47,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
   // Keep chatID reactive for the `chatID` field on the context value.
   useEffect(() => {
     const off = conn.onMessage((m) => {
-      if (m.type === 'session' && m.chat_id) setChatID(m.chat_id)
+      if (m.type === 'session' && m.session?.chat_id) setChatID(m.session.chat_id)
     })
     return off
   }, [conn])

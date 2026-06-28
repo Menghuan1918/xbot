@@ -113,15 +113,29 @@ export function useChatMessages({
   }, [enabled, chatID, reload])
 
   // Echo back user messages the server re-serializes (e.g. with file info).
+  // The server sends both `content` (with file markdown) and `original_content`
+  // (raw text). We use `content` to preserve file rendering, and replace the
+  // optimistic message we inserted in `sendMessage` rather than appending a
+  // duplicate.
   useEffect(() => {
     if (!chatID) return
     const off = ws.onMessage((msg: WSMessage) => {
       if (msg.chat_id && chatIDRef.current && msg.chat_id !== chatIDRef.current) return
       if (msg.type !== 'user_echo') return
-      const content = msg.original_content ?? msg.content ?? ''
+      const content = msg.content ?? msg.original_content ?? ''
       if (!content) return
       const id = `echo-${msg.ts ?? Date.now()}-${echoSeq++}`
-      setMessages((prev) => [...prev, { id, role: 'user', content }])
+      setMessages((prev) => {
+        // Replace the last optimistic user message (id starts with 'user-')
+        // instead of appending a duplicate.
+        const lastUserIdx = prev.findLastIndex((m) => m.id.startsWith('user-'))
+        if (lastUserIdx >= 0) {
+          const copy = [...prev]
+          copy[lastUserIdx] = { id, role: 'user', content }
+          return copy
+        }
+        return [...prev, { id, role: 'user', content }]
+      })
     })
     return off
   }, [ws, chatID])

@@ -110,6 +110,9 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
       theme: themeVisualStudio,
       createComponent: (opts) => new ReactContentRenderer(opts.name, ctxRef),
       createTabComponent: () => new ReactTabRenderer(ctxRef),
+      // Without this, dockview falls back to its built-in DefaultTab which
+      // always shows an X close button regardless of our closable flag.
+      defaultTabComponent: 'react',
       // Suppress the right-click context menu which has a "close" action.
       getTabContextMenuItems: () => [],
     }

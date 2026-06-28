@@ -49,7 +49,7 @@ export interface FsStatResult {
   isDir: boolean
   size: number
   modTime: string
-  mode: number
+  mode: string   // e.g. "-rw-r--r--" from os.FileMode.String()
 }
 
 /* ── Cache ───────────────────────────────────────────────────────────────── */
