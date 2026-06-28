@@ -176,13 +176,13 @@ describe('useProgressStream event dispatch', () => {
     })
     expect(result.current.isStreaming).toBe(true)
     expect(result.current.liveMessage?.content).toBe('resumed stream')
-    expect(result.current.progress.activeTools).toHaveLength(1)
-    expect(result.current.progress.completedTools).toHaveLength(1)
-    expect(result.current.progress.iteration).toBe(3)
-    expect(result.current.progress.iterationHistory).toHaveLength(1)
+    expect(result.current.progressSnapshot.activeTools).toHaveLength(1)
+    expect(result.current.progressSnapshot.completedTools).toHaveLength(1)
+    expect(result.current.progressSnapshot.iteration).toBe(3)
+    expect(result.current.progressSnapshot.iterationHistory).toHaveLength(1)
     // normalizeIteration fell back to completed_tools:
-    expect(result.current.progress.iterationHistory[0].tools).toHaveLength(1)
-    expect(result.current.progress.iterationHistory[0].tools[0].name).toBe('Grep')
+    expect(result.current.progressSnapshot.iterationHistory[0].tools).toHaveLength(1)
+    expect(result.current.progressSnapshot.iterationHistory[0].tools[0].name).toBe('Grep')
   })
 
   it('does not hydrate when initialProgress phase is done', () => {
@@ -207,8 +207,8 @@ describe('useProgressStream event dispatch', () => {
         active_tools: [{ name: 'Grep', status: 'running' }],
       } as ProgressEvent,
     })
-    expect(result.current.progress.iteration).toBe(2)
-    expect(result.current.progress.activeTools[0].name).toBe('Grep')
-    expect(result.current.progress.reasoningContent).toBe('because')
+    expect(result.current.progressSnapshot.iteration).toBe(2)
+    expect(result.current.progressSnapshot.activeTools[0].name).toBe('Grep')
+    expect(result.current.progressSnapshot.lastReasoning).toBe('because')
   })
 })

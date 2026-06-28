@@ -147,6 +147,11 @@ export interface ProgressEvent {
   reasoning_stream_content?: string
   questions?: unknown[]
   request_id?: string
+  /** Tools detected during LLM streaming (status="generating"), before
+   *  arguments finish generating. Sent via stream_content events. */
+  streaming_tools?: unknown[]
+  /** Tool hints from plugins (PostToolUse hook). */
+  tool_hints?: string
   [key: string]: unknown
 }
 
@@ -159,4 +164,95 @@ export interface SessionEvent {
   role?: string
   instance?: string
   parent_id?: string
+}
+
+/* ---------------------------------------------------------------------------
+ * Streaming data model (Spec 3 — 流式数据模型与 Store 重写).
+ *
+ * These types are the shared contract for Spec 4 (Agent workspace) and
+ * Spec 5 (history / persistence). ProgressStore owns a ProgressSnapshot;
+ * useProgressStream derives a live ChatMessage from it; useChatMessages
+ * owns the committed ChatMessage[] list.
+ * ------------------------------------------------------------------------- */
+
+/** Tool call progress status. */
+export type ToolStatus = 'generating' | 'running' | 'done' | 'error'
+
+/** Tool call progress — normalized from WS progress events or history. */
+export interface WebToolProgress {
+  name: string
+  label: string
+  status: ToolStatus
+  elapsedMs: number
+  summary: string
+  detail: string
+  args: string
+  toolHints: string
+}
+
+/** Iteration snapshot — one completed iteration's reasoning + tools. */
+export interface WebIteration {
+  iteration: number
+  thinking: string
+  reasoning: string
+  tools: WebToolProgress[]
+  toolCount: number
+  /** Wall-clock duration (ms), optional — not always available from snapshots. */
+  elapsedMs?: number
+}
+
+/**
+ * ProgressStore snapshot — the complete live state of an in-flight agent turn.
+ *
+ * Stream-only fields (`streamContent`, `reasoningStreamContent`, `streamingTools`)
+ * are accumulated by stream_content events and preserved (carry-forward) when
+ * structured events arrive. Structured fields (`phase`, `iteration`, `activeTools`,
+ * `completedTools`) are replaced by progress_structured events.
+ */
+export interface ProgressSnapshot {
+  phase: string
+  iteration: number
+  streamContent: string
+  reasoningStreamContent: string
+  streaming: boolean
+  activeTools: WebToolProgress[]
+  completedTools: WebToolProgress[]
+  iterationHistory: WebIteration[]
+  streamingTools: WebToolProgress[]
+  lastIter: number
+  lastReasoning: string
+}
+
+/** Empty snapshot — the idle state. */
+export const EMPTY_PROGRESS_SNAPSHOT: ProgressSnapshot = {
+  phase: '',
+  iteration: 0,
+  streamContent: '',
+  reasoningStreamContent: '',
+  streaming: false,
+  activeTools: [],
+  completedTools: [],
+  iterationHistory: [],
+  streamingTools: [],
+  lastIter: -1,
+  lastReasoning: '',
+}
+
+/** Chat message role. */
+export type ChatMessageRole = 'user' | 'assistant' | 'system'
+
+/**
+ * Committed chat message — the shape all rendering components consume.
+ * `assistant` messages carry `iterations` (parsed from history `detail` JSON).
+ * Live streaming messages use `isPartial: true` and `turnID: 0`.
+ */
+export interface ChatMessage {
+  id: string
+  role: ChatMessageRole
+  content: string
+  iterations: WebIteration[]
+  timestamp: string
+  isPartial: boolean
+  turnID: number
+  displayOnly?: boolean
 }

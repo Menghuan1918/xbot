@@ -53,6 +53,10 @@ function makeMessages(n: number): ChatMessage[] {
     id: `m${i}`,
     role: i % 2 === 0 ? 'user' : 'assistant',
     content: `message ${i}`,
+    iterations: [],
+    timestamp: '',
+    isPartial: false,
+    turnID: 0,
   }))
 }
 
@@ -96,7 +100,7 @@ describe('MessageList virtualization', () => {
 
   it('forwards a live streaming message through the row list without throwing', () => {
     const messages = makeMessages(10)
-    const live: ChatMessage = { id: 'live-1', role: 'assistant', content: 'streaming…' }
+    const live: ChatMessage = { id: 'live-1', role: 'assistant', content: 'streaming…', iterations: [], timestamp: '', isPartial: true, turnID: 0 }
     expect(() =>
       renderWithProviders(
         <MessageList

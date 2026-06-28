@@ -8,12 +8,32 @@
  * channel/web/web_api.go). Keeping them in one module avoids circular imports
  * between the hooks and components.
  *
+ * Spec 3 migration: `LiveProgress` is now an alias for `ProgressSnapshot`
+ * (defined in `shared.ts`). `ChatMessage` is re-exported from `shared.ts`.
+ * The stream-only field `reasoningContent` has been renamed to
+ * `reasoningStreamContent` to match the spec.
+ *
  * Conventions:
  *  - `id` is a string for messages (DB row ids are coerced to string for stable
  *    React keys across reload + live append).
  *  - Optional backend fields are typed optional/nullable and normalized at the
  *    hook boundary so components can assume a clean shape.
  */
+
+// Re-export shared types from Spec 3 (shared.ts) so existing import paths
+// (`@/types/agent`) continue to work during the migration.
+export {
+  type ProgressSnapshot,
+  type WebToolProgress,
+  type WebIteration,
+  type ChatMessage,
+  type ChatMessageRole,
+  type ToolStatus,
+  EMPTY_PROGRESS_SNAPSHOT,
+} from './shared'
+
+// Local import for type aliasing below.
+import type { ProgressSnapshot } from './shared'
 
 /** Collapse preference persisted at localStorage key `xbot-collapse-level`. */
 export type CollapseLevel = 'all' | 'minimal' | 'none'
@@ -42,11 +62,13 @@ export interface IterationSnapshot {
   tools: IterationTool[]
 }
 
-/** A live tool being executed (protocol/events.go ToolProgress). */
+/** A live tool being executed (protocol/events.go ToolProgress).
+ *  Kept for backward compatibility with components that accept both
+ *  `IterationTool` (history) and `ToolProgress` (live) tool shapes. */
 export interface ToolProgress {
   name?: string
   label?: string
-  /** 'pending' | 'running' | 'done' | 'error'. */
+  /** 'pending' | 'running' | 'done' | 'error' | 'generating'. */
   status?: string
   elapsedMs?: number
   iteration?: number
@@ -67,51 +89,28 @@ export interface AskUserPrompt {
   questions: AskUserQuestion[]
 }
 
-/** Chat message role. */
+/** Chat message role (backward-compat alias). */
 export type MessageRole = 'user' | 'assistant'
 
 /**
- * Normalized chat message — the shape all rendering components consume.
- * `assistant` messages may carry `iterations` (parsed from the history `detail`
- * JSON) and a `displayOnly` flag (cron results, [interrupted] markers, ...).
+ * LiveProgress is now an alias for ProgressSnapshot (Spec 3).
+ * Components reading `reasoningContent` should use `reasoningStreamContent`.
  */
-export interface ChatMessage {
-  id: string
-  role: MessageRole
-  content: string
-  createdAt?: string
-  /** True for messages excluded from the LLM context but still displayed. */
-  displayOnly?: boolean
-  /** Iteration history for assistant messages, parsed from the `detail` field. */
-  iterations?: IterationSnapshot[]
-}
+export type LiveProgress = ProgressSnapshot
 
-/** Snapshot of the live progress shown above the input while the agent runs. */
-export interface LiveProgress {
-  /** Cumulative streamed assistant text (stream_content). */
-  streamContent: string
-  /** Cumulative streamed reasoning text (reasoning_stream_content). */
-  reasoningContent: string
-  /** Tools currently executing. */
-  activeTools: ToolProgress[]
-  /** Tools finished this run. */
-  completedTools: ToolProgress[]
-  /** Current iteration number. */
-  iteration: number
-  /** Iteration snapshots accumulated during the live run. */
-  iterationHistory: IterationSnapshot[]
-  /** True while the agent is actively producing output. */
-  streaming: boolean
-}
-
+/** Empty snapshot — the idle state (Spec 3 alias). */
 export const EMPTY_LIVE_PROGRESS: LiveProgress = {
+  phase: '',
+  iteration: 0,
   streamContent: '',
-  reasoningContent: '',
+  reasoningStreamContent: '',
+  streaming: false,
   activeTools: [],
   completedTools: [],
-  iteration: 0,
   iterationHistory: [],
-  streaming: false,
+  streamingTools: [],
+  lastIter: -1,
+  lastReasoning: '',
 }
 
 /** Status badge kind for a tool, derived from its status string. */
