@@ -27,6 +27,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
 import { fetchHistory } from '@/components/agent/api'
+import { useSessionStore } from '@/hooks/useSessionStore'
 import type { TabManager } from '@/hooks/useTabManager'
 import type { TerminalSession, TerminalStatus } from '@/types/terminal'
 
@@ -75,8 +76,10 @@ class TerminalStore {
   }
 
   /* ── reads ── */
-  snapshot(): TerminalSession[] {
-    return [...this.sessions.values()].sort((a, b) => a.createdAt - b.createdAt)
+  snapshot(chatID?: string): TerminalSession[] {
+    const all = [...this.sessions.values()].sort((a, b) => a.createdAt - b.createdAt)
+    if (!chatID) return all
+    return all.filter((s) => s.chatID === chatID)
   }
   getSession(id: string): TerminalSession | null {
     return this.sessions.get(id) ?? null
@@ -165,13 +168,15 @@ class TerminalStore {
   }
 
   /**
-   * Close a terminal via its tab. Closing the tab unmounts the panel, whose
-   * cleanup disposes the WS and DELETEs the backend, then removes the session.
-   * If there is no tab (panel never mounted), tear down directly here.
+   * Close a terminal via its tab. Sets the `closing` flag so the panel's
+   * cleanup sends a WS close frame (destroying the backend PTY) and removes
+   * the session from the store. If there is no tab (panel never mounted),
+   * tear down the backend directly via DELETE.
    */
   closeTerminal(id: string): void {
     const tabId = this.tabIdFor(id)
     if (tabId) {
+      this.patch(id, { closing: true })
       this.tabOps?.closeTab(tabId)
       return
     }
@@ -189,6 +194,50 @@ class TerminalStore {
       /* ignore — backend idle-reaps orphaned terminals */
     }
   }
+
+  /**
+   * Restore the terminal list for a chat session from the backend.
+   * Syncs the store with GET /api/terminal/list — removes orphaned store
+   * records and adds backend terminals not yet tracked (e.g. after page refresh).
+   */
+  async restoreFromBackend(chatID: string): Promise<void> {
+    try {
+      const res = await fetch(`/api/terminal/list?chatID=${encodeURIComponent(chatID)}`)
+      const data = (await res.json()) as {
+        terminals?: Array<{ tid: string; cwd: string; createdAt: string }>
+      }
+      if (!res.ok || !data.terminals) return
+
+      const backendTids = new Set(data.terminals.map((t) => t.tid))
+
+      // Remove store records for this chatID whose tid is no longer in the backend.
+      for (const [id, sess] of this.sessions) {
+        if (sess.chatID === chatID && !backendTids.has(sess.tid)) {
+          this.remove(id)
+        }
+      }
+
+      // Add backend terminals not yet in the store (e.g. after page refresh).
+      for (const info of data.terminals) {
+        const existing = [...this.sessions.values()].find((s) => s.tid === info.tid)
+        if (!existing) {
+          const id = genTermId()
+          this.sessions.set(id, {
+            id,
+            tid: info.tid,
+            chatID,
+            cwd: info.cwd,
+            title: `Terminal ${termSeq}`,
+            status: 'connecting',
+            createdAt: new Date(info.createdAt).getTime(),
+          })
+        }
+      }
+      this.notify()
+    } catch {
+      /* best-effort */
+    }
+  }
 }
 
 /** Module-level singleton — survives re-renders and is importable anywhere. */
@@ -202,6 +251,8 @@ export interface TerminalManager {
 }
 
 export function useTerminal(tabManager: TabManager): TerminalManager {
+  const sessionStore = useSessionStore()
+  const chatID = sessionStore.activeSessionId ?? undefined
 
   // Keep the store bound to the live tab manager (re-bind on identity change).
   useEffect(() => {
@@ -217,14 +268,19 @@ export function useTerminal(tabManager: TabManager): TerminalManager {
     return () => terminalStore.bindTabOps(null)
   }, [tabManager])
 
-  // Mirror the store's snapshot into React state for the sidebar list.
+  // Mirror the store's snapshot (filtered by the active chat) into React state.
   const [terminals, setTerminals] = useState<TerminalSession[]>(() =>
-    terminalStore.snapshot(),
+    terminalStore.snapshot(chatID),
   )
   useEffect(
-    () => terminalStore.subscribe(() => setTerminals(terminalStore.snapshot())),
-    [],
+    () => terminalStore.subscribe(() => setTerminals(terminalStore.snapshot(chatID))),
+    [chatID],
   )
+
+  // Restore terminal list from backend when the active session changes.
+  useEffect(() => {
+    if (chatID) void terminalStore.restoreFromBackend(chatID)
+  }, [chatID])
 
   const createTerminal = useCallback(async (): Promise<string | null> => {
     // Resolve the current session's chatID (server's active chat) + cwd so the

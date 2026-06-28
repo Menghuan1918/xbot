@@ -25,6 +25,7 @@ func startTerminalTestServer(t *testing.T, wc *WebChannel) *httptest.Server {
 	mux.HandleFunc("/api/auth/register", limitBodySize(wc.handleRegister))
 	mux.HandleFunc("/api/auth/login", limitBodySize(wc.handleLogin))
 	mux.HandleFunc("/api/terminal/create", limitBodySize(wc.authMiddleware(wc.handleTerminalCreate)))
+	mux.HandleFunc("/api/terminal/list", wc.authMiddleware(wc.handleTerminalList))
 	mux.HandleFunc("/api/terminal/", wc.authMiddleware(wc.handleTerminalRoute))
 	mux.HandleFunc("/ws/terminal", wc.handleTerminalWS)
 	server := httptest.NewServer(mux)
@@ -366,4 +367,133 @@ func TestTerminalWS_NotFound(t *testing.T) {
 	if resp != nil && resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown tid, got %d", resp.StatusCode)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ListByChat API tests
+// ---------------------------------------------------------------------------
+
+func TestTerminalListByChat(t *testing.T) {
+	db := newTestDB(t)
+	wc, _ := newTestWebChannel(t, db)
+	server := startTerminalTestServer(t, wc)
+	cookie := registerLoginCookie(t, server)
+
+	// Create 2 terminals on chatA and 1 on chatB.
+	tidA1 := createTerminal(t, server, cookie, "chatA", "/tmp")
+	tidA2 := createTerminal(t, server, cookie, "chatA", "")
+	createTerminal(t, server, cookie, "chatB", "")
+	t.Cleanup(func() {
+		wc.terminals().CleanupAll()
+	})
+
+	// GET /api/terminal/list?chatID=chatA → 2 terminals.
+	req, _ := http.NewRequest("GET", server.URL+"/api/terminal/list?chatID=chatA", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var out struct {
+		Terminals []TerminalInfo `json:"terminals"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Terminals) != 2 {
+		t.Fatalf("expected 2 terminals for chatA, got %d", len(out.Terminals))
+	}
+	// Verify the returned tids match (order may vary).
+	seen := map[string]bool{}
+	for _, ti := range out.Terminals {
+		seen[ti.TID] = true
+	}
+	if !seen[tidA1] || !seen[tidA2] {
+		t.Fatalf("expected tids %s and %s, got %v", tidA1, tidA2, seen)
+	}
+}
+
+func TestTerminalListByChat_Empty(t *testing.T) {
+	db := newTestDB(t)
+	wc, _ := newTestWebChannel(t, db)
+	server := startTerminalTestServer(t, wc)
+	cookie := registerLoginCookie(t, server)
+
+	req, _ := http.NewRequest("GET", server.URL+"/api/terminal/list?chatID=no-such-chat", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var out struct {
+		Terminals []TerminalInfo `json:"terminals"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Terminals) != 0 {
+		t.Fatalf("expected 0 terminals, got %d", len(out.Terminals))
+	}
+}
+
+func TestTerminalListByChat_MissingChatID(t *testing.T) {
+	db := newTestDB(t)
+	wc, _ := newTestWebChannel(t, db)
+	server := startTerminalTestServer(t, wc)
+	cookie := registerLoginCookie(t, server)
+
+	req, _ := http.NewRequest("GET", server.URL+"/api/terminal/list", nil)
+	req.AddCookie(cookie)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing chatID, got %d", resp.StatusCode)
+	}
+}
+
+// TestTerminalWSPersistAfterDisconnect verifies that a WS disconnect does NOT
+// destroy the terminal — it should persist so a later reconnect resumes it.
+func TestTerminalWSPersistAfterDisconnect(t *testing.T) {
+	db := newTestDB(t)
+	wc, _ := newTestWebChannel(t, db)
+	server := startTerminalTestServer(t, wc)
+	cookie := registerLoginCookie(t, server)
+	tid := createTerminal(t, server, cookie, "chat-persist", "")
+	t.Cleanup(func() { wc.destroyTerminal(tid) })
+
+	// Connect and then disconnect (without sending "close").
+	wsURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	header := http.Header{}
+	header.Set("Cookie", webSessionCookieName+"="+cookie.Value)
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL+"/ws/terminal?tid="+tid, header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close() // transient disconnect — no "close" message sent
+
+	// Give the server a moment to process the disconnect.
+	time.Sleep(200 * time.Millisecond)
+
+	// Terminal must still exist.
+	if _, ok := wc.terminals().get(tid); !ok {
+		t.Fatal("terminal was destroyed on transient WS disconnect — should persist")
+	}
+
+	// A new WS should be able to reconnect.
+	conn2, _, err := websocket.DefaultDialer.Dial(wsURL+"/ws/terminal?tid="+tid, header)
+	if err != nil {
+		t.Fatalf("reconnect failed: %v", err)
+	}
+	conn2.Close()
 }

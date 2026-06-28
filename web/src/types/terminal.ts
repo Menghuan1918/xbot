@@ -42,6 +42,8 @@ export interface TerminalSession {
   error?: string
   /** Dockview tab id once the tab is opened (for focus/close wiring). */
   tabId?: string
+  /** True when the user explicitly closed this terminal (panel cleanup sends WS close). */
+  closing?: boolean
   /** Creation timestamp (ms). */
   createdAt: number
 }
