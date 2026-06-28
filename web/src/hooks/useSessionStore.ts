@@ -21,7 +21,7 @@
  *   REST    GET /api/sessions/{chatID}/cwd  → { dir }
  *   WS     subscribe { type:'subscribe', chat_id }
  */
-import { createElement, createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { createElement, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useWSConnection } from '@/hooks/useWSConnection'
 import { groupSessions, sortSessions } from '@/lib/session-grouping'
 import type { SessionCategory, SessionInfo, SessionStatus } from '@/types/shared'
@@ -348,10 +348,10 @@ export function useSessionStoreImpl(): SessionStore {
     void refresh()
   }, [refresh, channel])
 
-  const sortedSessions = sortSessions(sessions, starredIds)
-  const groups = groupSessions(sessions, category, starredIds)
+  const sortedSessions = useMemo(() => sortSessions(sessions, starredIds), [sessions, starredIds])
+  const groups = useMemo(() => groupSessions(sessions, category, starredIds), [sessions, category, starredIds])
 
-  return {
+  return useMemo(() => ({
     sessions,
     groups,
     sortedSessions,
@@ -369,7 +369,8 @@ export function useSessionStoreImpl(): SessionStore {
     switchSession,
     renameSession,
     deleteSession,
-  }
+  }), [sessions, groups, sortedSessions, activeSessionId, starredIds, category, channel, loading, error,
+    setCategory, setChannel, refresh, toggleStar, createSession, switchSession, renameSession, deleteSession])
 }
 
 /* ── Context singleton ── */

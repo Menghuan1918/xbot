@@ -43,10 +43,14 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
   const effectiveLevel: CollapseLevel = isStreaming ? 'minimal' : collapseLevel
   const liveProgress = isStreaming ? progress : null
 
-  // 'all' level + committed: show summary + final O only (all intermediate content folded).
+  // 'all' level + committed: fold all intermediate content (iterations' thinking/O),
+  // show only the last TEXT output. Last TEXT = message.content, or fall back to
+  // the last iteration's thinking when content is empty.
   if (effectiveLevel === 'all' && !isStreaming) {
     const totalTools = iterations.reduce((sum, iter) => sum + iter.toolCount, 0)
     const showSummary = iterations.length > 0
+    const lastIteration = iterations[iterations.length - 1]
+    const lastText = message.content || lastIteration?.thinking || ''
 
     return (
       <div className="agent-msg-card px-1">
@@ -61,8 +65,8 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
             )}
           </FoldedLine>
         )}
-        {message.content ? (
-          <MarkdownRenderer content={message.content} />
+        {lastText ? (
+          <MarkdownRenderer content={lastText} />
         ) : (
           !showSummary && (
             <span className="text-sm text-text-muted">{t('agent.emptyAssistant')}</span>

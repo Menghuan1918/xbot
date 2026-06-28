@@ -51,6 +51,31 @@ export function normalizeLanguage(lang: string | undefined): string | undefined 
   return trimmed || undefined
 }
 
+/** LRU cache for highlight results — committed messages re-render frequently
+ * (scroll, collapse toggles) so cache hits approach 100%. limit=200 prevents
+ * unbounded growth in long sessions. */
+const hlCache = new Map<string, string | null>()
+const CACHE_LIMIT = 200
+
+function cacheGet(key: string): string | null | undefined {
+  const val = hlCache.get(key)
+  if (val !== undefined) {
+    // Move to end (most-recently-used) by re-inserting.
+    hlCache.delete(key)
+    hlCache.set(key, val)
+  }
+  return val
+}
+
+function cacheSet(key: string, value: string | null): void {
+  if (hlCache.size >= CACHE_LIMIT) {
+    // Evict the oldest entry (first in insertion order).
+    const oldest = hlCache.keys().next().value
+    if (oldest !== undefined) hlCache.delete(oldest)
+  }
+  hlCache.set(key, value)
+}
+
 /**
  * Highlight `code` for `language`, returning an HTML string of <span> tokens.
  * Returns null when the language is unknown so the caller can render plain text.
@@ -58,10 +83,18 @@ export function normalizeLanguage(lang: string | undefined): string | undefined 
 export function highlightCode(code: string, language: string | undefined): string | null {
   const lang = normalizeLanguage(language)
   if (!lang) return null
+  const cacheKey = `${lang}::${code}`
+  const cached = cacheGet(cacheKey)
+  if (cached !== undefined) return cached
   try {
     ensureRegistered()
-    if (!hljs.getLanguage(lang)) return null
-    return hljs.highlight(code, { language: lang }).value
+    if (!hljs.getLanguage(lang)) {
+      cacheSet(cacheKey, null)
+      return null
+    }
+    const result = hljs.highlight(code, { language: lang }).value
+    cacheSet(cacheKey, result)
+    return result
   } catch {
     return null
   }
@@ -69,10 +102,13 @@ export function highlightCode(code: string, language: string | undefined): strin
 
 /** Best-effort auto-highlight when no language is given; null if nothing matched. */
 export function highlightAuto(code: string): string | null {
+  const cached = cacheGet(`auto::${code}`)
+  if (cached !== undefined) return cached
   try {
     ensureRegistered()
     const result = hljs.highlightAuto(code)
     // highlightAuto always returns something; only treat as "no language" if no relevance.
+    cacheSet(`auto::${code}`, result.value)
     return result.value
   } catch {
     return null

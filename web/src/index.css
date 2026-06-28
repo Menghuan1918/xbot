@@ -363,12 +363,30 @@
 }
 
 /* ── Fold/expand animation ───────────────────────────────────────────────────
- * Smooth height/opacity transition for FoldedLine content.
+ * Smooth height/opacity transition for FoldedLine content using
+ * CSS grid-template-rows (0fr → 1fr) — more natural than max-height
+ * because it animates to actual content height without guessing a max.
  */
-.fold-content {
-  animation: foldExpand 0.2s ease-out;
+.fold-container {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease-out, opacity 0.2s ease-out;
+  opacity: 0;
 }
-@keyframes foldExpand {
-  from { opacity: 0; transform: translateY(-4px); }
-  to   { opacity: 1; transform: translateY(0); }
+.fold-container.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.fold-content {
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* Arrow rotation for fold toggles */
+.fold-arrow {
+  transition: transform 0.2s ease-out;
+  display: inline-block;
+}
+.fold-arrow.open {
+  transform: rotate(90deg);
 }

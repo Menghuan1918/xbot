@@ -4,6 +4,10 @@
  * Replaces CollapsibleCard for the three-level folding model. No borders, no
  * background — just a clickable toggle line with an arrow indicator. Content
  * indents 16px when expanded. All sibling folds are at the same visual level.
+ *
+ * Animation: uses CSS grid-template-rows (0fr → 1fr) for smooth height
+ * transition. Children are always rendered (DOM present) but visually
+ * collapsed via the grid + opacity — this enables the transition animation.
  */
 import { memo, useState, type ReactNode } from 'react'
 
@@ -51,12 +55,14 @@ export const FoldedLine = memo(function FoldedLine({
           'cursor-pointer text-text-secondary hover:text-text-primary transition-colors',
         )}
       >
-        <span className="shrink-0 text-text-muted select-none">{open ? '▾' : '▸'}</span>
+        <span className={cn('fold-arrow shrink-0 text-text-muted select-none', open && 'open')}>▸</span>
         <span className="min-w-0 flex-1 truncate">{title}</span>
       </button>
-      {open && children && (
-        <div className={cn('ml-4 fold-content', contentClassName)}>{children}</div>
-      )}
+      <div className={cn('ml-4 fold-container', open && 'open')}>
+        <div className="fold-content">
+          <div className={contentClassName}>{children}</div>
+        </div>
+      </div>
     </div>
   )
 })
