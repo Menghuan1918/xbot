@@ -151,7 +151,9 @@ const zhCN = {
     statusPending: '等待',
     none: '—',
     toolGroup: '{{count}} 个工具',
-    processed: '已处理 {{iterations}} 次迭代 · {{elapsed}}',
+    processed: '已处理 {{iterations}} 次迭代 · 调用 {{tools}} 个工具',
+    toolGenerating: '正在生成参数…',
+    reasoningStreaming: '思考中…',
   },
   settings: {
     title: '设置',

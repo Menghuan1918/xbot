@@ -31,32 +31,38 @@ function readStored(): CollapseLevel {
   return DEFAULT_COLLAPSE_LEVEL
 }
 
+export type BlockType = 'reasoning' | 'tool' | 'text' | 'iteration'
+
 export interface UseCollapseLevelResult {
   level: CollapseLevel
   setLevel: (level: CollapseLevel) => void
   /** Whether a given collapsible group should start open for this level. */
-  defaultOpen: (kind: 'tool' | 'reasoning' | 'iteration') => boolean
+  defaultOpen: (blockType: BlockType) => boolean
 }
 
 /**
- * Resolve the default-open state for a collapsible group under a collapse level.
+ * Resolve the default-open state for a collapsible block under a collapse level.
  * Pure helper, exported for components that manage their own open state.
  *
- *   all     → everything closed (final output + total-elapsed summary only)
- *   minimal → iteration closed, tool closed, reasoning closed — groups are
- *             visible as cards with summaries but bodies stay collapsed.
- *   none    → iteration open, tool open, reasoning always closed (T is
- *             permanently collapsed, matching opencode's rule).
+ * BlockType mapping (WebIteration fields):
+ *   'reasoning' = T — reasoning block (always folded)
+ *   'tool'      = C — tool call
+ *   'text'      = O — text output (always shown, not folded)
+ *   'iteration' = iteration container
+ *
+ *   all     → everything closed (summary + final O only)
+ *   minimal → everything folded but the folded *rows* are rendered (T/C folded, O shown)
+ *   none    → everything expands except reasoning (T is always folded)
  */
-export function defaultOpenForLevel(level: CollapseLevel, kind: 'tool' | 'reasoning' | 'iteration'): boolean {
+export function defaultOpenForLevel(level: CollapseLevel, blockType: BlockType): boolean {
   switch (level) {
     case 'none':
       // Everything expands except reasoning (T blocks are always collapsed).
-      return kind !== 'reasoning'
+      return blockType !== 'reasoning'
     case 'all':
-      return false
+      return false // full collapse
     case 'minimal':
-      return false
+      return false // full collapse (header shows summary, click to expand detail)
   }
 }
 
@@ -81,7 +87,7 @@ export function useCollapseLevel(): UseCollapseLevelResult {
   }, [])
 
   const defaultOpen = useCallback(
-    (kind: 'tool' | 'reasoning' | 'iteration') => defaultOpenForLevel(level, kind),
+    (blockType: BlockType) => defaultOpenForLevel(level, blockType),
     [level],
   )
 

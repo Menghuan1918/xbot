@@ -154,7 +154,9 @@ const en: Translations = {
     statusPending: 'pending',
     none: '—',
     toolGroup: '{{count}} tools',
-    processed: 'Processed {{iterations}} iterations · {{elapsed}}',
+    processed: 'Processed {{iterations}} iterations · {{tools}} tools',
+    toolGenerating: 'generating args…',
+    reasoningStreaming: 'thinking…',
   },
   settings: {
     title: 'Settings',
