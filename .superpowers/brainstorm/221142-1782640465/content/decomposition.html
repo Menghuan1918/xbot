@@ -1,0 +1,102 @@
+<h2>分解设计 — 5 个子 Spec</h2>
+<p class="subtitle">主 Spec: 06-28-Web会话与API重构-主设计</p>
+
+<div class="section">
+  <h3>依赖与并行策略</h3>
+  <div style="background:#1a1a2e;padding:24px;border-radius:12px;font-family:monospace;font-size:14px;line-height:2;color:#ccc;">
+    <div style="text-align:center;margin-bottom:8px;">
+      <span style="color:#888;">第一波（同时启动，完全独立）</span>
+    </div>
+    <div style="display:flex;gap:16px;justify-content:center;margin-bottom:16px;">
+      <div style="background:#2a2a4a;border:2px solid #6b8afd;border-radius:8px;padding:12px;width:200px;text-align:center;">
+        <div style="color:#6b8afd;font-weight:bold;">Spec 1</div>
+        <div style="font-size:12px;margin-top:4px;">Tab/Header 集成重写</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">纯前端 · 中复杂度</div>
+      </div>
+      <div style="background:#2a2a4a;border:2px solid #e8a838;border-radius:8px;padding:12px;width:200px;text-align:center;">
+        <div style="color:#e8a838;font-weight:bold;">Spec 2</div>
+        <div style="font-size:12px;margin-top:4px;">共享代码还原 + CWD</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">后端+前端 · 低复杂度</div>
+      </div>
+      <div style="background:#2a2a4a;border:2px solid #4ec9b0;border-radius:8px;padding:12px;width:200px;text-align:center;">
+        <div style="color:#4ec9b0;font-weight:bold;">Spec 3</div>
+        <div style="font-size:12px;margin-top:4px;">流式数据模型 + Store</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">纯前端 · 高复杂度</div>
+      </div>
+    </div>
+    <div style="text-align:center;font-size:20px;color:#555;">↓</div>
+    <div style="text-align:center;margin-bottom:8px;">
+      <span style="color:#888;">第二波（Spec 3 定义数据契约后启动）</span>
+    </div>
+    <div style="display:flex;gap:16px;justify-content:center;">
+      <div style="background:#2a2a4a;border:2px solid #d07070;border-radius:8px;padding:12px;width:200px;text-align:center;">
+        <div style="color:#d07070;font-weight:bold;">Spec 4</div>
+        <div style="font-size:12px;margin-top:4px;">渲染 + 3 级折叠</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">纯前端 · 高复杂度</div>
+      </div>
+      <div style="background:#2a2a4a;border:2px solid #b075d0;border-radius:8px;padding:12px;width:200px;text-align:center;">
+        <div style="color:#b075d0;font-weight:bold;">Spec 5</div>
+        <div style="font-size:12px;margin-top:4px;">会话生命周期显示</div>
+        <div style="font-size:11px;color:#888;margin-top:4px;">纯前端 · 中复杂度</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:20px;">
+  <h3>各 Spec 范围概要</h3>
+  <div style="background:rgba(255,255,255,0.05);border-radius:8px;padding:16px;font-size:13px;line-height:1.8;">
+    <div style="border-left:3px solid #6b8afd;padding-left:12px;margin-bottom:12px;">
+      <b style="color:#6b8afd;">Spec 1 — Tab/Header 集成重写</b><br/>
+      保留 Dockview v7，完全重写 Tab/Header 集成层。去掉 CSS hack，改用 Dockview 原生 API 控制样式。重写 ReactContentRenderer / ReactTabRenderer 的 Context 桥接逻辑。<br/>
+      <span style="color:#888;">文件: DockviewContainer.tsx, TabHeader.tsx, useTabManager.ts, index.css</span>
+    </div>
+    <div style="border-left:3px solid #e8a838;padding-left:12px;margin-bottom:12px;">
+      <b style="color:#e8a838;">Spec 2 — 共享代码还原 + CWD</b><br/>
+      还原 8 个共享文件的改动到 master。新增 web 专有 CWD REST API（GET/PUT /api/sessions/{chatID}/cwd）。前端 CwdProvider 改为每次切换会话从后端拉取 CWD。<br/>
+      <span style="color:#888;">文件: serverapp/*, agent/*, channel/web/web_api.go, CwdProvider.tsx</span>
+    </div>
+    <div style="border-left:3px solid #4ec9b0;padding-left:12px;margin-bottom:12px;">
+      <b style="color:#4ec9b0;">Spec 3 — 流式数据模型 + Store 重写</b><br/>
+      重写 ProgressStore 和 useProgressStream。实现 stream-only patch（非替换）、carry-forward、迭代快照、去重保护。定义 Spec 4/5 共用的数据类型和 Store 接口。<br/>
+      <span style="color:#888;">文件: useProgressStream.ts, progressStore.ts, types/shared.ts</span>
+    </div>
+    <div style="border-left:3px solid #d07070;padding-left:12px;margin-bottom:12px;">
+      <b style="color:#d07070;">Spec 4 — 渲染 + 3 级折叠</b><br/>
+      重写 AssistantMessage / ProgressPanel / IterationHistory。实现 3 级折叠（all/minimal/none）、连续工具合并卡片、无边框折叠行（▸/▾）。流式实时渲染。<br/>
+      <span style="color:#888;">文件: components/agent/*, useCollapseLevel.ts</span>
+    </div>
+    <div style="border-left:3px solid #b075d0;padding-left:12px;">
+      <b style="color:#b075d0;">Spec 5 — 会话生命周期显示</b><br/>
+      新会话打开、历史压缩后恢复、会话切换时的状态恢复。重写 useChatMessages 历史水合逻辑、HistoryCompacted 处理、session 切换重置。<br/>
+      <span style="color:#888;">文件: useChatMessages.ts, AgentPanel.tsx, wsConnection.ts</span>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:20px;">
+  <h3>共享契约（Spec 3 定义）</h3>
+  <div style="background:rgba(78,201,176,0.1);border-radius:8px;padding:16px;font-size:13px;line-height:1.8;">
+    <div><b>数据类型</b>: <code>WebIteration</code>, <code>WebToolProgress</code>, <code>ProgressSnapshot</code></div>
+    <div><b>Store 接口</b>: <code>ProgressStore</code> 的 <code>getSnapshot()</code> / <code>subscribe()</code> / <code>reset()</code></div>
+    <div><b>折叠模型</b>: <code>CollapseLevel = 'all' | 'minimal' | 'none'</code></div>
+    <div><b>生命周期事件</b>: <code>HistoryCompacted</code>, <code>SessionSwitch</code> 处理接口</div>
+  </div>
+</div>
+
+<div class="options" style="margin-top:20px;">
+  <div class="option" data-choice="approve" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content">
+      <h3>认可分解方案</h3>
+      <p>继续编写 spec 文档</p>
+    </div>
+  </div>
+  <div class="option" data-choice="adjust" onclick="toggleSelect(this)">
+    <div class="letter">✗</div>
+    <div class="content">
+      <h3>需要调整</h3>
+      <p>在终端说明调整内容</p>
+    </div>
+  </div>
+</div>
