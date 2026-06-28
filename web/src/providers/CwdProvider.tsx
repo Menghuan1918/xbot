@@ -70,7 +70,7 @@ export function CwdProvider({ children }: { children: ReactNode }) {
     }
   }, [ws, ws.connected])
 
-  // Track CWD changes from progress events.
+  // Track CWD changes from progress events + manual cwd-changed dispatch.
   useEffect(() => {
     const off = ws.onMessage((msg: WSMessage) => {
       if (msg.type !== 'progress_structured') return
@@ -90,7 +90,6 @@ export function CwdProvider({ children }: { children: ReactNode }) {
         if (!tool || typeof tool !== 'object') continue
         const t = tool as Record<string, unknown>
         if (t.name !== 'Cd') continue
-        // Cd tool args is a JSON string: {"path": "..."} or a plain string.
         const args = typeof t.args === 'string' ? t.args : ''
         if (!args) continue
         try {
@@ -100,12 +99,22 @@ export function CwdProvider({ children }: { children: ReactNode }) {
             setCwd(path)
           }
         } catch {
-          // args may be a plain string path
           setCwd(args)
         }
       }
     })
-    return off
+
+    // Listen for manual CWD changes (e.g. from SessionInfo panel's set_cwd RPC).
+    const onCwdChanged = (e: Event) => {
+      const detail = (e as CustomEvent).detail
+      if (typeof detail === 'string' && detail) setCwd(detail)
+    }
+    window.addEventListener('xbot:cwd-changed', onCwdChanged)
+
+    return () => {
+      off()
+      window.removeEventListener('xbot:cwd-changed', onCwdChanged)
+    }
   }, [ws])
 
   const value = useMemo<CwdContextValue>(() => ({ cwd, loading }), [cwd, loading])

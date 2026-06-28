@@ -65,6 +65,8 @@ const en: Translations = {
     thinkingMode: 'Thinking mode',
     configSaveFailed: 'Failed to save config',
     disconnectedHint: 'Not connected to the server; showing sample data',
+    cwdUpdated: 'Working directory updated',
+    cwdUpdateFailed: 'Failed to update working directory',
     refresh: 'Refresh',
     toggleHidden: 'Toggle hidden files',
     loadingFiles: 'Loading files…',

@@ -97,14 +97,17 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
   ctxRef.current.auth = authValue
   ctxRef.current.sessionStore = sessionStoreValue
 
-  // Force all panels + tab headers to re-render when theme/i18n changes.
+  // Force all panels + tab headers to re-render when theme/i18n/sessionStore changes.
+  // sessionStore must be included because panels render in isolated React roots
+  // that don't re-render when the outer tree's Context values change. Without this,
+  // AgentPanel never sees activeSessionId updates from SessionSidebar's switchSession.
   useEffect(() => {
     const api = apiRef.current
     if (!api) return
     for (const panel of api.panels) {
       panel.update({ params: panel.params as Record<string, unknown> })
     }
-  }, [themeValue, i18nValue])
+  }, [themeValue, i18nValue, sessionStoreValue])
 
   useEffect(() => {
     const host = hostRef.current

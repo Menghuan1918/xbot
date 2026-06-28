@@ -1,14 +1,11 @@
 /**
  * TabHeader — custom VSCode-style tab header.
  *
- * Rendered by the dockview `ReactTabRenderer`. Layout: [icon] [title] [close].
- *
  * Styling:
- *   - Active tab: top accent bar (h-0.5) + brighter text color + bg-bg-primary
+ *   - Active tab: bottom accent bar (h-0.5) in theme color + brighter text
  *   - Inactive tab: no accent bar, dimmer text, transparent background
- *   - Close button only appears when `params.closable` is true (agent tabs
- *     are not closable) and on hover/focus
  *   - No color inversion on inactive tabs
+ *   - Close button only when closable=true, on hover/focus
  */
 import { X } from 'lucide-react'
 import type { ComponentType, SVGProps } from 'react'
@@ -44,7 +41,7 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
     <div
       className="group/tab relative flex h-full min-w-0 items-center gap-1.5 px-3 text-[13px]"
       style={{
-        backgroundColor: isActive ? 'var(--bg-primary)' : 'transparent',
+        backgroundColor: 'transparent',
       }}
       onMouseDown={(e) => {
         if (e.button === 1) {
@@ -70,13 +67,6 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
         }
       }}
     >
-      {/* Active accent bar at the very top edge */}
-      <span
-        className="pointer-events-none absolute inset-x-0 top-0 h-0.5"
-        style={{
-          backgroundColor: isActive ? 'var(--accent)' : 'transparent',
-        }}
-      />
       <Icon
         className="size-3.5 shrink-0"
         style={{ color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)' }}
@@ -100,6 +90,13 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
           <X className="size-3" />
         </button>
       )}
+      {/* Active tab bottom accent bar in theme color */}
+      <span
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-0.5"
+        style={{
+          backgroundColor: isActive ? 'var(--accent)' : 'transparent',
+        }}
+      />
     </div>
   )
 }

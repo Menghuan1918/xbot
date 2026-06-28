@@ -62,6 +62,8 @@ const zhCN = {
     thinkingMode: '思考模式',
     configSaveFailed: '配置保存失败',
     disconnectedHint: '未连接到服务端，显示的是示例数据',
+    cwdUpdated: '工作路径已更新',
+    cwdUpdateFailed: '工作路径更新失败',
     refresh: '刷新',
     toggleHidden: '显示/隐藏 隐藏文件',
     loadingFiles: '加载文件列表…',
