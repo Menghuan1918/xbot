@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   fetchHistory,
   uploadFile,
+  type HistMsg,
   type HistProgress,
   type UploadResponse,
 } from '@/components/agent/api'
@@ -69,6 +70,48 @@ export interface Attachments {
   fileMimes: string[]
 }
 
+/**
+ * Parse raw history rows into ChatMessage[], filtering out:
+ *   - display_only messages (cron results, [interrupted] markers)
+ *   - intermediate assistant messages (empty content + no detail + has
+ *     tool_calls) — their iteration info is captured in the final message's
+ *     `detail` field, so showing them would produce duplicate empty bubbles.
+ *
+ * Spec 5 §2.5 — aligned with TUI's history filtering logic.
+ */
+function parseHistoryMessages(rows: HistMsg[]): ChatMessage[] {
+  const normalized: ChatMessage[] = []
+  for (const m of rows) {
+    // Skip display_only messages (cron results, [interrupted] markers).
+    if (m.display_only) continue
+
+    // Skip intermediate assistant messages: no content, no detail, has
+    // tool_calls — these are intermediate iterations whose info is
+    // already captured in the final message's detail field.
+    if (
+      m.role === 'assistant' &&
+      (!m.content || m.content.trim() === '') &&
+      !m.detail &&
+      m.tool_calls
+    ) {
+      continue
+    }
+
+    normalized.push({
+      id: String(m.id),
+      role: m.role,
+      content: m.content ?? '',
+      iterations: parseWebIterations(m.detail ?? undefined),
+      timestamp: m.created_at ?? '',
+      isPartial: false,
+      turnID: 0,
+      displayOnly: m.display_only,
+    })
+  }
+  // Apply dedup (harmless for history — turnID=0 means keep all).
+  return dedupMessages(normalized)
+}
+
 let echoSeq = 0
 
 export function useChatMessages({
@@ -85,55 +128,37 @@ export function useChatMessages({
   const chatIDRef = useRef(chatID)
   chatIDRef.current = chatID
 
+  // Generation counter to discard stale async fetches when the user rapidly
+  // switches sessions (prevents session A's history from overwriting session
+  // B's after a quick switch — Spec 5 §2.1).
+  const reloadGenRef = useRef(0)
+
   const reload = useCallback(async () => {
+    const gen = ++reloadGenRef.current
     setLoading(true)
     setError(null)
+    // Clear immediately before async fetch — prevents stale messages from the
+    // previous session or pre-compression state from showing during the
+    // network round-trip (Spec 5 §2.1, §2.3).
+    setMessages([])
+    setInitialProgress(null)
     try {
       const data = await fetchHistory()
+      // Discard stale fetch — a newer reload() was triggered while we were
+      // waiting for this response (rapid session switch or HistoryCompacted
+      // during an in-flight reload).
+      if (gen !== reloadGenRef.current) return
       const rows = data.messages ?? []
-      // Merge intermediate assistant messages: messages with tool_calls but no
-      // detail (and empty content) are intermediate iterations that
-      // IncrementalPersist saved. The final assistant message carries the
-      // `detail` field with the full iteration history JSON. We skip the
-      // intermediate ones to avoid showing duplicate empty bubbles.
-      const normalized: ChatMessage[] = []
-      for (const m of rows) {
-        // Skip display_only messages (cron results, [interrupted] markers).
-        if (m.display_only) continue
-
-        // Skip intermediate assistant messages: no content, no detail, has
-        // tool_calls — these are intermediate iterations whose info is
-        // already captured in the final message's detail field.
-        if (
-          m.role === 'assistant' &&
-          (!m.content || m.content.trim() === '') &&
-          !m.detail &&
-          m.tool_calls
-        ) {
-          continue
-        }
-
-        normalized.push({
-          id: String(m.id),
-          role: m.role,
-          content: m.content ?? '',
-          iterations: parseWebIterations(m.detail ?? undefined),
-          timestamp: m.created_at ?? '',
-          isPartial: false,
-          turnID: 0,
-          displayOnly: m.display_only,
-        })
-      }
-      // Apply dedup (harmless for history — turnID=0 means keep all).
-      setMessages(dedupMessages(normalized))
+      setMessages(parseHistoryMessages(rows))
       setInitialProgress(data.active_progress ?? null)
       if (data.chat_id) setResolvedChatID(data.chat_id)
     } catch (e) {
+      if (gen !== reloadGenRef.current) return
       setError(e instanceof Error ? e.message : String(e))
       setMessages([])
       setInitialProgress(null)
     } finally {
-      setLoading(false)
+      if (gen === reloadGenRef.current) setLoading(false)
     }
   }, [])
 
@@ -148,6 +173,10 @@ export function useChatMessages({
   // (raw text). We use `content` to preserve file rendering, and replace the
   // optimistic message we inserted in `sendMessage` rather than appending a
   // duplicate.
+  //
+  // Spec 5 §2.4 — match by chatID first, then find the optimistic message
+  // using a 5-second freshness window to avoid replacing an older user message
+  // when echoes arrive out of order.
   useEffect(() => {
     if (!chatID) return
     const off = ws.onMessage((msg: WSMessage) => {
@@ -157,10 +186,17 @@ export function useChatMessages({
       if (!content) return
       const id = `echo-${msg.ts ?? Date.now()}-${echoSeq++}`
       const ts = msg.ts ? new Date(msg.ts * 1000).toISOString() : new Date().toISOString()
+      const now = Date.now()
       setMessages((prev) => {
-        // Replace the last optimistic user message (id starts with 'user-')
-        // instead of appending a duplicate.
-        const lastUserIdx = prev.findLastIndex((m) => m.id.startsWith('user-'))
+        // Replace the most recent optimistic user message (id starts with
+        // 'user-') that was created within 5 seconds — prevents replacing an
+        // older user message when echoes arrive out of order.
+        const lastUserIdx = prev.findLastIndex((m) => {
+          if (!m.id.startsWith('user-')) return false
+          const match = m.id.match(/^user-(\d+)-/)
+          if (!match) return false
+          return now - parseInt(match[1], 10) < 5000
+        })
         const newMsg: ChatMessage = {
           id,
           role: 'user',

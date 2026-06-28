@@ -125,16 +125,25 @@ export function useProgressStream({
     store.getSnapshot,
   )
 
-  // Reset and hydrate when chatID or initialProgress changes.
+  // Reset the store immediately when chatID changes — before history loads.
+  // This prevents stale progress from the previous session from leaking into
+  // the new one (Spec 5 §2.1).
   useEffect(() => {
     store.reset()
+  }, [store, chatID])
+
+  // Hydrate from history when initialProgress changes (after reload completes).
+  // Separated from the reset effect so that a chatID change does NOT hydrate
+  // with the stale initialProgress from the previous session — only the new
+  // session's data triggers hydration (Spec 5 §2.7).
+  useEffect(() => {
     if (!initialProgress || !initialProgress.phase || initialProgress.phase === 'done') return
     const live = historyProgressToLive(initialProgress)
     // Only hydrate if we got something meaningful (non-empty snapshot)
     if (live.phase) {
       store.replace(live)
     }
-  }, [store, chatID, initialProgress])
+  }, [store, initialProgress])
 
   // Dispose on unmount.
   useEffect(() => {
