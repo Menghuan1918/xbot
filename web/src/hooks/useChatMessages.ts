@@ -86,14 +86,37 @@ export function useChatMessages({
     try {
       const data = await fetchHistory()
       const rows = data.messages ?? []
-      const normalized: ChatMessage[] = rows.map((m) => ({
-        id: String(m.id),
-        role: m.role,
-        content: m.content ?? '',
-        createdAt: m.created_at,
-        displayOnly: m.display_only,
-        iterations: parseIterations(m.detail ?? undefined),
-      }))
+      // Merge intermediate assistant messages: messages with tool_calls but no
+      // detail (and empty content) are intermediate iterations that
+      // IncrementalPersist saved. The final assistant message carries the
+      // `detail` field with the full iteration history JSON. We skip the
+      // intermediate ones to avoid showing duplicate empty bubbles.
+      const normalized: ChatMessage[] = []
+      for (const m of rows) {
+        // Skip display_only messages (cron results, [interrupted] markers).
+        if (m.display_only) continue
+
+        // Skip intermediate assistant messages: no content, no detail, has
+        // tool_calls — these are intermediate iterations whose info is
+        // already captured in the final message's detail field.
+        if (
+          m.role === 'assistant' &&
+          (!m.content || m.content.trim() === '') &&
+          !m.detail &&
+          m.tool_calls
+        ) {
+          continue
+        }
+
+        normalized.push({
+          id: String(m.id),
+          role: m.role,
+          content: m.content ?? '',
+          createdAt: m.created_at,
+          displayOnly: m.display_only,
+          iterations: parseIterations(m.detail ?? undefined),
+        })
+      }
       setMessages(normalized)
       setInitialProgress(data.active_progress ?? null)
       if (data.chat_id) setResolvedChatID(data.chat_id)

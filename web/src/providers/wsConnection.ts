@@ -153,6 +153,8 @@ export class WSConnectionImpl implements WSConnection {
     ws.onopen = () => {
       this.reconnectAttempt = 0
       this.setConnected(true)
+      // Send sync handshake so the server replays missed events.
+      this.send({ type: 'sync' })
       // Re-establish subscription after reconnect so events resume.
       if (this._chatID) this.send({ type: 'subscribe', chat_id: this._chatID })
     }

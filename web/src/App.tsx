@@ -12,6 +12,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { Toaster } from '@/components/ui/sonner'
 import { WSProvider } from '@/providers/WSProvider'
 import { CwdProvider } from '@/providers/CwdProvider'
+import { SessionStoreProvider } from '@/hooks/useSessionStore'
 import { AppShell } from '@/layouts/AppShell'
 import { AuthGuard } from '@/components/auth/AuthGuard'
 import { LoginPage } from '@/pages/LoginPage'
@@ -30,7 +31,9 @@ export default function App() {
               <AuthGuard>
                 <WSProvider>
                   <CwdProvider>
-                    <AppShell />
+                    <SessionStoreProvider>
+                      <AppShell />
+                    </SessionStoreProvider>
                   </CwdProvider>
                 </WSProvider>
               </AuthGuard>

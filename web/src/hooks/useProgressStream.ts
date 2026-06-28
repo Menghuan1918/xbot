@@ -117,11 +117,13 @@ export function useProgressStream({
 
   useEffect(() => {
     const offMessage = ws.onMessage((msg: WSMessage) => {
-      // Filter by chatID when the event carries one. `text`/`stream_content`/
-      // `progress_structured` carry a top-level chat_id, but `session` events
-      // broadcast to all clients and only embed it in msg.session.chat_id — so
-      // check both to avoid another chat's idle/busy finalizing this stream.
-      const eventChatID = msg.chat_id ?? msg.session?.chat_id
+      // Unified chatID filtering: some messages carry chat_id at the top
+      // level (text), some in msg.session.chat_id (session events), and
+      // some in msg.progress.chat_id with a "web:" prefix (stream_content,
+      // progress_structured). Check all three and strip the "web:" prefix.
+      const eventChatID = msg.chat_id
+        ?? msg.session?.chat_id
+        ?? (msg.progress?.chat_id ? String(msg.progress.chat_id).replace(/^web:/, '') : undefined)
       if (chatIDRef.current && eventChatID && eventChatID !== chatIDRef.current) {
         return
       }

@@ -1,18 +1,16 @@
 /**
- * AgentPanel — the Agent workspace panel (Spec 4 §3.1, §3.5).
+ * AgentPanel — the Agent workspace panel.
  *
  * Wires the message + progress + ask-user hooks for one chat and composes the
  * message list, input, and ask-user surface.
  *
  * Chat identity:
  *   - When the dockview tab carries a `sessionId`, that is the chatID (future
- *     multi-session / cross-channel tabs). Otherwise the panel adopts the
- *     chat_id returned by GET /api/history (the server's currently active
- *     chat) and subscribes the WS connection to it so events route here.
- *
- * The streamed assistant text is finalized into the committed list by passing
- * useChatMessages.appendAssistant as useProgressStream's onAssistantComplete —
- * that keeps the high-frequency token stream out of the committed list state.
+ *     multi-session / cross-channel tabs).
+ *   - Otherwise the panel follows the shared SessionStore's activeSessionId,
+ *     which is updated when the user switches sessions in the sidebar.
+ *   - On first load (before any session switch), it adopts the chat_id from
+ *     GET /api/history as a fallback.
  */
 import { useEffect, useState } from 'react'
 
@@ -21,6 +19,7 @@ import { useChatMessages } from '@/hooks/useChatMessages'
 import { useCollapseLevel } from '@/hooks/useCollapseLevel'
 import { useProgressStream } from '@/hooks/useProgressStream'
 import { useWSConnection } from '@/hooks/useWSConnection'
+import { useSessionStore } from '@/hooks/useSessionStore'
 
 import { AskUserPanel } from '@/components/agent/AskUserPanel'
 import { MessageInput } from '@/components/agent/MessageInput'
@@ -30,12 +29,13 @@ import type { PanelProps } from '@/workspace/panels/types'
 export function AgentPanel({ params }: PanelProps) {
   const ws = useWSConnection()
   const { level } = useCollapseLevel()
+  const store = useSessionStore()
 
-  // Resolve the chatID: explicit tab sessionId, else adopt the active chat from
-  // history once the first load returns it.
+  // Resolve the chatID: explicit tab sessionId, else follow store's
+  // activeSessionId (updates on session switch), with resolvedChatID as
+  // initial fallback before any switch happens.
   const [chatID, setChatID] = useState<string | null>(params.sessionId ?? null)
 
-  // Subscribe the WS connection to the resolved chatID so events route here.
   useEffect(() => {
     if (!chatID) return
     ws.subscribe(chatID)
@@ -43,12 +43,14 @@ export function AgentPanel({ params }: PanelProps) {
 
   const chat = useChatMessages({ chatID, enabled: true })
 
-  // When the tab had no explicit session, adopt the history-reported chat_id.
+  // Follow activeSessionId from the shared store. When the user switches
+  // sessions, activeSessionId changes → chatID updates → useChatMessages
+  // reloads history for the new session.
   useEffect(() => {
     if (params.sessionId) return // explicit session wins
-    if (chatID) return
-    if (chat.resolvedChatID) setChatID(chat.resolvedChatID)
-  }, [params.sessionId, chatID, chat.resolvedChatID])
+    const next = store.activeSessionId ?? chat.resolvedChatID ?? null
+    if (next && next !== chatID) setChatID(next)
+  }, [params.sessionId, store.activeSessionId, chat.resolvedChatID, chatID])
 
   const { progress, liveMessage, isStreaming } = useProgressStream({
     chatID,

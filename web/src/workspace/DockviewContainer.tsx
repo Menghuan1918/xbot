@@ -46,6 +46,7 @@ import { useI18n } from '@/providers/i18n'
 import { useWSConnection } from '@/providers/WSProvider'
 import { useCwd } from '@/providers/CwdProvider'
 import { useAuth } from '@/hooks/useAuth'
+import { useSessionStore, type SessionStore as SessionStoreType, SessionStoreContext } from '@/hooks/useSessionStore'
 import type { ThemeContextValue } from '@/types/theme'
 import type { PanelParams } from '@/types/tab'
 import type { TabManager } from '@/hooks/useTabManager'
@@ -71,6 +72,7 @@ interface ContextRefs {
   ws: WSConnection
   cwd: CwdContextValue
   auth: AuthContextValue
+  sessionStore: SessionStoreType
 }
 
 export function DockviewContainer({ tabManager, onReady }: DockviewContainerProps) {
@@ -86,12 +88,14 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
   const wsValue = useWSConnection()
   const cwdValue = useCwd()
   const authValue = useAuth()
-  const ctxRef = useRef<ContextRefs>({ theme: themeValue, i18n: i18nValue, ws: wsValue, cwd: cwdValue, auth: authValue })
+  const sessionStoreValue = useSessionStore()
+  const ctxRef = useRef<ContextRefs>({ theme: themeValue, i18n: i18nValue, ws: wsValue, cwd: cwdValue, auth: authValue, sessionStore: sessionStoreValue })
   ctxRef.current.theme = themeValue
   ctxRef.current.i18n = i18nValue
   ctxRef.current.ws = wsValue
   ctxRef.current.cwd = cwdValue
   ctxRef.current.auth = authValue
+  ctxRef.current.sessionStore = sessionStoreValue
 
   // Force all panels + tab headers to re-render when theme/i18n changes.
   useEffect(() => {
@@ -161,7 +165,9 @@ function withProviders(node: ReactNode, ctxRef: RefObject<ContextRefs>): ReactNo
         <WSContext.Provider value={ctx.ws}>
           <CwdContext.Provider value={ctx.cwd}>
             <AuthContext.Provider value={ctx.auth}>
-              {node}
+              <SessionStoreContext.Provider value={ctx.sessionStore}>
+                {node}
+              </SessionStoreContext.Provider>
             </AuthContext.Provider>
           </CwdContext.Provider>
         </WSContext.Provider>

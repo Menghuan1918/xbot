@@ -20,7 +20,7 @@
  *   RPC    set_cwd { channel, chat_id, dir }
  *   WS     subscribe { type:'subscribe', chat_id }
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createElement, createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useWSConnection } from '@/hooks/useWSConnection'
 import { groupSessions, sortSessions } from '@/lib/session-grouping'
 import type { SessionCategory, SessionInfo, SessionStatus } from '@/types/shared'
@@ -118,7 +118,7 @@ function toSessionInfo(c: RawChat, channel: string): SessionInfo {
   }
 }
 
-export function useSessionStore(): SessionStore {
+export function useSessionStoreImpl(): SessionStore {
   const ws = useWSConnection()
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
@@ -364,4 +364,19 @@ export function useSessionStore(): SessionStore {
     renameSession,
     deleteSession,
   }
+}
+
+/* ── Context singleton ── */
+
+export const SessionStoreContext = createContext<SessionStore | undefined>(undefined)
+
+export function SessionStoreProvider({ children }: { children: ReactNode }) {
+  const store = useSessionStoreImpl()
+  return createElement(SessionStoreContext.Provider, { value: store }, children)
+}
+
+export function useSessionStore(): SessionStore {
+  const ctx = useContext(SessionStoreContext)
+  if (!ctx) throw new Error('useSessionStore must be used within a <SessionStoreProvider>')
+  return ctx
 }

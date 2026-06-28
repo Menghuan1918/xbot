@@ -113,7 +113,7 @@ func (wc *WebChannel) handleHistoryGet(w http.ResponseWriter, r *http.Request, s
 	var boundaryID sql.NullInt64
 	err = wc.db.QueryRow(`
 			SELECT id FROM session_messages
-			WHERE tenant_id = ? AND role = 'user'
+			WHERE tenant_id = ? AND role = 'user' AND COALESCE(display_only, 0) = 0
 			ORDER BY id DESC
 			LIMIT 1 OFFSET ?
 		`, tenantID, limit).Scan(&boundaryID)
@@ -127,14 +127,14 @@ func (wc *WebChannel) handleHistoryGet(w http.ResponseWriter, r *http.Request, s
 		rows, err = wc.db.Query(`
 				SELECT id, role, content, created_at, tool_calls, detail, COALESCE(display_only, 0)
 				FROM session_messages
-				WHERE tenant_id = ? AND id >= ? AND role IN ('user', 'assistant')
+				WHERE tenant_id = ? AND id >= ? AND role IN ('user', 'assistant') AND COALESCE(display_only, 0) = 0
 				ORDER BY id ASC
 			`, tenantID, boundaryID.Int64)
 	} else {
 		rows, err = wc.db.Query(`
 				SELECT id, role, content, created_at, tool_calls, detail, COALESCE(display_only, 0)
 				FROM session_messages
-				WHERE tenant_id = ? AND role IN ('user', 'assistant')
+				WHERE tenant_id = ? AND role IN ('user', 'assistant') AND COALESCE(display_only, 0) = 0
 				ORDER BY id ASC
 			`, tenantID)
 	}
