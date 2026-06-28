@@ -10,12 +10,14 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 
-import { useWSConnection } from '@/hooks/useWSConnection'
+import type { WSConnection } from '@/types/ws'
 import type { AskUserPrompt, AskUserQuestion } from '@/types/agent'
 import type { WSMessage } from '@/types/shared'
 
 interface UseAskUserOptions {
   chatID: string | null
+  /** The WS connection (injected from DockviewContext for isolated roots). */
+  ws: WSConnection
 }
 
 export interface UseAskUserResult {
@@ -26,8 +28,7 @@ export interface UseAskUserResult {
   cancel: () => void
 }
 
-export function useAskUser({ chatID }: UseAskUserOptions): UseAskUserResult {
-  const ws = useWSConnection()
+export function useAskUser({ chatID, ws }: UseAskUserOptions): UseAskUserResult {
   const [prompt, setPrompt] = useState<AskUserPrompt | null>(null)
 
   useEffect(() => {

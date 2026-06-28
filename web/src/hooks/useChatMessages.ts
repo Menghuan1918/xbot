@@ -23,8 +23,8 @@ import {
   type UploadResponse,
 } from '@/components/agent/api'
 import { parseIterations } from '@/components/agent/normalize'
-import { useWSConnection } from '@/hooks/useWSConnection'
 import type { ChatMessage, IterationSnapshot } from '@/types/agent'
+import type { WSConnection } from '@/types/ws'
 import type { WSMessage } from '@/types/shared'
 
 interface UseChatMessagesOptions {
@@ -32,6 +32,8 @@ interface UseChatMessagesOptions {
   chatID: string | null
   /** If true, history is (re)loaded whenever chatID changes. */
   enabled?: boolean
+  /** The WS connection (injected from DockviewContext for isolated roots). */
+  ws: WSConnection
 }
 
 export interface UseChatMessagesResult {
@@ -69,8 +71,8 @@ let echoSeq = 0
 export function useChatMessages({
   chatID,
   enabled = true,
+  ws,
 }: UseChatMessagesOptions): UseChatMessagesResult {
-  const ws = useWSConnection()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)

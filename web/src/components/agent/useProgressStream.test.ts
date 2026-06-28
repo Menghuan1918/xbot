@@ -14,6 +14,7 @@ import { act, renderHook } from '@testing-library/react'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ProgressEvent, WSMessage } from '@/types/shared'
+import type { WSConnection } from '@/types/ws'
 
 // --- stub WS connection ----------------------------------------------------
 
@@ -46,9 +47,6 @@ function makeFakeWS(): FakeWS & { handlers: Set<MessageHandler> } {
 
 let currentWS: FakeWS
 let rafCbs: Array<() => void>
-vi.mock('@/hooks/useWSConnection', () => ({
-  useWSConnection: () => currentWS,
-}))
 
 beforeEach(() => {
   currentWS = makeFakeWS()
@@ -75,7 +73,7 @@ const { useProgressStream } = await import('@/hooks/useProgressStream')
 
 describe('useProgressStream event dispatch', () => {
   it('appends stream_content tokens to the live message', () => {
-    const { result } = renderHook(() => useProgressStream({ chatID: 'c1' }))
+    const { result } = renderHook(() => useProgressStream({ chatID: 'c1', ws: currentWS as unknown as WSConnection }))
     emitAndFlush({ type: 'stream_content', progress: { stream_content: 'Hello' } })
     expect(result.current.liveMessage?.content).toBe('Hello')
     expect(result.current.isStreaming).toBe(true)
@@ -86,7 +84,7 @@ describe('useProgressStream event dispatch', () => {
   it('finalizes on text: calls onAssistantComplete and clears the stream', () => {
     const complete = vi.fn()
     const { result } = renderHook(() =>
-      useProgressStream({ chatID: 'c1', onAssistantComplete: complete }),
+      useProgressStream({ chatID: 'c1', onAssistantComplete: complete, ws: currentWS as unknown as WSConnection }),
     )
     emitAndFlush({ type: 'stream_content', progress: { stream_content: 'partial' } })
     expect(result.current.liveMessage?.content).toBe('partial')
@@ -104,7 +102,7 @@ describe('useProgressStream event dispatch', () => {
   it('parses progress_history iteration JSON into onAssistantComplete iterations', () => {
     const complete = vi.fn()
     renderHook(() =>
-      useProgressStream({ chatID: 'c1', onAssistantComplete: complete }),
+      useProgressStream({ chatID: 'c1', onAssistantComplete: complete, ws: currentWS as unknown as WSConnection }),
     )
     emitAndFlush({
       type: 'text',
@@ -122,7 +120,7 @@ describe('useProgressStream event dispatch', () => {
   it('defensively finalizes accumulated stream on session(idle)', () => {
     const complete = vi.fn()
     const { result } = renderHook(() =>
-      useProgressStream({ chatID: 'c1', onAssistantComplete: complete }),
+      useProgressStream({ chatID: 'c1', onAssistantComplete: complete, ws: currentWS as unknown as WSConnection }),
     )
     emitAndFlush({ type: 'stream_content', progress: { stream_content: 'streamed' } })
     emitAndFlush({ type: 'session', session: { action: 'idle', chat_id: 'c1' } })
@@ -133,7 +131,7 @@ describe('useProgressStream event dispatch', () => {
   it('ignores session(idle) from a different chat', () => {
     const complete = vi.fn()
     const { result } = renderHook(() =>
-      useProgressStream({ chatID: 'c1', onAssistantComplete: complete }),
+      useProgressStream({ chatID: 'c1', onAssistantComplete: complete, ws: currentWS as unknown as WSConnection }),
     )
     emitAndFlush({ type: 'stream_content', progress: { stream_content: 'ours' } })
     // a *different* chat goes idle — must not finalize ours
@@ -143,7 +141,7 @@ describe('useProgressStream event dispatch', () => {
   })
 
   it('ignores stream_content from a different chat (top-level chat_id filter)', () => {
-    const { result } = renderHook(() => useProgressStream({ chatID: 'c1' }))
+    const { result } = renderHook(() => useProgressStream({ chatID: 'c1', ws: currentWS as unknown as WSConnection }))
     emitAndFlush({
       type: 'stream_content',
       chat_id: 'other',
@@ -168,6 +166,7 @@ describe('useProgressStream event dispatch', () => {
             { iteration: 1, completed_tools: [{ name: 'Grep', status: 'done' }] },
           ],
         },
+        ws: currentWS as unknown as WSConnection,
       }),
     )
     // The hydrate runs in an effect and is throttled via rAF; flush it.
@@ -190,6 +189,7 @@ describe('useProgressStream event dispatch', () => {
       useProgressStream({
         chatID: 'c1',
         initialProgress: { phase: 'done', stream_content: 'done text' },
+        ws: currentWS as unknown as WSConnection,
       }),
     )
     expect(result.current.isStreaming).toBe(false)
@@ -197,7 +197,7 @@ describe('useProgressStream event dispatch', () => {
   })
 
   it('updates tools/reasoning/iteration from progress_structured', () => {
-    const { result } = renderHook(() => useProgressStream({ chatID: 'c1' }))
+    const { result } = renderHook(() => useProgressStream({ chatID: 'c1', ws: currentWS as unknown as WSConnection }))
     emitAndFlush({
       type: 'progress_structured',
       progress: {

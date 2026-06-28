@@ -14,8 +14,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import { isImageFile } from '@/components/file/fileTypes'
-import { useCwd } from '@/providers/CwdProvider'
-import { useWSConnection } from '@/hooks/useWSConnection'
+import type { WSConnection } from '@/types/ws'
 
 export interface UseFileContentResult {
   content: string
@@ -30,9 +29,15 @@ interface ReadFileResponse {
   language?: string
 }
 
-export function useFileContent(filePath: string): UseFileContentResult {
-  const ws = useWSConnection()
-  const { cwd } = useCwd()
+interface UseFileContentOptions {
+  filePath: string
+  /** The WS connection (injected from DockviewContext for isolated roots). */
+  ws: WSConnection
+  /** Current working directory (injected from DockviewContext). */
+  cwd: string | null
+}
+
+export function useFileContent({ filePath, ws, cwd }: UseFileContentOptions): UseFileContentResult {
   const [content, setContent] = useState('')
   const [imageUrl] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)

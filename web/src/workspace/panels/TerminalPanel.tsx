@@ -10,15 +10,15 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 
-import { useI18n } from '@/providers/i18n'
-import { useTheme } from '@/hooks/useTheme'
 import { TerminalWS } from '@/lib/terminalWS'
 import { terminalStore } from '@/hooks/useTerminal'
+import { useDockviewContext } from '@/workspace/types'
 import type { PanelProps } from '@/workspace/panels/types'
 
 export function TerminalPanel({ params }: PanelProps) {
-  const { t } = useI18n()
-  const { theme } = useTheme()
+  const { i18n, theme: themeCtx } = useDockviewContext()
+  const { t } = i18n
+  const { theme } = themeCtx
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const wsRef = useRef<TerminalWS | null>(null)

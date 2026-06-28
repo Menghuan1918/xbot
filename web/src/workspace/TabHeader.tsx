@@ -1,15 +1,17 @@
 /**
- * TabHeader — custom VSCode-style tab header.
+ * TabHeader — custom VSCode-style tab header rendered entirely with inline
+ * styles (no CSS class dependencies).
  *
  * Styling:
- *   - Active tab: bottom accent bar (h-0.5) in theme color + brighter text
- *   - Inactive tab: no accent bar, dimmer text, transparent background
- *   - No color inversion on inactive tabs
- *   - Close button only when closable=true, on hover/focus
+ *   - Active tab: 2px bottom accent bar in theme color, full-opacity text,
+ *     background matching the content area (--bg-primary).
+ *   - Inactive tab: 2px transparent bottom bar, dimmer text (opacity 0.6),
+ *     transparent background.
+ *   - Close button only when closable=true, on hover/focus.
+ *   - No CSS rules needed in index.css — all visual properties are inline.
  */
-import { X } from 'lucide-react'
-import type { ComponentType, SVGProps } from 'react'
-import { Bot, FileText, SquareTerminal } from 'lucide-react'
+import type { CSSProperties, ComponentType, SVGProps } from 'react'
+import { X, Bot, FileText, SquareTerminal } from 'lucide-react'
 import type { DockviewPanelApi } from 'dockview'
 import type { PanelParams } from '@/types/tab'
 
@@ -37,12 +39,58 @@ export interface TabHeaderProps {
 export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps) {
   const Icon = (params.icon ? ICONS[params.icon] : null) ?? TYPE_ICONS[params.type]
 
+  const tabStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '6px',
+    padding: '4px 12px',
+    height: '35px',
+    cursor: 'pointer',
+    borderBottom: isActive
+      ? '2px solid var(--accent)'
+      : '2px solid transparent',
+    backgroundColor: 'transparent',
+    opacity: isActive ? 1 : 0.6,
+    transition: 'opacity 0.15s, border-color 0.15s',
+    userSelect: 'none',
+    whiteSpace: 'nowrap',
+    position: 'relative',
+  }
+
+  const iconStyle: CSSProperties = {
+    color: 'var(--text-primary)',
+    flexShrink: 0,
+    width: '14px',
+    height: '14px',
+  }
+
+  const titleStyle: CSSProperties = {
+    color: 'var(--text-primary)',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontSize: '13px',
+  }
+
+  const closeBtnStyle: CSSProperties = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: '16px',
+    height: '16px',
+    flexShrink: 0,
+    border: 'none',
+    background: 'transparent',
+    cursor: 'pointer',
+    opacity: 0,
+    transition: 'opacity 0.15s',
+    color: 'var(--text-secondary)',
+    marginLeft: '4px',
+  }
+
   return (
     <div
-      className="group/tab relative flex h-full min-w-0 items-center gap-1.5 px-3 text-[13px]"
-      style={{
-        backgroundColor: 'transparent',
-      }}
+      style={tabStyle}
       onMouseDown={(e) => {
         if (e.button === 1) {
           if (params.closable) {
@@ -57,6 +105,18 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
         e.stopPropagation()
         onActivate()
       }}
+      onMouseEnter={(e) => {
+        if (params.closable) {
+          const btn = (e.currentTarget as HTMLElement).querySelector('[data-close-btn]')
+          if (btn) (btn as HTMLElement).style.opacity = '1'
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (params.closable) {
+          const btn = (e.currentTarget as HTMLElement).querySelector('[data-close-btn]')
+          if (btn) (btn as HTMLElement).style.opacity = '0'
+        }
+      }}
       role="tab"
       aria-selected={isActive}
       tabIndex={0}
@@ -67,36 +127,24 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
         }
       }}
     >
-      <Icon
-        className="size-3.5 shrink-0"
-        style={{ color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)' }}
-      />
-      <span
-        className="truncate"
-        style={{ color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)' }}
-      >
-        {params.title}
-      </span>
+      <Icon style={iconStyle} size={14} />
+      <span style={titleStyle}>{params.title}</span>
       {params.closable && (
         <button
           type="button"
           aria-label="Close tab"
-          className="ml-1 flex size-4 shrink-0 items-center justify-center rounded-sm opacity-0 transition-opacity hover:bg-bg-tertiary group-hover/tab:opacity-100 focus-visible:opacity-100 focus-visible:outline-none"
+          data-close-btn
+          style={closeBtnStyle}
           onClick={(e) => {
             e.stopPropagation()
             api.close()
           }}
+          onFocus={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+          onBlur={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0' }}
         >
-          <X className="size-3" />
+          <X size={12} />
         </button>
       )}
-      {/* Active tab bottom accent bar in theme color */}
-      <span
-        className="pointer-events-none absolute inset-x-0 bottom-0 h-0.5"
-        style={{
-          backgroundColor: isActive ? 'var(--accent)' : 'transparent',
-        }}
-      />
     </div>
   )
 }
