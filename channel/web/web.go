@@ -149,6 +149,10 @@ type WebCallbacks struct {
 	ChatDelete func(senderID, chatID string) error
 	// ChatRename renames a chatroom.
 	ChatRename func(senderID, chatID, label string) error
+
+	// GetCWD returns the current working directory for a session (channel + chatID).
+	// Returns ("", nil) if the session has no CWD set.
+	GetCWD func(channel, chatID string) (string, error)
 }
 
 // UserChatWithPreview is a chatroom with metadata for API responses.
@@ -365,6 +369,8 @@ func (wc *WebChannel) Start() error {
 	// Sessions API
 	mux.HandleFunc("/api/sessions", wc.authMiddleware(wc.handleSessions))
 	mux.HandleFunc("/api/sessions/messages", wc.authMiddleware(wc.handleSessionMessages))
+	mux.HandleFunc("GET /api/sessions/{chatID}/cwd", wc.authMiddleware(wc.handleSessionCwd))
+	mux.HandleFunc("PUT /api/sessions/{chatID}/cwd", wc.authMiddleware(wc.handleSessionCwdSet))
 
 	// Chatroom API
 	mux.HandleFunc("/api/chats", wc.authMiddleware(wc.handleChats))

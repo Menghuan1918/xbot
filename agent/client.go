@@ -515,15 +515,6 @@ func (c *Client) SetCWD(ch, chatID, dir string) error {
 	return c.call(MethodSetCWD, setCWDReq{Channel: ch, ChatID: chatID, Dir: dir}, nil)
 }
 
-// GetCwd returns the current working directory for a session.
-func (c *Client) GetCwd(ch, chatID string) (string, error) {
-	var r getCwdResp
-	if err := c.call(MethodGetCwd, getCwdReq{Channel: ch, ChatID: chatID}, &r); err != nil {
-		return "", err
-	}
-	return r.Dir, nil
-}
-
 func (c *Client) ResetTokenState() {
 	c.callVoid(MethodResetTokenState, struct{}{})
 }

@@ -38,7 +38,6 @@ type histProgress struct {
 	ActiveTools      []histTool         `json:"active_tools,omitempty"`
 	CompletedTools   []histTool         `json:"completed_tools,omitempty"`
 	StreamContent    string             `json:"stream_content,omitempty"`
-	ElapsedWall      int64              `json:"elapsed_wall,omitempty"` // total wall-clock of the active turn (ms)
 	IterationHistory []histIterSnapshot `json:"iteration_history,omitempty"`
 }
 
@@ -46,7 +45,6 @@ type histIterSnapshot struct {
 	Iteration      int        `json:"iteration"`
 	Thinking       string     `json:"thinking,omitempty"`
 	Reasoning      string     `json:"reasoning,omitempty"`
-	ElapsedWall    int64      `json:"elapsed_wall,omitempty"` // wall-clock of this iteration (ms)
 	CompletedTools []histTool `json:"completed_tools,omitempty"`
 }
 
@@ -189,7 +187,6 @@ func (wc *WebChannel) handleHistoryGet(w http.ResponseWriter, r *http.Request, s
 				Iteration:     p.Iteration,
 				Thinking:      p.Thinking,
 				StreamContent: p.StreamContent,
-				ElapsedWall:   p.ElapsedWall,
 			}
 			for _, t := range p.ActiveTools {
 				hp.ActiveTools = append(hp.ActiveTools, histTool{
@@ -204,10 +201,9 @@ func (wc *WebChannel) handleHistoryGet(w http.ResponseWriter, r *http.Request, s
 			// Attach iteration history (completed iterations 1..N-1)
 			for _, iter := range p.IterationHistory {
 				snap := histIterSnapshot{
-					Iteration:   iter.Iteration,
-					Thinking:    iter.Thinking,
-					Reasoning:   iter.Reasoning,
-					ElapsedWall: iter.ElapsedWall,
+					Iteration: iter.Iteration,
+					Thinking:  iter.Thinking,
+					Reasoning: iter.Reasoning,
 				}
 				for _, t := range iter.CompletedTools {
 					snap.CompletedTools = append(snap.CompletedTools, histTool{
@@ -1760,7 +1756,7 @@ func (wc *WebChannel) getCurrentChatID(senderID string) string {
 }
 
 // GetCurrentSession returns the active SessionSelector (channel + chatID).
-// Public so serverapp can inject it into RPC context for get_cwd/set_cwd.
+// Used internally by web_api.go and web.go for session routing.
 func (wc *WebChannel) GetCurrentSession(senderID string) SessionSelector {
 	wc.userCurrentSessionMu.RLock()
 	defer wc.userCurrentSessionMu.RUnlock()
@@ -1768,6 +1764,97 @@ func (wc *WebChannel) GetCurrentSession(senderID string) SessionSelector {
 		return sel
 	}
 	return SessionSelector{Channel: "web", ChatID: senderID}
+}
+
+// resolveSessionChannel queries the DB tenants table for the channel of the given chatID.
+// Returns "" if not found, defaulting to "web" in the caller.
+func (wc *WebChannel) resolveSessionChannel(chatID string) string {
+	if wc.db == nil {
+		return ""
+	}
+	var channel string
+	err := wc.db.QueryRow(
+		"SELECT channel FROM tenants WHERE chat_id = ? ORDER BY last_active_at DESC LIMIT 1", chatID,
+	).Scan(&channel)
+	if err != nil {
+		return ""
+	}
+	return channel
+}
+
+// handleSessionCwd handles GET /api/sessions/{chatID}/cwd.
+func (wc *WebChannel) handleSessionCwd(w http.ResponseWriter, r *http.Request) {
+	senderID := senderIDFromContext(r.Context())
+	if senderID == "" {
+		jsonErrorResponse(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := r.PathValue("chatID")
+	if chatID == "" {
+		jsonErrorResponse(w, http.StatusBadRequest, "missing chatID")
+		return
+	}
+	channel := wc.resolveSessionChannel(chatID)
+	if channel == "" {
+		channel = "web"
+	}
+	// Get CWD from agent session
+	if wc.callbacks.GetCWD != nil {
+		if cwd, err := wc.callbacks.GetCWD(channel, chatID); err == nil && cwd != "" {
+			writeJSON(w, http.StatusOK, map[string]string{"dir": cwd})
+			return
+		}
+	}
+	// Fallback: configured work dir
+	workDir := wc.workDir
+	if workDir == "" {
+		workDir = "."
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"dir": workDir})
+}
+
+// handleSessionCwdSet handles PUT /api/sessions/{chatID}/cwd.
+func (wc *WebChannel) handleSessionCwdSet(w http.ResponseWriter, r *http.Request) {
+	senderID := senderIDFromContext(r.Context())
+	if senderID == "" {
+		jsonErrorResponse(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	chatID := r.PathValue("chatID")
+	if chatID == "" {
+		jsonErrorResponse(w, http.StatusBadRequest, "missing chatID")
+		return
+	}
+	var body struct {
+		Dir string `json:"dir"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonErrorResponse(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Dir == "" {
+		jsonErrorResponse(w, http.StatusBadRequest, "missing dir")
+		return
+	}
+	channel := wc.resolveSessionChannel(chatID)
+	if channel == "" {
+		channel = "web"
+	}
+	// Use the shared set_cwd RPC (includes ownOrAdmin auth check)
+	if wc.callbacks.RPCHandler != nil {
+		params, _ := json.Marshal(map[string]string{
+			"channel": channel,
+			"chat_id": chatID,
+			"dir":     body.Dir,
+		})
+		if _, err := wc.callbacks.RPCHandler("set_cwd", params, senderID); err != nil {
+			jsonErrorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	jsonErrorResponse(w, http.StatusServiceUnavailable, "RPC handler not available")
 }
 
 // isAdmin returns true if the user is an admin.

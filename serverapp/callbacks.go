@@ -371,6 +371,16 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sql.DB) web.W
 		cs := sqlite.NewChatService(webDB)
 		return cs.RenameChat("web", senderID, chatID, label)
 	}
+	callbacks.GetCWD = func(channel, chatID string) (string, error) {
+		if ag.MultiSession() == nil {
+			return "", nil
+		}
+		sess, err := ag.MultiSession().GetOrCreateSession(channel, chatID)
+		if err != nil {
+			return "", err
+		}
+		return sess.GetCurrentDir(), nil
+	}
 	return callbacks
 }
 

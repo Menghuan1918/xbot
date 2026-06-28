@@ -9,7 +9,7 @@
  *       ask_user message        → waiting_input
  *       (any error msg)         → error  (best-effort; not in scope UI)
  *   - star persistence (localStorage, Spec 3 §3.3)
- *   - create / switch / rename / delete via REST, with WS subscribe + set_cwd
+ *   - create / switch / rename / delete via REST, with WS subscribe
  *
  * Backend contracts (channel/web/web_api.go):
  *   GET    /api/chats?channel=<ch>           → { ok, chats: UserChatWithPreview[] }
@@ -17,7 +17,8 @@
  *   POST   /api/chats/{id}/switch[?channel=]  → { ok, chat_id, channel }
  *   POST   /api/chats/{id}/rename {label}    → { ok }
  *   DELETE /api/chats/{id}                    → { ok }
- *   RPC    set_cwd { channel, chat_id, dir }
+ *   REST    PUT /api/sessions/{chatID}/cwd  { dir }
+ *   REST    GET /api/sessions/{chatID}/cwd  → { dir }
  *   WS     subscribe { type:'subscribe', chat_id }
  */
 import { createElement, createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
@@ -198,7 +199,12 @@ export function useSessionStoreImpl(): SessionStore {
       }
       if (workPath) {
         try {
-          await ws.rpc('set_cwd', { channel: DEFAULT_CHANNEL, chat_id: chatID, dir: workPath })
+          await fetch(`/api/sessions/${encodeURIComponent(chatID)}/cwd`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dir: workPath }),
+            credentials: 'include',
+          })
         } catch {
           /* non-fatal: session still created */
         }

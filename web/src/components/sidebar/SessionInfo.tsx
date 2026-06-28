@@ -3,7 +3,7 @@
  *
  * Displays session metadata (id, channel, work path, last active, message count)
  * and current LLM model. The work path is editable — changes are applied via
- * the `set_cwd` WS RPC and propagated to the CwdProvider so file browser/search/
+ * the PUT /api/sessions/{chatID}/cwd REST endpoint and propagated to the CwdProvider so file browser/search/
  * terminal all follow the new working directory.
  */
 import { useCallback, useEffect, useState } from 'react'
@@ -47,28 +47,20 @@ export function SessionInfo() {
 
   const applyCwd = useCallback(async () => {
     const path = cwdInput.trim()
-    if (!path || path === cwd) {
+    if (!activeId || !path || path === cwd) {
       setEditingCwd(false)
       return
     }
     setCwdBusy(true)
     try {
-      await ws.rpc('set_cwd', { dir: path })
-      // Manually update CwdContext — the CwdProvider listens to progress
-      // events for CWD changes, but set_cwd RPC doesn't emit a progress event.
-      // We dispatch a synthetic update by calling get_cwd after set_cwd.
-      const res = await ws.rpc<{ dir?: string }>('get_cwd')
-      if (res?.dir) {
-        // Force a re-render of CwdProvider consumers by updating the context
-        // via a custom event. CwdProvider's progress listener will pick up
-        // the new CWD on the next progress_structured event, but for immediate
-        // feedback we update the CwdContext directly.
-        // Since CwdContext is a standard React context, we can't update it from
-        // here. Instead, we reload the page's CwdProvider by toggling WS state.
-        // The simplest reliable approach: window.dispatchEvent with a custom
-        // event that CwdProvider listens to.
-        window.dispatchEvent(new CustomEvent('xbot:cwd-changed', { detail: res.dir }))
-      }
+      await fetch(`/api/sessions/${encodeURIComponent(activeId)}/cwd`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir: path }),
+        credentials: 'include',
+      })
+      // Update CwdContext via custom event for immediate feedback.
+      window.dispatchEvent(new CustomEvent('xbot:cwd-changed', { detail: path }))
       toast.success(t('sidebar.cwdUpdated'))
     } catch {
       toast.error(t('sidebar.cwdUpdateFailed'))
@@ -76,7 +68,7 @@ export function SessionInfo() {
       setCwdBusy(false)
       setEditingCwd(false)
     }
-  }, [ws, activeId, cwdInput, cwd, t])
+  }, [activeId, cwdInput, cwd, t])
 
   return (
     <ScrollArea className="h-full">

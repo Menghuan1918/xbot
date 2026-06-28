@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -161,133 +159,11 @@ func registerSettingsHandlers(t RPCTable, h *RPCContext) {
 		ChatID  string `json:"chat_id"`
 		Dir     string `json:"dir"`
 	}) error {
-		channel := p.Channel
-		chatID := p.ChatID
-		// When params are empty, use the active session from RPC context.
-		if channel == "" {
-			channel = rpcActiveChannel(ctx)
-		}
-		if chatID == "" {
-			chatID = rpcActiveChatID(ctx)
-		}
-		if err := ownOrAdmin(ctx, chatID); err != nil {
+		if err := ownOrAdmin(ctx, p.ChatID); err != nil {
 			return err
 		}
 		// SetCWD internally refreshes plugin workDir with correct tenantID
-		return h.Ag.SetCWD(channel, chatID, p.Dir)
-	})
-	t["get_cwd"] = rpc1(func(ctx context.Context, p struct {
-		Channel string `json:"channel"`
-		ChatID  string `json:"chat_id"`
-	}) (any, error) {
-		bizID := rpcBizID(ctx)
-		channel := p.Channel
-		chatID := p.ChatID
-		if channel == "" {
-			// Use the active session's channel from RPC context.
-			channel = rpcActiveChannel(ctx)
-		}
-		if chatID == "" {
-			// Use the active session's chatID from RPC context.
-			chatID = rpcActiveChatID(ctx)
-		}
-		// Final fallback: default channel and bizID.
-		if channel == "" {
-			channel = "web"
-		}
-		if chatID == "" {
-			chatID = bizID
-		}
-		// Look up the session's current working directory.
-		if h.Ag.MultiSession() != nil {
-			if sess, err := h.Ag.MultiSession().GetOrCreateSession(channel, chatID); err == nil {
-				if cwd := sess.GetCurrentDir(); cwd != "" {
-					return map[string]any{"dir": cwd}, nil
-				}
-			}
-		}
-		// Fall back to the configured work directory.
-		workDir := h.Cfg.Agent.WorkDir
-		if workDir == "" {
-			workDir = "."
-		}
-		return map[string]any{"dir": workDir}, nil
-	})
-	t["list_files"] = rpc1(func(ctx context.Context, p struct {
-		Path    string `json:"path"`
-		Channel string `json:"channel"`
-		ChatID  string `json:"chat_id"`
-	}) (any, error) {
-		cwd, err := h.resolveSessionCwd(ctx, p.Channel, p.ChatID)
-		if err != nil {
-			return nil, err
-		}
-		// Resolve requested path within CWD
-		target := cwd
-		if p.Path != "" {
-			target = filepath.Join(cwd, p.Path)
-		}
-		// Security: ensure target is within CWD
-		absTarget, err := filepath.Abs(target)
-		if err != nil {
-			return nil, fmt.Errorf("invalid path")
-		}
-		absCwd, err := filepath.Abs(cwd)
-		if err != nil {
-			return nil, fmt.Errorf("invalid cwd")
-		}
-		rel, err := filepath.Rel(absCwd, absTarget)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			return nil, fmt.Errorf("path outside workspace")
-		}
-		entries, err := listDirTree(absTarget, absCwd, 0, 5)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"entries": entries}, nil
-	})
-	t["read_file"] = rpc1(func(ctx context.Context, p struct {
-		Path    string `json:"path"`
-		Channel string `json:"channel"`
-		ChatID  string `json:"chat_id"`
-	}) (any, error) {
-		cwd, err := h.resolveSessionCwd(ctx, p.Channel, p.ChatID)
-		if err != nil {
-			return nil, err
-		}
-		// Resolve and validate path within CWD
-		fullPath := filepath.Join(cwd, p.Path)
-		absPath, err := filepath.Abs(fullPath)
-		if err != nil {
-			return nil, fmt.Errorf("invalid path")
-		}
-		absCwd, err := filepath.Abs(cwd)
-		if err != nil {
-			return nil, fmt.Errorf("invalid cwd")
-		}
-		rel, err := filepath.Rel(absCwd, absPath)
-		if err != nil || strings.HasPrefix(rel, "..") {
-			return nil, fmt.Errorf("path outside workspace")
-		}
-		// Read file content (limit to 1MB to avoid huge transfers)
-		info, err := os.Stat(absPath)
-		if err != nil {
-			return nil, fmt.Errorf("file not found")
-		}
-		if info.IsDir() {
-			return nil, fmt.Errorf("path is a directory")
-		}
-		if info.Size() > 1<<20 {
-			return nil, fmt.Errorf("file too large (max 1MB)")
-		}
-		data, err := os.ReadFile(absPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read file: %w", err)
-		}
-		return map[string]any{
-			"content":  string(data),
-			"language": fileLanguage(filepath.Base(absPath)),
-		}, nil
+		return h.Ag.SetCWD(p.Channel, p.ChatID, p.Dir)
 	})
 	t["get_settings"] = rpc1(func(ctx context.Context, p struct {
 		Namespace string `json:"namespace"`
@@ -1332,16 +1208,6 @@ func HandleCLIRPC(table RPCTable, method string, params json.RawMessage, senderI
 	return table.Dispatch(ctx, method, params)
 }
 
-// HandleCLIRPCActive is like HandleCLIRPC but also injects the user's active
-// session (channel + chatID) into the RPC context. RPCs that resolve sessions
-// by channel+chatID (get_cwd, set_cwd, list_files, etc.) use these instead of
-// falling back to defaults when the client doesn't pass explicit params.
-func HandleCLIRPCActive(table RPCTable, method string, params json.RawMessage, senderID, activeChannel, activeChatID string) (json.RawMessage, error) {
-	bizID := senderIDFromParams(params, senderID)
-	ctx := WithRPCCtxActive(context.Background(), senderID, bizID, activeChannel, activeChatID)
-	return table.Dispatch(ctx, method, params)
-}
-
 // ── Complex subscription handlers (extracted for readability) ──
 
 func (h *RPCContext) listSubscriptions(ctx context.Context) ([]channel.Subscription, error) {
@@ -1637,137 +1503,4 @@ func marshalBgTasks(tasks []*tools.BackgroundTask) []bgTaskJSON {
 		}
 	}
 	return result
-}
-
-// resolveSessionCwd resolves the working directory for the session identified
-// by channel+chatID, falling back to the configured agent work directory.
-// When channel/chatID are empty, uses the active session from RPC context.
-func (h *RPCContext) resolveSessionCwd(ctx context.Context, channel, chatID string) (string, error) {
-	bizID := rpcBizID(ctx)
-	if channel == "" {
-		channel = rpcActiveChannel(ctx)
-	}
-	if chatID == "" {
-		chatID = rpcActiveChatID(ctx)
-	}
-	// Final fallback.
-	if channel == "" {
-		channel = "web"
-	}
-	if chatID == "" {
-		chatID = bizID
-	}
-	if h.Ag != nil && h.Ag.MultiSession() != nil {
-		if sess, err := h.Ag.MultiSession().GetOrCreateSession(channel, chatID); err == nil {
-			if cwd := sess.GetCurrentDir(); cwd != "" {
-				return cwd, nil
-			}
-		}
-	}
-	workDir := h.Cfg.Agent.WorkDir
-	if workDir == "" {
-		workDir = "."
-	}
-	return workDir, nil
-}
-
-// fileEntry is the JSON shape returned by list_files — mirrors the frontend
-// FileNode type.
-type fileEntry struct {
-	Name     string      `json:"name"`
-	Path     string      `json:"path"`
-	Type     string      `json:"type"` // "file" | "directory"
-	Language string      `json:"language,omitempty"`
-	Children []fileEntry `json:"children,omitempty"`
-}
-
-// listDirTree recursively lists files and directories under root, returning
-// a nested tree. Hidden files/directories (starting with ".") are skipped.
-// maxDepth limits recursion to prevent unbounded traversal.
-func listDirTree(absPath, basePath string, depth, maxDepth int) ([]fileEntry, error) {
-	entries, err := os.ReadDir(absPath)
-	if err != nil {
-		return nil, err
-	}
-	var result []fileEntry
-	for _, e := range entries {
-		name := e.Name()
-		// Skip hidden files and directories
-		if strings.HasPrefix(name, ".") {
-			continue
-		}
-		// Skip common build/dependency directories to keep the tree manageable
-		if e.IsDir() && (name == "node_modules" || name == "vendor" || name == "__pycache__" || name == "dist" || name == "build" || name == "target" || name == ".git") {
-			continue
-		}
-		relPath := filepath.Join(basePath, name)
-		if basePath == "" || basePath == "." {
-			relPath = name
-		}
-		entry := fileEntry{
-			Name: name,
-			Path: relPath,
-			Type: "file",
-		}
-		if e.IsDir() {
-			entry.Type = "directory"
-			if depth < maxDepth-1 {
-				children, err := listDirTree(filepath.Join(absPath, name), filepath.Join(basePath, name), depth+1, maxDepth)
-				if err == nil && len(children) > 0 {
-					entry.Children = children
-				}
-			}
-		} else {
-			entry.Language = fileLanguage(name)
-		}
-		result = append(result, entry)
-	}
-	return result, nil
-}
-
-// fileLanguage maps a filename extension to a Monaco-compatible language id.
-func fileLanguage(name string) string {
-	ext := strings.ToLower(filepath.Ext(name))
-	switch ext {
-	case ".ts", ".tsx":
-		return "typescript"
-	case ".js", ".jsx":
-		return "javascript"
-	case ".json":
-		return "json"
-	case ".go":
-		return "go"
-	case ".py":
-		return "python"
-	case ".rs":
-		return "rust"
-	case ".java":
-		return "java"
-	case ".c", ".h":
-		return "c"
-	case ".cpp", ".cc", ".cxx", ".hpp":
-		return "cpp"
-	case ".css":
-		return "css"
-	case ".scss", ".sass":
-		return "scss"
-	case ".html", ".htm":
-		return "html"
-	case ".xml":
-		return "xml"
-	case ".yaml", ".yml":
-		return "yaml"
-	case ".toml":
-		return "toml"
-	case ".md", ".markdown":
-		return "markdown"
-	case ".sh", ".bash":
-		return "shell"
-	case ".sql":
-		return "sql"
-	case ".vue":
-		return "html"
-	default:
-		return ""
-	}
 }

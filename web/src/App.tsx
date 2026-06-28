@@ -30,11 +30,11 @@ export default function App() {
             element={
               <AuthGuard>
                 <WSProvider>
-                  <CwdProvider>
-                    <SessionStoreProvider>
+                  <SessionStoreProvider>
+                    <CwdProvider>
                       <AppShell />
-                    </SessionStoreProvider>
-                  </CwdProvider>
+                    </CwdProvider>
+                  </SessionStoreProvider>
                 </WSProvider>
               </AuthGuard>
             }

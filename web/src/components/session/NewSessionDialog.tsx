@@ -3,7 +3,7 @@
  *
  * Flow on submit:
  *   1. POST /api/chats {label}       → chatID   (useSessionStore.createSession)
- *   2. ws.rpc('set_cwd', {dir})      → set working directory (if provided)
+ *   2. PUT /api/sessions/{chatID}/cwd  → set working directory (if provided)
  *   3. ws.subscribe(chatID) + switch  → handled by createSession
  * The dialog closes on success and reports via toast.
  */

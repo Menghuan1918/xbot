@@ -26,7 +26,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { toast } from 'sonner'
 
-import { useWSConnection } from '@/hooks/useWSConnection'
 import { fetchHistory } from '@/components/agent/api'
 import type { TabManager } from '@/hooks/useTabManager'
 import type { TerminalSession, TerminalStatus } from '@/types/terminal'
@@ -203,7 +202,6 @@ export interface TerminalManager {
 }
 
 export function useTerminal(tabManager: TabManager): TerminalManager {
-  const ws = useWSConnection()
 
   // Keep the store bound to the live tab manager (re-bind on identity change).
   useEffect(() => {
@@ -241,8 +239,11 @@ export function useTerminal(tabManager: TabManager): TerminalManager {
     let cwd = ''
     if (chatID) {
       try {
-        const r = await ws.rpc<{ dir?: string }>('get_cwd')
-        cwd = r?.dir ?? ''
+        const res = await fetch(`/api/sessions/${encodeURIComponent(chatID)}/cwd`, {
+          credentials: 'include',
+        })
+        const data = (await res.json()) as { dir?: string }
+        cwd = data.dir ?? ''
       } catch {
         /* non-fatal; backend falls back to the user's home dir */
       }
@@ -250,7 +251,7 @@ export function useTerminal(tabManager: TabManager): TerminalManager {
     const id = await terminalStore.createTerminal(chatID, cwd)
     if (!id) toast.error('Failed to create terminal')
     return id
-  }, [ws])
+  }, [])
 
   const closeTerminal = useCallback((id: string) => terminalStore.closeTerminal(id), [])
   const focusTerminal = useCallback((id: string) => terminalStore.focusTerminal(id), [])

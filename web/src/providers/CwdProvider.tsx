@@ -1,9 +1,10 @@
 /**
  * CwdProvider — tracks the agent's current working directory (CWD).
  *
- * Initialization: on WS connect, calls `get_cwd` RPC to get the initial CWD.
+ * Initialization: when activeSessionId changes, fetches CWD via REST API
+ * `GET /api/sessions/{chatID}/cwd`.
  * Live tracking: subscribes to `progress_structured` WS events and reads
- * `progress.cwd` (populated by the backend in engine_run.go on each iteration).
+ * `progress.cwd` (populated by the backend on each iteration).
  * Also detects completed `Cd` tool calls as a fallback when `cwd` is absent.
  *
  * Children access CWD via `useCwd()`; file browser/search auto-refresh
@@ -14,16 +15,16 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   type ReactNode,
 } from 'react'
 
 import { useWSConnection } from '@/hooks/useWSConnection'
+import { useSessionStore } from '@/hooks/useSessionStore'
 import type { WSMessage } from '@/types/shared'
 
 export interface CwdContextValue {
-  /** The current working directory, or null before the first `get_cwd` resolves. */
+  /** The current working directory, or null before the first fetch resolves. */
   cwd: string | null
   /** True while the initial CWD is loading. */
   loading: boolean
@@ -36,41 +37,41 @@ export const CwdContext = createContext<CwdContextValue>({
 
 export function CwdProvider({ children }: { children: ReactNode }) {
   const ws = useWSConnection()
+  const session = useSessionStore()
+  const activeSessionId = session.activeSessionId
   const [cwd, setCwd] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const connectedRef = useRef(false)
 
-  // Fetch initial CWD via RPC when the WS connects.
+  // Fetch CWD via REST API when the active session changes.
   useEffect(() => {
-    if (!ws.connected) {
-      connectedRef.current = false
+    if (!activeSessionId) {
+      setCwd(null)
+      setLoading(false)
       return
     }
-    // Avoid re-fetching on every re-render; only fetch on connect transitions.
-    if (connectedRef.current) return
-    connectedRef.current = true
-
     let cancelled = false
     setLoading(true)
-    ws
-      .rpc<{ dir?: string }>('get_cwd')
-      .then((res) => {
+    fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/cwd`, {
+      credentials: 'include',
+    })
+      .then((res) => res.json())
+      .then((data: { dir?: string }) => {
         if (cancelled) return
-        if (res?.dir) setCwd(res.dir)
+        setCwd(data.dir || null)
       })
       .catch(() => {
-        // RPC failed (e.g. no session yet); CWD stays null.
+        if (cancelled) return
+        setCwd(null)
       })
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
-
     return () => {
       cancelled = true
     }
-  }, [ws, ws.connected])
+  }, [activeSessionId])
 
-  // Track CWD changes from progress events + manual cwd-changed dispatch.
+  // Track CWD changes from progress events.
   useEffect(() => {
     const off = ws.onMessage((msg: WSMessage) => {
       if (msg.type !== 'progress_structured') return
@@ -104,7 +105,7 @@ export function CwdProvider({ children }: { children: ReactNode }) {
       }
     })
 
-    // Listen for manual CWD changes (e.g. from SessionInfo panel's set_cwd RPC).
+    // Listen for manual CWD changes (e.g. from SessionInfo panel's PUT API).
     const onCwdChanged = (e: Event) => {
       const detail = (e as CustomEvent).detail
       if (typeof detail === 'string' && detail) setCwd(detail)
