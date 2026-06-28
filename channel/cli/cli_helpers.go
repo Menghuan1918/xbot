@@ -344,7 +344,20 @@ const (
 // Queues the clear command into pendingCmds (auto-drained by Update).
 func (m *cliModel) showTempStatus(text string) {
 	m.tempStatus = text
-	m.pendingCmds = append(m.pendingCmds, m.clearTempStatusCmd(5*time.Second))
+	// Clear after 5 seconds via dedicated goroutine — does NOT use pendingCmds
+	// which can be cleared by postRestoreSessionSetup() during reconnect.
+	// Safety: m.channel outlives this 5s timer — a session's CLIChannel is
+	// only replaced when the whole model is garbage-collected, which cannot
+	// happen before 5s since this goroutine holds a reference to m.
+	go func() {
+		time.Sleep(5 * time.Second)
+		if m.channel != nil {
+			select {
+			case m.channel.asyncCh <- cliTempStatusClearMsg{}:
+			default:
+			}
+		}
+	}()
 }
 
 // clearTempStatusCmd returns a tea.Cmd that clears the temp status after the

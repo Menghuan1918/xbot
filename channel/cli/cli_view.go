@@ -11,6 +11,7 @@ import (
 	"xbot/config"
 	"xbot/version"
 
+	ch "xbot/channel"
 	"xbot/clipanic"
 
 	tea "charm.land/bubbletea/v2"
@@ -1057,6 +1058,7 @@ func (m *cliModel) resolveWidgetZone(zone string) string {
 // View renders the CLI interface.
 func (m *cliModel) View() (v tea.View) {
 	defer clipanic.Recover("ch.cliModel.View", nil, true)
+
 	// Reset mouse zones for this frame
 	m.mouseZones.reset()
 
@@ -1079,21 +1081,21 @@ func (m *cliModel) View() (v tea.View) {
 		return v
 	}
 
-	// /su loading
-	if m.splashState.suLoading {
-		v := tea.NewView(m.renderSuLoading())
-		v.AltScreen = true
-		return v
-	}
-
 	// Remote reconnect overlay — show spinner when WS is disconnected.
-	// Placed after suLoading so that session-switch reconnect doesn't conflict.
 	if m.remoteMode && m.connState != "connected" && m.connState != "" {
 		if overlay := m.renderReconnectOverlay(); overlay != "" {
 			v := tea.NewView(overlay)
 			v.AltScreen = true
 			return v
 		}
+	}
+
+	// /su loading — skip if already connected (reconnect restored session but
+	// suHistoryLoadMsg was dropped due to asyncCh congestion)
+	if m.splashState.suLoading && m.connState != "connected" {
+		v := tea.NewView(m.renderSuLoading())
+		v.AltScreen = true
+		return v
 	}
 
 	// Build shared components
@@ -1576,39 +1578,76 @@ func (m *cliModel) renderSuLoading() string {
 	return sb.String()
 }
 
-// renderReconnectOverlay renders a full-screen reconnect spinner overlay
-// when the remote WS connection is lost. Blocks all interaction except quit.
+// renderReconnectOverlay renders a full-screen disconnect splash screen.
+// Only Ctrl+Z is accepted (quit).
 func (m *cliModel) renderReconnectOverlay() string {
 	screenW := m.chatWidth()
-	if screenW < 40 {
-		screenW = 40
+	if screenW < 32 {
+		screenW = 32
 	}
 	screenH := m.height
-	if screenH < 10 {
-		screenH = 10
+	if screenH < 6 {
+		screenH = 6
 	}
 
 	warningStyle := m.styles.WarningSt
-	errorStyle := m.styles.ErrorMsg
 	mutedStyle := m.styles.TextMutedSt
+	// Title uses a dedicated style: bold + error color, but NO fixed Width
+	// (ErrorMsg has .Width(cw) + rounded border, which looks ugly full-width
+	// on wide screens with left-aligned short text).
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9"))
 
-	frame := splashFrames[m.reconnectFrame%len(splashFrames)]
+	tick := time.Now().UnixMilli() / 100
+	frame := splashFrames[tick%int64(len(splashFrames))]
+	lang := ch.CurrentLocaleLang()
 
 	var lines []string
 
-	// Title — connection lost
-	titleText := errorStyle.Render(m.locale.ReconnectTitle)
+	// ── ASCII art (changes every 8 seconds) ──
+	if art := selectReconnectArt(tick); len(art) > 0 && screenW >= 36 {
+		// Find max art width for centering
+		maxArtW := 0
+		for _, l := range art {
+			if w := lipgloss.Width(l); w > maxArtW {
+				maxArtW = w
+			}
+		}
+		artPad := (screenW - maxArtW) / 2
+		if artPad < 0 {
+			artPad = 0
+		}
+		for _, al := range art {
+			lines = append(lines, mutedStyle.Render(strings.Repeat(" ", artPad)+al))
+		}
+		lines = append(lines, "")
+	}
+
+	// ── Divider ──
+	divW := screenW - 4
+	if divW > 36 {
+		divW = 36
+	}
+	if divW > 2 {
+		divider := mutedStyle.Render(strings.Repeat("─", divW))
+		dPad := (screenW - lipgloss.Width(divider)) / 2
+		if dPad < 0 {
+			dPad = 0
+		}
+		lines = append(lines, strings.Repeat(" ", dPad)+divider)
+		lines = append(lines, "")
+	}
+
+	// ── Title ──
+	titleText := titleStyle.Render("💔 " + m.locale.ReconnectTitle)
 	tW := lipgloss.Width(titleText)
 	tPad := (screenW - tW) / 2
 	if tPad < 0 {
 		tPad = 0
 	}
 	lines = append(lines, strings.Repeat(" ", tPad)+titleText)
-
-	// Blank line
 	lines = append(lines, "")
 
-	// Server URL
+	// ── Server URL ──
 	host := m.remoteServerURL
 	if u, err := url.Parse(host); err == nil && u.Host != "" {
 		host = u.Host
@@ -1620,18 +1659,10 @@ func (m *cliModel) renderReconnectOverlay() string {
 		sPad = 0
 	}
 	lines = append(lines, strings.Repeat(" ", sPad)+serverText)
-
-	// Blank line
 	lines = append(lines, "")
 
-	// Spinner + reconnecting message
-	var spinnerMsg string
-	switch m.connState {
-	case "disconnected":
-		spinnerMsg = fmt.Sprintf(m.locale.ReconnectingMsg, frame)
-	default: // "reconnecting" or any other non-connected state
-		spinnerMsg = fmt.Sprintf(m.locale.ReconnectingMsg, frame)
-	}
+	// ── Spinner ──
+	spinnerMsg := fmt.Sprintf(m.locale.ReconnectingMsg, frame)
 	loadingText := warningStyle.Render(spinnerMsg)
 	lW := lipgloss.Width(loadingText)
 	lPad := (screenW - lW) / 2
@@ -1639,11 +1670,32 @@ func (m *cliModel) renderReconnectOverlay() string {
 		lPad = 0
 	}
 	lines = append(lines, strings.Repeat(" ", lPad)+loadingText)
-
-	// Blank line
 	lines = append(lines, "")
 
-	// Quit hint
+	// ── Light divider ──
+	if divW > 2 {
+		ldiv := mutedStyle.Render(strings.Repeat("·", divW))
+		lPad := (screenW - lipgloss.Width(ldiv)) / 2
+		if lPad < 0 {
+			lPad = 0
+		}
+		lines = append(lines, strings.Repeat(" ", lPad)+ldiv)
+		lines = append(lines, "")
+	}
+
+	// ── Fun quip (i18n, changes every 4 seconds) ──
+	if quip := selectReconnectQuip(lang, tick); quip != "" {
+		quipText := mutedStyle.Italic(true).Render("\"" + quip + "\"")
+		qW := lipgloss.Width(quipText)
+		qPad := (screenW - qW) / 2
+		if qPad < 0 {
+			qPad = 0
+		}
+		lines = append(lines, strings.Repeat(" ", qPad)+quipText)
+		lines = append(lines, "")
+	}
+
+	// ── Quit hint ──
 	hintText := mutedStyle.Render(m.locale.ReconnectHint)
 	hW := lipgloss.Width(hintText)
 	hPad := (screenW - hW) / 2
@@ -1652,19 +1704,21 @@ func (m *cliModel) renderReconnectOverlay() string {
 	}
 	lines = append(lines, strings.Repeat(" ", hPad)+hintText)
 
-	// Vertical center
+	// ── Vertical center ──
 	emptyLinesBefore := (screenH - len(lines)) / 2
-	if emptyLinesBefore < 3 {
-		emptyLinesBefore = 3
+	if emptyLinesBefore < 0 {
+		emptyLinesBefore = 0
 	}
 
 	var sb strings.Builder
 	for i := 0; i < emptyLinesBefore; i++ {
-		sb.WriteString("\n")
+		sb.WriteByte('\n')
 	}
-	for _, line := range lines {
+	for i, line := range lines {
+		if i > 0 {
+			sb.WriteByte('\n')
+		}
 		sb.WriteString(line)
-		sb.WriteString("\n")
 	}
 
 	return sb.String()

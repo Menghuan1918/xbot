@@ -40,14 +40,12 @@ func NewCLIChannel(cfg *CLIChannelConfig) *CLIChannel {
 		workDir:    cfg.WorkDir,
 		msgChan:    make(chan ch.OutboundMsg, cliMsgBufSize),
 		progressCh: make(chan *protocol.ProgressEvent, 1), // buffered-1: latest progress wins
-		asyncCh:    make(chan tea.Msg, 256),               // unified async send: progress + outbound + ticks
+		tickCh:     make(chan tea.Msg, 1),                 // buffered-1: tick, drop on full
+		asyncCh:    make(chan tea.Msg, 256),               // unified async send: progress + outbound
 		stopCh:     make(chan struct{}),
 	}
-	// Global ticker goroutine: sends cliTickMsg every 100ms. This is the
-	// SINGLE source of all timed UI updates (splash animation, spinner,
-	// progress timers, queue flush, placeholder rotation). No BubbleTea
-	// cmd chain is needed — eliminating the class of bugs where multiple
-	// cmd chains accumulate and double the tick rate.
+	// Global ticker goroutine: sends cliTickMsg every 100ms to tickCh.
+	// tickCh is separate from asyncCh so tick flood never blocks business messages.
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
@@ -55,10 +53,8 @@ func NewCLIChannel(cfg *CLIChannelConfig) *CLIChannel {
 			select {
 			case <-ticker.C:
 				select {
-				case ch.asyncCh <- cliTickMsg{}:
+				case ch.tickCh <- cliTickMsg{}:
 				default:
-					// ch.Channel full — drop tick. Next tick will arrive in 100ms.
-					// This prevents blocking the ticker goroutine.
 				}
 			case <-ch.stopCh:
 				return
@@ -271,6 +267,10 @@ func (c *CLIChannel) Start() error {
 	// 启动 unified async drain goroutine: single sender to p.msgs
 	c.wg.Add(1)
 	clipanic.Go("ch.CLIChannel.handleAsyncDrain", c.handleAsyncDrain)
+
+	// 启动 tick drain goroutine: independent of asyncCh to prevent tick starvation
+	c.wg.Add(1)
+	clipanic.Go("ch.CLIChannel.handleTickDrain", c.handleTickDrain)
 
 	// §13 异步检查更新（不阻塞 TUI 启动）
 	c.CheckUpdateAsync()
@@ -541,13 +541,31 @@ func (c *CLIChannel) SendProgress(chatID string, payload *protocol.ProgressEvent
 			// eviction; Phase=="" && Iteration==0) or structured
 			// (chained eviction where structured accumulated stream
 			// fields from prior merges). Both need the same merge.
-			if payload.StreamContent == "" && old.StreamContent != "" {
-				payload.StreamContent = old.StreamContent
+			//
+			// Guard: only merge stream fields when old and payload
+			// belong to the same iteration. Stream-only events have
+			// Iteration==0 (unknown). If payload has a structured
+			// iteration (>0) and old is stream-only, the old content
+			// likely belongs to the previous iteration (already
+			// snapshotted by snapshotIterationChange). Merging it
+			// into the new payload causes reasoning to render twice —
+			// once in completed iterations, once in live.
+			//
+			// payload.Iteration==0 branch: payload's iteration is
+			// unknown (stream-only or edge-case structured event with
+			// Iteration==0). Conservatively allow merge — the stream
+			// content is presumed to belong to the same logical turn.
+			sameOrUnknownIter := payload.Iteration == old.Iteration || payload.Iteration == 0
+			if sameOrUnknownIter {
+				if payload.StreamContent == "" && old.StreamContent != "" {
+					payload.StreamContent = old.StreamContent
+				}
+				if payload.ReasoningStreamContent == "" && old.ReasoningStreamContent != "" {
+					payload.ReasoningStreamContent = old.ReasoningStreamContent
+				}
 			}
-			if payload.ReasoningStreamContent == "" && old.ReasoningStreamContent != "" {
-				payload.ReasoningStreamContent = old.ReasoningStreamContent
-			}
-			if len(payload.StreamingTools) == 0 && len(old.StreamingTools) > 0 {
+			// StreamingTools follow the same rule.
+			if sameOrUnknownIter && len(payload.StreamingTools) == 0 && len(old.StreamingTools) > 0 {
 				payload.StreamingTools = old.StreamingTools
 			}
 			// Merge TokenUsage and CWD regardless of old event type —
@@ -593,15 +611,30 @@ func (c *CLIChannel) SendSessionState(ev protocol.SessionEvent) {
 }
 
 // SetConnState updates the connection state indicator in the header bar.
-// Non-blocking — drops if asyncCh is full.
+// Writes directly to cliModel fields — bypasses ALL message channels (asyncCh,
+// program.Send) which are unreliable during disconnect (tick flood fills buffers).
+//
+// ConnState state machine (single source of truth):
+//
+//	"" ──(initial connect)──→ "connected"
+//	"connected" ──(readPump/SendMessage/sendPing error)──→ "disconnected"
+//	"disconnected" ──(reconnectLoop starts)──→ "reconnecting"
+//	"reconnecting" ──(connect() success)──→ "connected"
+//
+// Rules:
+//  1. Only SetConnState modifies connState in the model
+//  2. View(), guards, splash only READ connState, never write
+//  3. There is NO showDisconnect or other flag — connState alone is sufficient
 func (c *CLIChannel) SetConnState(state string) {
-	if c.program == nil {
-		return
+	// Write directly to model field — bypasses program.Send/asyncCh entirely.
+	// During disconnect, tick flood fills all message channels, making
+	// delivery impossible. Direct write is the only reliable path.
+	c.programMu.Lock()
+	if c.model != nil {
+		c.model.connState = state
 	}
-	select {
-	case c.asyncCh <- cliConnStateMsg{state: state}:
-	default:
-	}
+	c.programMu.Unlock()
+	log.WithField("state", state).Info("SetConnState: written directly to model")
 }
 
 // SendToast shows a toast notification in the CLI (non-blocking).
@@ -994,6 +1027,27 @@ func (c *CLIChannel) handleAsyncDrain() {
 		case <-c.stopCh:
 			return
 		case msg := <-c.asyncCh:
+			c.programMu.Lock()
+			p := c.program
+			c.programMu.Unlock()
+			if p != nil {
+				p.Send(msg)
+			}
+		}
+	}
+}
+
+// handleTickDrain forwards tick messages from tickCh to BubbleTea independently
+// of asyncCh. This prevents tick starvation when asyncCh is congested (e.g.
+// during reconnect when RestoreSession/SetProcessing/outbound flood asyncCh).
+func (c *CLIChannel) handleTickDrain() {
+	defer c.wg.Done()
+
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case msg := <-c.tickCh:
 			c.programMu.Lock()
 			p := c.program
 			c.programMu.Unlock()
