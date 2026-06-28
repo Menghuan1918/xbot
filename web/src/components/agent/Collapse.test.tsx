@@ -45,29 +45,32 @@ function makeIteration(overrides: Partial<WebIteration> = {}): WebIteration {
 }
 
 describe('FoldedLine', () => {
-  it('renders the title with ▸ when collapsed and ▾ when open', () => {
-    renderWithProviders(
+  it('renders the title with ▸ and toggles open class on click', () => {
+    const { container } = renderWithProviders(
       <FoldedLine title="T1">
         <span>content</span>
       </FoldedLine>,
     )
-    // Collapsed by default: ▸ visible, content hidden
+    // Always renders ▸ (rotation handled by CSS class), content always in DOM
     expect(screen.getByText('▸')).toBeInTheDocument()
-    expect(screen.queryByText('content')).not.toBeInTheDocument()
+    // Content is always in the DOM (CSS grid controls visibility)
+    expect(screen.getByText('content')).toBeInTheDocument()
+    // Fold container does not have 'open' class when collapsed
+    expect(container.querySelector('.fold-container')).not.toHaveClass('open')
 
     // Click to expand
     fireEvent.click(screen.getByRole('button'))
-    expect(screen.getByText('▾')).toBeInTheDocument()
-    expect(screen.getByText('content')).toBeInTheDocument()
+    expect(container.querySelector('.fold-container')).toHaveClass('open')
+    expect(container.querySelector('.fold-arrow')).toHaveClass('open')
   })
 
   it('starts open when defaultOpen=true', () => {
-    renderWithProviders(
+    const { container } = renderWithProviders(
       <FoldedLine title="test" defaultOpen>
         <span>visible</span>
       </FoldedLine>,
     )
-    expect(screen.getByText('▾')).toBeInTheDocument()
+    expect(container.querySelector('.fold-container')).toHaveClass('open')
     expect(screen.getByText('visible')).toBeInTheDocument()
   })
 
@@ -180,8 +183,8 @@ describe('IterationGroup', () => {
       toolCount: 1,
     })
     renderWithProviders(<IterationGroup iteration={iter} level="minimal" />)
-    // T1 label from FoldedLine
-    expect(screen.getByText('T1')).toBeInTheDocument()
+    // Reasoning is a folded line with character count as title
+    expect(screen.getByText(/Thought.*characters/)).toBeInTheDocument()
     // Tool name from FoldedToolGroup
     expect(screen.getByText('Read')).toBeInTheDocument()
     // O text from MarkdownRenderer
@@ -189,15 +192,17 @@ describe('IterationGroup', () => {
   })
 
   it('renders reasoning (T) as a folded line (collapsed by default)', () => {
-    const iter = makeIteration({
-      iteration: 2,
-      reasoning: 'deep thinking',
-    })
-    renderWithProviders(<IterationGroup iteration={iter} level="none" />)
-    // T2 is folded by default
-    expect(screen.getByText('T2')).toBeInTheDocument()
-    // Reasoning content is not visible until expanded
-    expect(screen.queryByText('deep thinking')).not.toBeInTheDocument()
+    const { container } = renderWithProviders(
+      <IterationGroup
+        iteration={makeIteration({ iteration: 2, reasoning: 'deep thinking' })}
+        level="none"
+      />,
+    )
+    // Reasoning folded line shows character count as title
+    expect(screen.getByText(/Thought.*characters/)).toBeInTheDocument()
+    // Reasoning content is always in the DOM but hidden via CSS (grid 0fr).
+    // The fold-container should NOT have the 'open' class when collapsed.
+    expect(container.querySelector('.fold-container')).not.toHaveClass('open')
   })
 
   it('renders O (text output) always visible', () => {

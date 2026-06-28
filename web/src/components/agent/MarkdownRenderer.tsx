@@ -15,7 +15,7 @@
  * not set, but raw HTML nodes are not present from remark output), and we only
  * pass through highlight.js token spans we generated ourselves.
  */
-import { memo, useCallback, useState, type ComponentPropsWithoutRef } from 'react'
+import { memo, useCallback, useEffect, useState, type ComponentPropsWithoutRef } from 'react'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -29,6 +29,20 @@ import { cn } from '@/lib/utils'
 interface MarkdownRendererProps {
   content: string
   className?: string
+}
+
+/**
+ * Debounce a value by `delay` ms. During streaming, content arrives at ~60fps;
+ * debouncing to ~150ms reduces Markdown parse frequency from 60fps → ~6fps.
+ * The 150ms delay is imperceptible to users.
+ */
+function useDebouncedValue<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay)
+    return () => clearTimeout(timer)
+  }, [value, delay])
+  return debounced
 }
 
 /**
@@ -136,6 +150,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   content,
   className,
 }: MarkdownRendererProps) {
+  const debouncedContent = useDebouncedValue(content, 150)
   return (
     <div className={cn('markdown-body text-sm leading-relaxed', className)}>
       <Markdown
@@ -143,7 +158,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         rehypePlugins={REHYPE_PLUGINS}
         components={COMPONENTS}
       >
-        {content}
+        {debouncedContent}
       </Markdown>
     </div>
   )

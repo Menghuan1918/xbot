@@ -19,6 +19,8 @@
  */
 import {
   createElement,
+  lazy,
+  Suspense,
   useEffect,
   useMemo,
   useRef,
@@ -39,8 +41,8 @@ import {
 import { createRoot, type Root } from 'react-dom/client'
 
 import { AgentPanel } from '@/workspace/panels/AgentPanel'
-import { FilePanel } from '@/workspace/panels/FilePanel'
-import { TerminalPanel } from '@/workspace/panels/TerminalPanel'
+const FilePanel = lazy(() => import('@/workspace/panels/FilePanel').then(m => ({ default: m.FilePanel })))
+const TerminalPanel = lazy(() => import('@/workspace/panels/TerminalPanel').then(m => ({ default: m.TerminalPanel })))
 import { TabHeader } from '@/workspace/TabHeader'
 import {
   DockviewContext,
@@ -233,11 +235,13 @@ class ReactContentRenderer implements IContentRenderer {
     if (!Component) return
     this.root.render(
       withProviders(
-        <Component
-          params={this.params.params as PanelParams}
-          api={this.params.api}
-          containerApi={this.params.containerApi}
-        />,
+        <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-text-muted">Loading…</div>}>
+          <Component
+            params={this.params.params as PanelParams}
+            api={this.params.api}
+            containerApi={this.params.containerApi}
+          />
+        </Suspense>,
         this.ctxRef.current,
       ),
     )
