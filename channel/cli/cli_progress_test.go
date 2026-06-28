@@ -1208,3 +1208,387 @@ func TestAgentSession_MultipleSubAgents_DistinctToolEntries(t *testing.T) {
 		t.Errorf("expected 3 SubAgent tools in summary, got %d (dedup bug)", tools)
 	}
 }
+
+// =============================================================================
+// Performance regression tests: O(1) complexity guards
+// =============================================================================
+
+// TestUpdateStreamingOnly_IncrementalAppend verifies that updateStreamingOnly
+// uses the incremental path when iteration count increases but width is unchanged:
+// only NEW iterations are rendered (O(1) per new iteration), old completedLines
+// are preserved. Full rebuild only happens on width change or count reset.
+func TestUpdateStreamingOnly_IncrementalAppend(t *testing.T) {
+	setupModel := func() *cliModel {
+		model := initTestModel()
+		model.ticker.frame = 0
+		model.rc.valid = true
+		model.messages = append(model.messages, cliMessage{
+			role:      "assistant",
+			turnID:    1,
+			timestamp: time.Now(),
+			isPartial: true,
+		})
+		model.streamingMsgIdx = 0
+		model.typing = true
+		return model
+	}
+
+	t.Run("incremental-preserves-old-lines", func(t *testing.T) {
+		model := setupModel()
+
+		// Seed with 2 iterations, force full rebuild via width mismatch
+		model.progressState.iterations = []cliIterationSnapshot{
+			{Iteration: 1, Thinking: "first-iter-thinking"},
+			{Iteration: 2, Thinking: "second-iter-thinking"},
+		}
+		model.rc.streamCompletedWidth = -1
+		model.updateStreamingOnly()
+
+		if model.rc.streamCompletedCount != 2 {
+			t.Fatalf("expected count=2 after seed, got %d", model.rc.streamCompletedCount)
+		}
+		oldLines := make([]string, len(model.rc.streamCompletedLines))
+		copy(oldLines, model.rc.streamCompletedLines)
+		oldMaxW := model.rc.streamMaxW
+
+		// Add a 3rd iteration — should trigger INCREMENTAL path (same width)
+		model.progressState.iterations = append(model.progressState.iterations,
+			cliIterationSnapshot{Iteration: 3, Thinking: "third-iter-thinking"})
+
+		model.updateStreamingOnly()
+
+		// Assert count increased
+		if model.rc.streamCompletedCount != 3 {
+			t.Fatalf("expected count=3 after increment, got %d", model.rc.streamCompletedCount)
+		}
+
+		// Assert old lines are preserved verbatim (prefix of new lines)
+		newLines := model.rc.streamCompletedLines
+		if len(newLines) <= len(oldLines) {
+			t.Fatalf("newLines(%d) should be longer than oldLines(%d)", len(newLines), len(oldLines))
+		}
+		for i := range oldLines {
+			if newLines[i] != oldLines[i] {
+				t.Errorf("line %d changed: old=%q new=%q — old completedLines should be preserved", i, oldLines[i], newLines[i])
+			}
+		}
+
+		// Assert new iteration marker appears ONLY in appended portion
+		oldText := strings.Join(oldLines, "\n")
+		appendedText := strings.Join(newLines[len(oldLines):], "\n")
+
+		if !strings.Contains(appendedText, "third-iter-thinking") {
+			t.Error("third-iter-thinking not found in appended portion")
+		}
+		if strings.Contains(oldText, "third-iter-thinking") {
+			t.Error("third-iter-thinking leaked into old portion — should only be in appended area")
+		}
+
+		// Assert max width is maintained/updated correctly
+		if model.rc.streamMaxW < oldMaxW {
+			t.Errorf("maxW decreased from %d to %d", oldMaxW, model.rc.streamMaxW)
+		}
+
+		t.Logf("O(1) confirmed: %d lines preserved, %d new lines appended", len(oldLines), len(newLines)-len(oldLines))
+	})
+
+	t.Run("width-change-triggers-full-rebuild", func(t *testing.T) {
+		model := setupModel()
+
+		model.progressState.iterations = []cliIterationSnapshot{
+			{Iteration: 1, Thinking: "iter-one"},
+			{Iteration: 2, Thinking: "iter-two"},
+		}
+		// First call at width W1
+		model.rc.streamCompletedWidth = -1
+		model.updateStreamingOnly()
+		firstWidth := model.rc.streamCompletedWidth
+
+		// Add iteration + change cached width → should trigger full rebuild
+		model.progressState.iterations = append(model.progressState.iterations,
+			cliIterationSnapshot{Iteration: 3, Thinking: "iter-three"})
+		model.rc.streamCompletedWidth = 999 // mismatched → forces full rebuild
+
+		model.updateStreamingOnly()
+
+		if model.rc.streamCompletedCount != 3 {
+			t.Errorf("expected count=3 after width change rebuild, got %d", model.rc.streamCompletedCount)
+		}
+		// Full rebuild resets width to actual contentWidth, not the stale 999.
+		// Width 999 triggered the full rebuild branch; the result has real width.
+		if model.rc.streamCompletedWidth != firstWidth {
+			t.Errorf("streamCompletedWidth should be %d (contentWidth) after rebuild, got %d", firstWidth, model.rc.streamCompletedWidth)
+		}
+		t.Logf("Full rebuild confirmed: width reset from 999 → %d, all %d iterations re-rendered", model.rc.streamCompletedWidth, model.rc.streamCompletedCount)
+	})
+	t.Run("cross-kind-separator-single-blank-line", func(t *testing.T) {
+		model := setupModel()
+
+		// Seed: iteration 1 ends with tools, iteration 2 is reasoning only.
+		// Different block kinds (tools → reasoning) should produce exactly one
+		// blank guide line as separator between old and new iteration groups.
+		// PR #181: \n\n for different kinds → produces one blank guide line.
+		model.progressState.iterations = []cliIterationSnapshot{
+			{Iteration: 1, Tools: []protocol.ToolProgress{
+				{Name: "Read", Label: "read file", Status: "done", Elapsed: 100, Iteration: 1},
+			}},
+		}
+		model.rc.streamCompletedWidth = -1
+		model.updateStreamingOnly()
+
+		if model.rc.streamCompletedCount != 1 {
+			t.Fatalf("expected count=1 after seed, got %d", model.rc.streamCompletedCount)
+		}
+		oldLines := make([]string, len(model.rc.streamCompletedLines))
+		copy(oldLines, model.rc.streamCompletedLines)
+
+		// Add iteration 2: Reasoning block (different kind from tools).
+		model.progressState.iterations = append(model.progressState.iterations,
+			cliIterationSnapshot{Iteration: 2, Reasoning: "cross-kind reasoning text"})
+
+		model.updateStreamingOnly()
+
+		if model.rc.streamCompletedCount != 2 {
+			t.Fatalf("expected count=2 after increment, got %d", model.rc.streamCompletedCount)
+		}
+
+		// Old lines preserved
+		newLines := model.rc.streamCompletedLines
+		for i := range oldLines {
+			if newLines[i] != oldLines[i] {
+				t.Errorf("line %d changed: old=%q new=%q", i, oldLines[i], newLines[i])
+			}
+		}
+
+		// The appended portion should contain exactly one blank guide line
+		// (separator) before the reasoning content.
+		appended := newLines[len(oldLines):]
+		if len(appended) < 2 {
+			t.Fatalf("expected at least 2 appended lines (separator + content), got %d", len(appended))
+		}
+		// First appended line should be a blank guide line (just the guide symbol,
+		// no content). Strip ANSI then check that only "┊ " remains.
+		guideSym := "┊"
+		firstStripped := strings.TrimRight(stripAnsi(appended[0]), " ")
+		if firstStripped != guideSym {
+			t.Errorf("first appended line should be blank guide (just %q), got %q", guideSym, firstStripped)
+		}
+		// Reasoning marker should appear somewhere in appended content
+		appendedText := strings.Join(appended, "\n")
+		if !strings.Contains(stripAnsi(appendedText), "cross-kind reasoning text") {
+			t.Errorf("appended portion should contain reasoning marker, got:\n%s", stripAnsi(appendedText))
+		}
+		// Verify exactly one blank guide line (PR #181: \n\n for different kinds
+		// produces one blank line after splitting)
+		blankCount := 0
+		for _, l := range appended {
+			s := strings.TrimRight(stripAnsi(l), " ")
+			if s == guideSym {
+				blankCount++
+			}
+		}
+		if blankCount != 1 {
+			t.Errorf("expected exactly 1 blank guide line as separator (unified to 1 line), got %d", blankCount)
+		}
+
+		t.Logf("Cross-kind separator correct: 1 blank guide line between tools→reasoning")
+	})
+}
+func TestSyncProgressTodos_SameCountPreservesCache(t *testing.T) {
+	model := initTestModel()
+	model.rc.valid = true
+
+	// Initial todos: 3 items, none done
+	model.todos = []protocol.TodoItem{
+		{ID: 1, Text: "task-a", Done: false},
+		{ID: 2, Text: "task-b", Done: false},
+		{ID: 3, Text: "task-c", Done: false},
+	}
+
+	// Same count, different content: item 2 marked done
+	payload := &protocol.ProgressEvent{
+		Todos: []protocol.TodoItem{
+			{ID: 1, Text: "task-a", Done: false},
+			{ID: 2, Text: "task-b", Done: true}, // changed
+			{ID: 3, Text: "task-c", Done: false},
+		},
+	}
+
+	model.syncProgressTodos(payload)
+
+	// O(1) fix: rc.valid must remain true — no fullRebuild triggered
+	if !model.rc.valid {
+		t.Error("P3 regression: syncProgressTodos with same-count todos set rc.valid=false — fullRebuild would be triggered on next updateViewportContent")
+	} else {
+		t.Log("P3 fixed: rc.valid preserved (O(1)) after same-count todo change")
+	}
+
+	// Verify todos were still updated correctly
+	if len(model.todos) != 3 {
+		t.Errorf("expected 3 todos, got %d", len(model.todos))
+	}
+	if !model.todos[1].Done {
+		t.Error("todo item 2 should be marked done")
+	}
+	if model.todos[0].Done {
+		t.Error("todo item 1 should still be not done")
+	}
+}
+
+// TestUpdateStreamingOnly_LiveOnlyRendersCurrentIteration pins down the P1
+// behavior: the live (per-tick) rendering path only uses m.progressState.current
+// for the dynamic part. It does NOT iterate over m.progressState.iterations.
+// Completed iterations come from the streamCompletedLines cache.
+func TestUpdateStreamingOnly_LiveOnlyRendersCurrentIteration(t *testing.T) {
+	model := initTestModel()
+	model.ticker.frame = 0
+	model.rc.valid = true
+
+	// Set up a streaming message
+	model.messages = append(model.messages, cliMessage{
+		role:      "assistant",
+		turnID:    1,
+		timestamp: time.Now(),
+		isPartial: true,
+	})
+	model.streamingMsgIdx = 0
+	model.typing = true
+
+	// Completed iterations (should land in streamCompletedLines cache)
+	model.progressState.iterations = []cliIterationSnapshot{
+		{Iteration: 1, Thinking: "completed-thinking-iter1"},
+		{Iteration: 2, Thinking: "completed-thinking-iter2"},
+	}
+
+	// Live iteration (should be rendered fresh every tick, NOT from cache)
+	model.progressState.current = &protocol.ProgressEvent{
+		Iteration:              3,
+		StreamContent:          "live-stream-content",
+		ReasoningStreamContent: "live-reasoning-stream",
+		ActiveTools: []protocol.ToolProgress{
+			{Name: "Shell", Label: "live-running-tool", Status: "running", Elapsed: 500},
+		},
+	}
+
+	// First call: populate cache
+	model.rc.streamCompletedWidth = -1 // force cache miss
+	model.updateStreamingOnly()
+
+	// Verify completed cache is populated
+	if model.rc.streamCompletedCount != 2 {
+		t.Fatalf("expected streamCompletedCount=2, got %d", model.rc.streamCompletedCount)
+	}
+
+	// Verify streamCompletedLines contain ONLY completed iteration content
+	completedText := strings.Join(model.rc.streamCompletedLines, "\n")
+	if !strings.Contains(completedText, "completed-thinking-iter1") {
+		t.Error("streamCompletedLines missing iter1 content")
+	}
+	if !strings.Contains(completedText, "completed-thinking-iter2") {
+		t.Error("streamCompletedLines missing iter2 content")
+	}
+	// Live content must NOT leak into completed cache
+	if strings.Contains(completedText, "live-stream-content") {
+		t.Error("P1 violation: live-stream-content leaked into streamCompletedLines cache")
+	}
+	if strings.Contains(completedText, "live-running-tool") {
+		t.Error("P1 violation: live tool leaked into streamCompletedLines cache")
+	}
+
+	// Second call with cache hit: verify completed cache is reused, not re-rendered
+	beforeLen := len(model.rc.streamCompletedLines)
+	model.updateStreamingOnly()
+	if model.rc.streamCompletedCount != 2 {
+		t.Error("completed count changed unexpectedly on cache hit")
+	}
+	if len(model.rc.streamCompletedLines) != beforeLen {
+		t.Error("streamCompletedLines were re-rendered on cache hit — should have been reused")
+	}
+}
+
+// TestIncrementalPathSeparatorMatchesFullRebuild verifies that the
+// incremental rendering path in updateStreamingOnly produces the SAME
+// number of blank guide lines between iteration groups as the full
+// rebuild path. Regression: the incremental path prepended \n\n to
+// bodyContent before Split, producing 2 blank guide lines, while
+// appendTurnBlock's \n\n between blocks produces just 1.
+func TestIncrementalPathSeparatorMatchesFullRebuild(t *testing.T) {
+	model := initTestModel()
+	model.ticker.frame = 0
+	model.typing = true
+	model.streamingMsgIdx = 0
+	// Set up a streaming message so updateStreamingOnly works
+	model.messages = append(model.messages, cliMessage{
+		role:      "assistant",
+		turnID:    1,
+		timestamp: time.Now(),
+		isPartial: true,
+	})
+	model.progressState.current = &protocol.ProgressEvent{
+		Iteration:              3,
+		ReasoningStreamContent: "live reasoning",
+	}
+
+	// Test for each block kind transition
+	tests := []struct {
+		name    string
+		iter1   cliIterationSnapshot
+		iter2   cliIterationSnapshot
+		wantSep int // expected blank guide lines between iter1 and iter2
+	}{
+		{
+			name: "tools→reasoning",
+			iter1: cliIterationSnapshot{Iteration: 1, Tools: []protocol.ToolProgress{
+				{Name: "Read", Label: "done tool", Status: "done", Elapsed: 100, Iteration: 1},
+			}},
+			iter2:   cliIterationSnapshot{Iteration: 2, Reasoning: "next reasoning"},
+			wantSep: 1,
+		},
+		{
+			name:    "reasoning→reasoning",
+			iter1:   cliIterationSnapshot{Iteration: 1, Reasoning: "first reasoning"},
+			iter2:   cliIterationSnapshot{Iteration: 2, Reasoning: "second reasoning"},
+			wantSep: 0,
+		},
+		{
+			name:    "content→reasoning",
+			iter1:   cliIterationSnapshot{Iteration: 1, Thinking: "thinking text"},
+			iter2:   cliIterationSnapshot{Iteration: 2, Reasoning: "next reasoning"},
+			wantSep: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// --- Full rebuild path ---
+			model.progressState.iterations = []cliIterationSnapshot{tt.iter1, tt.iter2}
+			model.rc.streamCompletedWidth = -1 // force full rebuild
+			model.rc.streamCompletedCount = 0
+			model.updateStreamingOnly()
+			fullLines := make([]string, len(model.rc.streamCompletedLines))
+			copy(fullLines, model.rc.streamCompletedLines)
+
+			// --- Incremental path ---
+			model.progressState.iterations = []cliIterationSnapshot{tt.iter1}
+			model.rc.streamCompletedWidth = -1
+			model.rc.streamCompletedCount = 0
+			model.updateStreamingOnly() // first render
+			// Now add second iteration → incremental
+			model.progressState.iterations = []cliIterationSnapshot{tt.iter1, tt.iter2}
+			model.updateStreamingOnly() // incremental render
+
+			incrLines := model.rc.streamCompletedLines
+
+			// Compare: both paths should produce identical line sets
+			if len(fullLines) != len(incrLines) {
+				t.Errorf("line count mismatch: full=%d incremental=%d", len(fullLines), len(incrLines))
+				return
+			}
+			for i := range fullLines {
+				if fullLines[i] != incrLines[i] {
+					t.Errorf("line %d mismatch:\n  full: %q\n  incr: %q", i, fullLines[i], incrLines[i])
+				}
+			}
+		})
+	}
+}
