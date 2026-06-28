@@ -159,20 +159,20 @@ export class ProgressStore {
     })
   }
 
-  /** Append streamed assistant text delta (stream_content events). */
+  /** Set streamed assistant text (cumulative value from stream_content events). */
   appendStreamContent(delta: string): void {
     if (!delta) return
     this.mutate((draft) => {
-      draft.streamContent += delta
+      draft.streamContent = delta  // cumulative value, use assignment not append
       draft.streaming = true
     })
   }
 
-  /** Append streamed reasoning text delta (reasoning_stream_content events). */
+  /** Set streamed reasoning text (cumulative value from reasoning_stream_content events). */
   appendReasoningContent(delta: string): void {
     if (!delta) return
     this.mutate((draft) => {
-      draft.reasoningStreamContent += delta
+      draft.reasoningStreamContent = delta  // cumulative value, use assignment not append
       draft.streaming = true
     })
   }
