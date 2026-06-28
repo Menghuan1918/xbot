@@ -377,6 +377,7 @@ func (wc *WebChannel) Start() error {
 
 	// Terminal PTY API
 	mux.HandleFunc("/api/terminal/create", limitBodySize(wc.authMiddleware(wc.handleTerminalCreate)))
+	mux.HandleFunc("/api/terminal/list", wc.authMiddleware(wc.handleTerminalList))
 	mux.HandleFunc("/api/terminal/", wc.authMiddleware(wc.handleTerminalRoute))
 	mux.HandleFunc("/ws/terminal", wc.handleTerminalWS)
 

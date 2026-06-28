@@ -96,13 +96,22 @@ export function TerminalPanel({ params }: PanelProps) {
       inputData.dispose()
       inputResize.dispose()
       resizeObserver.disconnect()
-      ws.close()
+
+      // If the user explicitly closed this terminal (closing flag set by
+      // closeTerminal), send a WS close frame so the backend destroys the PTY
+      // and remove the session from the store. Otherwise just disconnect the
+      // WS — the terminal persists so a later panel remount can reconnect.
+      const sess = terminalStore.getSession(terminalId)
+      if (sess?.closing) {
+        ws.close()
+        terminalStore.remove(terminalId)
+      } else {
+        ws.disconnect()
+      }
+
       wsRef.current = null
       term.dispose()
       termRef.current = null
-      // Remove from store and delete backend PTY
-      terminalStore.remove(terminalId)
-      void terminalStore.deleteBackend(tid)
     }
   }, [tid, terminalId, theme])
 

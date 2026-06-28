@@ -34,9 +34,9 @@ import (
 
 const (
 	terminalReadBufSize = 4096
-	// idleDisconnectTimeout is how long a terminal stays alive after the last
-	// WS client disconnects, allowing transient reconnects.
-	terminalIdleTimeout = 30 * time.Second
+	// terminalIdleTimeout is how long a terminal stays alive after creation if
+	// no WS client ever connects (leak protection for abandoned creates).
+	terminalIdleTimeout = 30 * time.Minute
 	// wsWriteTimeout bounds how long a server→client WS frame may block.
 	terminalWSWriteTimeout = 10 * time.Second
 )
@@ -49,11 +49,14 @@ const (
 type TerminalSession struct {
 	tid    string
 	chatID string
+	cwd    string    // working directory the PTY started in
+	createdAt time.Time // when the terminal was created
 	ptmx   *os.File  // PTY master
 	cmd    *exec.Cmd // underlying shell process
 
-	// idleTimer arms a grace window: the terminal is reaped if no WS client is
-	// (re)connected before the timer fires. Guarded by mu alongside ptmx writes.
+	// idleTimer arms a leak-protection window: if no WS client ever connects
+	// to a freshly-created terminal, it is reaped after terminalIdleTimeout.
+	// Guarded by mu alongside ptmx writes.
 	idleTimer *time.Timer
 	// done is closed exactly once when the terminal is closed, allowing idle
 	// watchers and read goroutines to exit promptly.
@@ -209,6 +212,38 @@ func (tm *TerminalManager) CleanupAll() {
 	tm.byChat = sync.Map{}
 }
 
+// TerminalInfo is the public metadata for a terminal, returned by ListByChat.
+type TerminalInfo struct {
+	TID       string    `json:"tid"`
+	CWD       string    `json:"cwd"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// ListByChat returns metadata for every active terminal owned by chatID.
+func (tm *TerminalManager) ListByChat(chatID string) []TerminalInfo {
+	var result []TerminalInfo
+	if setRaw, ok := tm.byChat.Load(chatID); ok {
+		set := setRaw.(*mapTIDs)
+		set.mu.Lock()
+		tids := make([]string, 0, len(set.m))
+		for tid := range set.m {
+			tids = append(tids, tid)
+		}
+		set.mu.Unlock()
+		for _, tid := range tids {
+			if ts, ok := tm.terminals.Load(tid); ok {
+				sess := ts.(*TerminalSession)
+				result = append(result, TerminalInfo{
+					TID:       tid,
+					CWD:       sess.cwd,
+					CreatedAt: sess.createdAt,
+				})
+			}
+		}
+	}
+	return result
+}
+
 // mapTIDs is a guarded set of tids, stored inside TerminalManager.byChat.
 type mapTIDs struct {
 	mu sync.Mutex
@@ -265,11 +300,13 @@ func (wc *WebChannel) handleTerminalCreate(w http.ResponseWriter, r *http.Reques
 
 	tid := uuid.NewString()
 	ts := &TerminalSession{
-		tid:    tid,
-		chatID: req.ChatID,
-		ptmx:   ptmx,
-		cmd:    c,
-		done:   make(chan struct{}),
+		tid:       tid,
+		chatID:    req.ChatID,
+		cwd:       cwd,
+		createdAt: time.Now(),
+		ptmx:      ptmx,
+		cmd:       c,
+		done:      make(chan struct{}),
 	}
 	ts.idleTimer = time.NewTimer(terminalIdleTimeout)
 	wc.terminals().register(ts)
@@ -281,8 +318,9 @@ func (wc *WebChannel) handleTerminalCreate(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{"tid": tid})
 }
 
-// terminalIdleWatch reaps the terminal if no client (re)connects before the
-// idle timer fires. Exits early when the terminal is closed by other means.
+// terminalIdleWatch reaps the terminal if no WS client ever connects before
+// the idle timer fires (leak protection for abandoned creates). Exits early
+// when the terminal is closed by other means.
 func (wc *WebChannel) terminalIdleWatch(ts *TerminalSession) {
 	timer := ts.idleTimer
 	if timer == nil {
@@ -325,6 +363,25 @@ func (wc *WebChannel) handleTerminalDelete(w http.ResponseWriter, r *http.Reques
 	}
 	ts.close()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleTerminalList handles GET /api/terminal/list?chatID=<chatID>.
+// Returns metadata for every active terminal owned by the chat session.
+func (wc *WebChannel) handleTerminalList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		jsonErrorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	chatID := r.URL.Query().Get("chatID")
+	if chatID == "" {
+		jsonErrorResponse(w, http.StatusBadRequest, "chatID is required")
+		return
+	}
+	terminals := wc.terminals().ListByChat(chatID)
+	if terminals == nil {
+		terminals = []TerminalInfo{} // ensure JSON array, not null
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"terminals": terminals})
 }
 
 // terminalWSUpgrader is a permissive upgrader for terminal data channels — the
@@ -376,10 +433,10 @@ func (wc *WebChannel) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveTerminalWS runs the bidirectional pump between the PTY and the WS conn.
-// Returns when the PTY process exits or the WS client disconnects. On a
-// transient disconnect (not an explicit "close") the terminal stays alive for
-// terminalIdleTimeout to allow reconnect; on explicit "close" or PTY exit the
-// terminal is destroyed immediately.
+// Returns when the PTY process exits or the WS client disconnects. On an
+// explicit "close" or PTY exit the terminal is destroyed immediately; on a
+// transient disconnect the terminal persists (session binding) so a later WS
+// reconnect resumes the same terminal.
 func (wc *WebChannel) serveTerminalWS(ts *TerminalSession, conn *websocket.Conn) {
 	pumpDone := make(chan struct{})
 	ptyExited := make(chan struct{})
@@ -463,10 +520,10 @@ drain:
 	}
 	if explicitClose {
 		wc.destroyTerminal(ts.tid)
-	} else {
-		// Transient disconnect — arm idle timer for reconnect grace window.
-		wc.armIdleTimer(ts)
 	}
+	// Transient disconnect — terminal persists (session binding).
+	// No idle timer; the terminal is only destroyed by explicit close,
+	// PTY exit, or CleanupChat.
 }
 
 // destroyTerminal removes and closes a terminal by tid (no-op if missing).
@@ -474,31 +531,6 @@ func (wc *WebChannel) destroyTerminal(tid string) {
 	if removed, ok := wc.terminals().unregister(tid); ok {
 		removed.close()
 	}
-}
-
-// armIdleTimer (re)arms the idle grace timer on the terminal so a transient WS
-// disconnect can reconnect before the terminal is reaped.
-func (wc *WebChannel) armIdleTimer(ts *TerminalSession) {
-	ts.mu.Lock()
-	if ts.idleTimer == nil {
-		ts.idleTimer = time.NewTimer(terminalIdleTimeout)
-	} else {
-		ts.idleTimer.Reset(terminalIdleTimeout)
-	}
-	ts.mu.Unlock()
-	go func(s *TerminalSession) {
-		s.mu.Lock()
-		timer := s.idleTimer
-		s.mu.Unlock()
-		if timer == nil {
-			return
-		}
-		select {
-		case <-timer.C:
-			wc.destroyTerminal(s.tid)
-		case <-s.done:
-		}
-	}(ts)
 }
 
 // isEOF reports whether err represents an EOF read on the PTY.

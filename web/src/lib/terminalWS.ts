@@ -129,6 +129,13 @@ export class TerminalWS {
     this.teardownSocket()
   }
 
+  /** Disconnect WS without sending close to backend (terminal persists). */
+  disconnect(): void {
+    this.explicitClose = true // suppress reconnect
+    this.cancelReconnect()
+    this.teardownSocket()
+  }
+
   /** Tear everything down without sending a close frame (e.g. parent unmount). */
   dispose(): void {
     this.disposed = true

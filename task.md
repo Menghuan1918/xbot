@@ -1,139 +1,138 @@
-# 性能优化 + 折叠逻辑 + 动效
+# 终端会话绑定 + 进程内持久化
 
 ## 背景
 
-xbot web 前端需要深度优化性能和渲染体验。当前存在以下问题：
-1. Markdown 每帧全量重解析（O(L²)），流式期间严重卡顿
-2. SessionStore 返回对象未 memo，导致 Dockview 所有面板频繁重渲染
-3. Monaco Editor ~3MB 静态导入，未懒加载
-4. 全部折叠时未折叠中间的 TEXT 输出（O），只折叠了 T 和 C
-5. 折叠/展开无平滑动画过渡
-6. highlight.js 无缓存
+当前 Web 终端在面板卸载时发送 WS close + DELETE 请求"双击杀"后端 PTY，导致切换会话后终端丢失。需要改为"会话绑定+进程内持久化"：切换会话时断开 WS 但不杀 PTY，切回来时重连恢复。
 
-## 任务 1: MarkdownRenderer 防抖
+## 后端改动
 
-文件: `web/src/components/agent/MarkdownRenderer.tsx`
+### 1. 取消面板卸载时的自动销毁
 
-在组件内部对 `content` 做 ~150ms 防抖，流式期间减少解析频率从 60fps → ~6fps。用户对 Markdown 渲染的 200ms 延迟几乎无感知。
+文件: `channel/web/web_pty.go`
 
-实现方式：
-```tsx
-function useDebouncedValue<T>(value: T, delay: number): T {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const timer = setTimeout(() => setDebounced(value), delay)
-    return () => clearTimeout(timer)
-  }, [value, delay])
-  return debounced
+当前 `TerminalSession` 有 30s idle timer（WS 断开后宽限期）。改为：
+- 移除 idle timer 的自动回收（或改为超长时限如 30 分钟）
+- 终端只在以下情况销毁：1) 用户显式关闭（WS 收到 `{type:"close"}`）2) PTY 进程退出 3) 会话被删除（CleanupChat）
+- WS 断开不再自动启动 idle timer
+
+### 2. 新增 ListByChat API
+
+文件: `channel/web/web_pty.go` + `channel/web/web.go`
+
+新增 `GET /api/terminal/list?chatID={chatID}` 端点：
+- 返回该会话所有活跃终端的 `{tid, cwd, createdAt}`
+- 前端用此 API 在会话切换/页面刷新后恢复终端列表
+
+```go
+// web_pty.go
+func (tm *TerminalManager) ListByChat(chatID string) []TerminalInfo {
+    tm.terminalsMu.RLock()
+    defer tm.terminalsMu.RUnlock()
+    var result []TerminalInfo
+    if tids, ok := tm.byChat.Load(chatID); ok {
+        for _, tid := range tids.([]string) {
+            if ts, ok := tm.terminals.Load(tid); ok {
+                sess := ts.(*TerminalSession)
+                result = append(result, TerminalInfo{
+                    TID: tid, CWD: sess.cwd, CreatedAt: sess.createdAt,
+                })
+            }
+        }
+    }
+    return result
 }
-
-// 在 MarkdownRenderer 中
-const debouncedContent = useDebouncedValue(content, 150)
-// 用 debouncedContent 代替 content 传给 <Markdown>
 ```
 
-## 任务 2: SessionStore memo
+注册路由：
+```go
+mux.HandleFunc("/api/terminal/list", wc.authMiddleware(wc.handleTerminalList))
+```
 
-文件: `web/src/hooks/useSessionStore.ts`
+### 3. TerminalSession 增加元数据
 
-用 useMemo 包裹 `useSessionStoreImpl()` 的返回对象，避免每次渲染返回新引用导致所有面板重渲染。同时 memoize `sortedSessions` 和 `groups`。
+确保 `TerminalSession` 有 `cwd` 和 `createdAt` 字段，供 ListByChat 返回。
 
+## 前端改动
+
+### 4. TerminalPanel 卸载时不断开终端
+
+文件: `web/src/workspace/panels/TerminalPanel.tsx`
+
+当前 cleanup:
 ```tsx
-const sortedSessions = useMemo(() => sortSessions(sessions, starredIds), [sessions, starredIds])
-const groups = useMemo(() => groupSessions(sessions, category, starredIds), [sessions, category, starredIds])
-const value = useMemo(() => ({
-  sessions, groups, sortedSessions, activeSessionId, ...
-  // 函数们已 useCallback，无需加入依赖
-}), [sessions, groups, sortedSessions, activeSessionId, starredIds, category, channel, loading, error])
-return value
+ws.close()                        // 发 {type:"close"} → 后端销毁 PTY
+terminalStore.remove(terminalId)  // 删除前端记录
+terminalStore.deleteBackend(tid)  // DELETE → 后端再次销毁
 ```
 
-## 任务 3: Monaco 懒加载
-
-文件: `web/src/workspace/DockviewContainer.tsx`
-
-把 `FilePanel` 和 `TerminalPanel` 改为 `React.lazy` + `Suspense`，首次打开对应标签页时才加载。AgentPanel 保持静态导入。
-
+改为：
 ```tsx
-import { lazy, Suspense } from 'react'
-const FilePanel = lazy(() => import('@/workspace/panels/FilePanel').then(m => ({ default: m.FilePanel })))
-const TerminalPanel = lazy(() => import('@/workspace/panels/TerminalPanel').then(m => ({ default: m.TerminalPanel })))
+ws.disconnect()                    // 断开 WS，不发 close，不销毁后端 PTY
+// 不调 deleteBackend
+// 不调 store.remove（保留记录，以便恢复）
+terminal.dispose()                 // 只清理 xterm 实例
 ```
 
-在 `ReactContentRenderer.render()` 中包裹 Suspense（fallback 用简单的 loading spinner）。
+新增 `TerminalWS.disconnect()` 方法：只断开 socket 不发 `{type:"close"}`。
 
-## 任务 4: highlight.js 缓存
+### 5. 会话切换时恢复终端
 
-文件: `web/src/components/agent/highlight.ts`
+文件: `web/src/hooks/useTerminal.ts`
 
-添加 LRU 缓存（limit 200），对已提交消息的代码块缓存命中率接近 100%。
+新增 `restoreFromBackend(chatID)` 方法：
+- 调 `GET /api/terminal/list?chatID=xxx` 获取后端活跃终端
+- 同步到 `terminalStore`（与本地记录合并，去重）
+- 对已有终端的 tab 重新挂载 panel 时 reconnect WS
+
+在会话切换时（`AgentPanel` 或 `useSessionStore` 的 `switchSession`）调用 `restoreFromBackend`。
+
+### 6. 终端列表按会话过滤
+
+文件: `web/src/hooks/useTerminal.ts` + `web/src/components/sidebar/TerminalList.tsx`
+
+`terminalStore.snapshot()` 增加按 `chatID` 过滤的重载。侧边栏只显示当前会话的终端。
+
+### 7. TerminalWS 增加 disconnect 方法
+
+文件: `web/src/lib/terminalWS.ts`
 
 ```typescript
-const cache = new Map<string, string | null>()
-const CACHE_LIMIT = 200
-```
+/** Disconnect WS without sending close to backend (terminal persists). */
+disconnect(): void {
+  this.shouldReconnect = false  // 阻止自动重连
+  if (this.ws) {
+    this.ws.close()  // 关闭 WS 连接（不发 close 帧）
+    this.ws = null
+  }
+}
 
-## 任务 5: 全部折叠逻辑修复
-
-文件: `web/src/components/agent/AssistantMessage.tsx`
-
-当前 `all` 级别只显示摘要 + `message.content`。但 `message.content` 可能是空的，实际的 TEXT 输出分散在 `iterations` 的 `thinking` 字段中。
-
-修复：
-- `all` 级别（已完成态）：折叠所有中间内容（包括所有迭代的 O/thinking），只显示最后一个 TEXT 输出
-- 最后一个 TEXT = `message.content`，如果为空则取最后一个迭代的 `thinking`
-- 中间内容通过点击摘要行展开，展开后用 `minimal` 级别渲染
-
-```tsx
-if (effectiveLevel === 'all' && !isStreaming) {
-  // 获取最后一个 TEXT 输出
-  const lastText = message.content || iterations[iterations.length - 1]?.thinking || ''
-  return (
-    <div className="agent-msg-card px-1">
-      {showSummary && (
-        <FoldedLine title={摘要} defaultOpen={false} onToggle={setSummaryExpanded}>
-          {summaryExpanded && <TurnBody iterations={iterations} level="minimal" />}
-        </FoldedLine>
-      )}
-      {lastText && <MarkdownRenderer content={lastText} />}
-    </div>
-  )
+/** Close terminal permanently (sends close to backend, PTY destroyed). */
+close(): void {
+  this.shouldReconnect = false
+  if (this.ws?.readyState === WebSocket.OPEN) {
+    this.ws.send(JSON.stringify({ type: 'close' }))
+  }
+  this.ws?.close()
+  this.ws = null
 }
 ```
 
-## 任务 6: 全局动效优化
+### 8. 用户显式关闭才销毁
 
-文件: `web/src/index.css` + `web/src/components/agent/FoldedLine.tsx`
+文件: `web/src/hooks/useTerminal.ts`
 
-改进折叠/展开动画：
-- 使用 CSS `grid-template-rows: 0fr → 1fr` 实现平滑高度过渡（比 max-height 更自然）
-- 添加 opacity 过渡
-- 折叠箭头旋转动画
-
-```css
-.fold-container {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 0.2s ease-out, opacity 0.2s ease-out;
-  opacity: 0;
-}
-.fold-container.open {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-.fold-content {
-  overflow: hidden;
-}
-```
-
-更新 FoldedLine 组件使用新的动画方式（始终渲染 children 但用 CSS 控制可见性，而非条件渲染）。
+`closeTerminal(id)` 方法（用户点击终端的 X 按钮时调用）：
+- 调 `ws.close()`（发 close → 后端销毁 PTY）
+- 调 `terminalStore.remove(id)`（删除前端记录）
+- 不需要 `deleteBackend`（WS close 已通知后端）
 
 ## 验证
 
-- `npm run build` 无错误
-- `npx tsc --noEmit` 无错误
-- 折叠/展开有平滑过渡效果
-- 全部折叠只显示最后一个 TEXT
-- Markdown 渲染不卡顿
+- 切换会话后切回，终端仍在运行（PTY 未被杀死）
+- 页面刷新后，终端列表从后端恢复
+- 用户显式关闭终端（点击 X）才真正销毁
+- 会话删除时终端批量清理（已有逻辑）
+- `go test ./channel/web/...` 通过
+- `npm run build` 通过
 
 保持KISS原则，最后一步不需要合入主分支，保留在worktree中。
