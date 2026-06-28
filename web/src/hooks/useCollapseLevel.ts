@@ -42,21 +42,20 @@ export interface UseCollapseLevelResult {
  * Resolve the default-open state for a collapsible group under a collapse level.
  * Pure helper, exported for components that manage their own open state.
  *
- *   none     → everything open
- *   all      → everything closed (final output only)
- *   minimal  → iteration history closed; reasoning closed (summary shown in
- *              header); tools closed (name+summary shown in header)
+ *   all     → everything closed (final output + total-elapsed summary only)
+ *   minimal → iteration closed, tool closed, reasoning closed — groups are
+ *             visible as cards with summaries but bodies stay collapsed.
+ *   none    → iteration open, tool open, reasoning always closed (T is
+ *             permanently collapsed, matching opencode's rule).
  */
 export function defaultOpenForLevel(level: CollapseLevel, kind: 'tool' | 'reasoning' | 'iteration'): boolean {
-  if (level === 'none') return true
-  if (level === 'all') return false
-  // 'minimal': every group shows a header summary and keeps its body closed.
-  // `kind` is intentionally part of the signature so Spec 7 can diverge groups
-  // without touching call sites; today all minimal groups behave the same.
-  switch (kind) {
-    case 'tool':
-    case 'reasoning':
-    case 'iteration':
+  switch (level) {
+    case 'none':
+      // Everything expands except reasoning (T blocks are always collapsed).
+      return kind !== 'reasoning'
+    case 'all':
+      return false
+    case 'minimal':
       return false
   }
 }

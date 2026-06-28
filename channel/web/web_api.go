@@ -38,21 +38,24 @@ type histProgress struct {
 	ActiveTools      []histTool         `json:"active_tools,omitempty"`
 	CompletedTools   []histTool         `json:"completed_tools,omitempty"`
 	StreamContent    string             `json:"stream_content,omitempty"`
-	IterationHistory []histIterSnapshot `json:"iteration_history,omitempty"` // completed iterations 1..N-1
+	ElapsedWall      int64              `json:"elapsed_wall,omitempty"` // total wall-clock of the active turn (ms)
+	IterationHistory []histIterSnapshot `json:"iteration_history,omitempty"`
 }
 
 type histIterSnapshot struct {
 	Iteration      int        `json:"iteration"`
 	Thinking       string     `json:"thinking,omitempty"`
 	Reasoning      string     `json:"reasoning,omitempty"`
+	ElapsedWall    int64      `json:"elapsed_wall,omitempty"` // wall-clock of this iteration (ms)
 	CompletedTools []histTool `json:"completed_tools,omitempty"`
 }
 
 type histTool struct {
-	Name    string `json:"name,omitempty"`
-	Label   string `json:"label,omitempty"`
-	Status  string `json:"status,omitempty"`
-	Summary string `json:"summary,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Label     string `json:"label,omitempty"`
+	Status    string `json:"status,omitempty"`
+	ElapsedMs int64  `json:"elapsed_ms,omitempty"`
+	Summary   string `json:"summary,omitempty"`
 }
 
 type histMsg struct {
@@ -186,27 +189,29 @@ func (wc *WebChannel) handleHistoryGet(w http.ResponseWriter, r *http.Request, s
 				Iteration:     p.Iteration,
 				Thinking:      p.Thinking,
 				StreamContent: p.StreamContent,
+				ElapsedWall:   p.ElapsedWall,
 			}
 			for _, t := range p.ActiveTools {
 				hp.ActiveTools = append(hp.ActiveTools, histTool{
-					Name: t.Name, Label: t.Label, Status: t.Status, Summary: t.Summary,
+					Name: t.Name, Label: t.Label, Status: t.Status, ElapsedMs: t.Elapsed, Summary: t.Summary,
 				})
 			}
 			for _, t := range p.CompletedTools {
 				hp.CompletedTools = append(hp.CompletedTools, histTool{
-					Name: t.Name, Label: t.Label, Status: t.Status, Summary: t.Summary,
+					Name: t.Name, Label: t.Label, Status: t.Status, ElapsedMs: t.Elapsed, Summary: t.Summary,
 				})
 			}
 			// Attach iteration history (completed iterations 1..N-1)
 			for _, iter := range p.IterationHistory {
 				snap := histIterSnapshot{
-					Iteration: iter.Iteration,
-					Thinking:  iter.Thinking,
-					Reasoning: iter.Reasoning,
+					Iteration:   iter.Iteration,
+					Thinking:    iter.Thinking,
+					Reasoning:   iter.Reasoning,
+					ElapsedWall: iter.ElapsedWall,
 				}
 				for _, t := range iter.CompletedTools {
 					snap.CompletedTools = append(snap.CompletedTools, histTool{
-						Name: t.Name, Label: t.Label, Status: t.Status, Summary: t.Summary,
+						Name: t.Name, Label: t.Label, Status: t.Status, ElapsedMs: t.Elapsed, Summary: t.Summary,
 					})
 				}
 				hp.IterationHistory = append(hp.IterationHistory, snap)

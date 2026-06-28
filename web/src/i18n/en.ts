@@ -153,6 +153,8 @@ const en: Translations = {
     statusError: 'error',
     statusPending: 'pending',
     none: '—',
+    toolGroup: '{{count}} tools',
+    processed: 'Processed {{iterations}} iterations · {{elapsed}}',
   },
   settings: {
     title: 'Settings',

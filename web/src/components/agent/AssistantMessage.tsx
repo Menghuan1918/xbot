@@ -7,6 +7,11 @@
  *   - optional IterationHistory (committed runs, folded by default),
  *   - a small [display-only] tag for messages excluded from the LLM context.
  *
+ * Collapse levels (opencode three-level model):
+ *   'all'     — only final output + a summary line ("已处理 N 次迭代 · elapsed")
+ *   'minimal' — iteration cards collapsed; tool groups collapsed; reasoning collapsed
+ *   'none'    — iteration cards expanded; tools expanded; reasoning always collapsed
+ *
  * The component is `React.memo`'d with a custom comparator so toggling collapse
  * elsewhere never re-parses a sibling message's markdown. The streamed body
  * uses the throttled snapshot from useProgressStream, so it updates at frame
@@ -18,6 +23,7 @@ import { Bot } from 'lucide-react'
 import { IterationHistory } from './IterationHistory'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ProgressPanel } from './ProgressPanel'
+import { formatDuration } from './ToolGroupCard'
 import { useI18n } from '@/providers/i18n'
 import { defaultOpenForLevel } from '@/hooks/useCollapseLevel'
 import type { ChatMessage, LiveProgress } from '@/types/agent'
@@ -38,31 +44,59 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
   const reasoningDefaultOpen = defaultOpenForLevel(collapseLevel, 'reasoning')
   const toolDefaultOpen = defaultOpenForLevel(collapseLevel, 'tool')
 
+  // 'all' level: hide intermediate process, show only summary line + final output.
+  const isAllLevel = collapseLevel === 'all'
+  const totalElapsed = iterations.reduce((sum, it) => sum + (it.elapsedMs ?? 0), 0)
+
   return (
     <div className="agent-msg-card flex gap-2.5 px-1">
       <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-accent/15">
         <Bot className="size-4 text-accent" />
       </div>
       <div className="min-w-0 flex-1">
-        {showProgress && progress && (
-          <ProgressPanel
-            progress={progress}
-            defaultOpenTool={toolDefaultOpen}
-            defaultOpenReasoning={reasoningDefaultOpen}
-          />
-        )}
-        {message.content ? (
-          <MarkdownRenderer content={message.content} />
+        {/* 'all' level: only summary line + final output */}
+        {isAllLevel ? (
+          <>
+            {iterations.length > 0 && (
+              <div className="mb-1 text-[11px] text-text-muted">
+                {t('agent.processed', {
+                  iterations: iterations.length,
+                  elapsed: formatDuration(totalElapsed),
+                })}
+              </div>
+            )}
+            {message.content ? (
+              <MarkdownRenderer content={message.content} />
+            ) : (
+              !showProgress && (
+                <span className="text-sm text-text-muted">{t('agent.emptyAssistant')}</span>
+              )
+            )}
+          </>
         ) : (
-          // Pure tool-only turn with no final text: show a subtle hint.
-          !showProgress && (
-            <span className="text-sm text-text-muted">{t('agent.emptyAssistant')}</span>
-          )
-        )}
-        {!showProgress && iterations.length > 0 && (
-          <div className="mt-2">
-            <IterationHistory iterations={iterations} defaultOpen={iterationDefaultOpen} />
-          </div>
+          <>
+            {showProgress && progress && (
+              <ProgressPanel
+                progress={progress}
+                defaultOpenTool={toolDefaultOpen}
+                defaultOpenReasoning={reasoningDefaultOpen}
+                defaultOpenIteration={iterationDefaultOpen}
+              />
+            )}
+            {message.content ? (
+              <MarkdownRenderer content={message.content} />
+            ) : (
+              // Pure tool-only turn with no final text: show a subtle hint.
+              !showProgress && (
+                <span className="text-sm text-text-muted">{t('agent.emptyAssistant')}</span>
+              )
+            )}
+            {!showProgress && iterations.length > 0 && (
+              <div className="mt-2">
+                <IterationHistory iterations={iterations} defaultOpen={iterationDefaultOpen} iterationDefaultOpen={iterationDefaultOpen} />
+              </div>
+            )}
+          </>
         )}
         {message.displayOnly && (
           <span className="mt-1 inline-block rounded bg-bg-tertiary px-1.5 py-0.5 text-[11px] text-text-muted">

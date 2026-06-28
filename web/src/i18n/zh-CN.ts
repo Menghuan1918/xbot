@@ -150,6 +150,8 @@ const zhCN = {
     statusError: '出错',
     statusPending: '等待',
     none: '—',
+    toolGroup: '{{count}} 个工具',
+    processed: '已处理 {{iterations}} 次迭代 · {{elapsed}}',
   },
   settings: {
     title: '设置',

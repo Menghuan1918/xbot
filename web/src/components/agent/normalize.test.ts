@@ -97,6 +97,7 @@ describe('normalizeIteration', () => {
       iteration: 3,
       thinking: undefined,
       reasoning: undefined,
+      elapsedMs: undefined,
       tools: [],
     })
   })
@@ -109,12 +110,17 @@ describe('normalizeIteration', () => {
     expect(out!.tools).toHaveLength(1)
     expect(out!.tools[0].name).toBe('Read')
   })
+  it('reads elapsed_wall into elapsedMs', () => {
+    const out = normalizeIteration({ iteration: 5, elapsed_wall: 12345, tools: [] })
+    expect(out).not.toBeNull()
+    expect(out!.elapsedMs).toBe(12345)
+  })
 })
 
 describe('defaultOpenForLevel', () => {
-  it('none expands everything', () => {
+  it('none expands tools and iterations, but reasoning stays collapsed (T always folded)', () => {
     expect(defaultOpenForLevel('none', 'tool')).toBe(true)
-    expect(defaultOpenForLevel('none', 'reasoning')).toBe(true)
+    expect(defaultOpenForLevel('none', 'reasoning')).toBe(false)
     expect(defaultOpenForLevel('none', 'iteration')).toBe(true)
   })
   it('all collapses everything', () => {

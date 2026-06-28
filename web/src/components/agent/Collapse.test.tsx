@@ -71,8 +71,14 @@ describe('IterationHistory', () => {
 
     // Expand the top-level "Iterations" container.
     fireEvent.click(screen.getAllByRole('button')[0])
-    // The iteration item is itself a collapsible; expand it to reveal tools.
+    // The iteration item is itself a collapsible; expand it to reveal contents.
     fireEvent.click(screen.getAllByRole('button')[1])
+    // With ToolGroupCard, consecutive tools are merged into one card.
+    // The group header shows the name summary; expand it to reveal individual tools.
+    const groupHeader = screen.getByText('Read, Grep').closest('button')
+    expect(groupHeader).toBeTruthy()
+    fireEvent.click(groupHeader!)
+    // Individual ToolCallBlock headers should now be visible.
     expect(screen.getByText('Read')).toBeInTheDocument()
     expect(screen.getByText('Grep')).toBeInTheDocument()
   })
@@ -80,5 +86,19 @@ describe('IterationHistory', () => {
   it('renders nothing for empty iterations', () => {
     const { container } = renderWithProviders(<IterationHistory iterations={[]} />)
     expect(container.firstChild).toBeNull()
+  })
+
+  it('delegates a single tool directly to ToolCallBlock (no group wrapper)', () => {
+    const iterations: IterationSnapshot[] = [
+      {
+        iteration: 1,
+        tools: [{ name: 'Read', status: 'done', summary: 'ok' }],
+      },
+    ]
+    renderWithProviders(<IterationHistory iterations={iterations} />)
+    fireEvent.click(screen.getAllByRole('button')[0]) // expand Iterations
+    fireEvent.click(screen.getAllByRole('button')[1]) // expand iteration #1
+    // Single tool: ToolCallBlock renders directly (no ToolGroupCard wrapper).
+    expect(screen.getByText('Read')).toBeInTheDocument()
   })
 })

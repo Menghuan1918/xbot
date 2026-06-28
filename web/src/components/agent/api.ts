@@ -28,6 +28,8 @@ export interface HistProgress {
   active_tools?: unknown[]
   completed_tools?: unknown[]
   stream_content?: string
+  /** Total wall-clock of the active turn (ms). */
+  elapsed_wall?: number
   iteration_history?: unknown[]
 }
 

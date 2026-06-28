@@ -20,6 +20,7 @@ export function normalizeIteration(raw: unknown): IterationSnapshot | null {
     iteration: typeof r.iteration === 'number' ? r.iteration : 0,
     thinking: typeof r.thinking === 'string' ? r.thinking : undefined,
     reasoning: typeof r.reasoning === 'string' ? r.reasoning : undefined,
+    elapsedMs: typeof r.elapsed_wall === 'number' ? r.elapsed_wall : undefined,
     tools: rawTools.map(normalizeIterationTool).filter(Boolean) as IterationTool[],
   }
 }

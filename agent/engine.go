@@ -367,10 +367,11 @@ type RunOutput struct {
 
 // IterationSnapshot captures the tool summary of a completed iteration.
 type IterationSnapshot struct {
-	Iteration int                     `json:"iteration"`
-	Thinking  string                  `json:"thinking,omitempty"`
-	Reasoning string                  `json:"reasoning,omitempty"`
-	Tools     []IterationToolSnapshot `json:"tools"`
+	Iteration  int                     `json:"iteration"`
+	Thinking   string                  `json:"thinking,omitempty"`
+	Reasoning  string                  `json:"reasoning,omitempty"`
+	ElapsedWall int64                  `json:"elapsed_wall,omitempty"` // wall-clock duration (ms)
+	Tools      []IterationToolSnapshot `json:"tools"`
 }
 
 // IterationToolSnapshot captures a single tool's execution result within an iteration.

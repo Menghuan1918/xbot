@@ -37,6 +37,8 @@ export interface IterationSnapshot {
   iteration: number
   thinking?: string
   reasoning?: string
+  /** Wall-clock duration of this iteration (ms), from `elapsed_wall` in the JSON. */
+  elapsedMs?: number
   tools: IterationTool[]
 }
 

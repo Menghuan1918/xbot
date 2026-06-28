@@ -84,6 +84,7 @@ type runState struct {
 	iterationSnapshots []IterationSnapshot
 	progressFinalizer  func()
 	compressWarning    string
+	iterStart          time.Time // wall-clock start of the current iteration
 }
 
 // newRunState creates and initializes a runState from the given RunConfig.
@@ -385,6 +386,7 @@ func (s *runState) buildOutput(ob *channel.OutboundMsg) *RunOutput {
 // beginIteration updates state at the start of each loop iteration.
 func (s *runState) beginIteration(i int) {
 	s.localIterCount++
+	s.iterStart = time.Now()
 	s.subAgentNodes = nil
 	if s.structuredProgress != nil {
 		s.structuredProgress.Iteration = i
