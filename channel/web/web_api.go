@@ -2,15 +2,19 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	ch "xbot/channel"
+	"xbot/config"
 	log "xbot/logger"
 	"xbot/tools"
 )
@@ -1782,6 +1786,27 @@ func (wc *WebChannel) resolveSessionChannel(chatID string) string {
 	return channel
 }
 
+// readPersistedCWD reads the session's CWD from the persisted file
+// (~/.xbot/session_cwd/{sha256(channel:chatID)[:16]}.txt).
+// This mirrors session/tenant.go:loadPersistedCWD without importing the session package.
+func (wc *WebChannel) readPersistedCWD(channel, chatID string) string {
+	h := sha256.Sum256([]byte(channel + ":" + chatID))
+	cwdFile := filepath.Join(config.XbotHome(), "session_cwd", fmt.Sprintf("%x.txt", h[:16]))
+	data, err := os.ReadFile(cwdFile)
+	if err != nil {
+		return ""
+	}
+	cwd := strings.TrimSpace(string(data))
+	if cwd == "" {
+		return ""
+	}
+	// Safety: reject non-existent directories
+	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		return ""
+	}
+	return cwd
+}
+
 // handleSessionCwd handles GET /api/sessions/{chatID}/cwd.
 func (wc *WebChannel) handleSessionCwd(w http.ResponseWriter, r *http.Request) {
 	senderID := senderIDFromContext(r.Context())
@@ -1798,12 +1823,10 @@ func (wc *WebChannel) handleSessionCwd(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = "web"
 	}
-	// Get CWD from agent session
-	if wc.callbacks.GetCWD != nil {
-		if cwd, err := wc.callbacks.GetCWD(channel, chatID); err == nil && cwd != "" {
-			writeJSON(w, http.StatusOK, map[string]string{"dir": cwd})
-			return
-		}
+	// Get CWD from persisted file (session/tenant.go stores CWD at ~/.xbot/session_cwd/{hash}.txt)
+	if cwd := wc.readPersistedCWD(channel, chatID); cwd != "" {
+		writeJSON(w, http.StatusOK, map[string]string{"dir": cwd})
+		return
 	}
 	// Fallback: configured work dir
 	workDir := wc.workDir

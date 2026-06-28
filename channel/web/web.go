@@ -149,10 +149,6 @@ type WebCallbacks struct {
 	ChatDelete func(senderID, chatID string) error
 	// ChatRename renames a chatroom.
 	ChatRename func(senderID, chatID, label string) error
-
-	// GetCWD returns the current working directory for a session (channel + chatID).
-	// Returns ("", nil) if the session has no CWD set.
-	GetCWD func(channel, chatID string) (string, error)
 }
 
 // UserChatWithPreview is a chatroom with metadata for API responses.
