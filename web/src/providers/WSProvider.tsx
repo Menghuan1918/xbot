@@ -19,7 +19,7 @@ import {
 import { WSConnectionImpl } from '@/providers/wsConnection'
 import type { WSConnection } from '@/types/ws'
 
-const WSContext = createContext<WSConnection | undefined>(undefined)
+export const WSContext = createContext<WSConnection | undefined>(undefined)
 
 export function WSProvider({ children }: { children: ReactNode }) {
   // One connection for the provider's lifetime; never recreated on re-render.

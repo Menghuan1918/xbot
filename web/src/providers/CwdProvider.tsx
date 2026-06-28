@@ -29,7 +29,7 @@ export interface CwdContextValue {
   loading: boolean
 }
 
-const CwdContext = createContext<CwdContextValue>({
+export const CwdContext = createContext<CwdContextValue>({
   cwd: null,
   loading: true,
 })

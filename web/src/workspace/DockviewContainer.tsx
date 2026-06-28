@@ -1,6 +1,6 @@
 /**
  * DockviewContainer — mounts the imperative Dockview layout and bridges it
- * to React (Spec 2 §3.3).
+ * to React.
  *
  * `dockview` (v7) ships only a framework-agnostic core — there is no
  * `<DockviewReact>`. So we:
@@ -11,17 +11,11 @@
  *      via `bindApi` so tab ops drive the layout,
  *   4. seed an Agent tab (always present, not closable) on first ready.
  *
- * React is only mounted once per panel; dockview owns the DOM lifetime and
- * calls `dispose()` on the renderer, which unmounts the React root. KISS: no
- * state syncing back into React — the tab manager derives its state from
- * dockview's panel events instead.
- *
  * Context bridging: dockview hands the renderer its own detached DOM element,
  * so each `createRoot` is an isolated React tree that does NOT inherit the
- * app's Context providers. We re-wrap every panel/tab in `ThemeContext` +
- * `I18nContext` providers, reading the live values via a ref kept in sync
- * from the outer tree, so panels see the current theme/locale without a
- * second provider instance of their own.
+ * app's Context providers. We re-wrap every panel/tab in the app's providers
+ * (Theme, I18n, WS, Cwd, Auth), reading the live values via a ref kept in sync
+ * from the outer tree.
  */
 import { useEffect, useRef, type ReactNode, type RefObject } from 'react'
 import {
@@ -43,8 +37,15 @@ import { TerminalPanel } from '@/workspace/panels/TerminalPanel'
 import { TabHeader } from '@/workspace/TabHeader'
 import { ThemeContext } from '@/providers/theme'
 import { I18nContext, type I18nContextValue } from '@/providers/i18n'
+import { WSContext } from '@/providers/WSProvider'
+import type { WSConnection } from '@/types/ws'
+import { CwdContext, type CwdContextValue } from '@/providers/CwdProvider'
+import { AuthContext, type AuthContextValue } from '@/providers/AuthProvider'
 import { useTheme } from '@/hooks/useTheme'
 import { useI18n } from '@/providers/i18n'
+import { useWSConnection } from '@/providers/WSProvider'
+import { useCwd } from '@/providers/CwdProvider'
+import { useAuth } from '@/hooks/useAuth'
 import type { ThemeContextValue } from '@/types/theme'
 import type { PanelParams } from '@/types/tab'
 import type { TabManager } from '@/hooks/useTabManager'
@@ -67,36 +68,36 @@ const CONTENT_COMPONENTS = {
 interface ContextRefs {
   theme: ThemeContextValue
   i18n: I18nContextValue
+  ws: WSConnection
+  cwd: CwdContextValue
+  auth: AuthContextValue
 }
 
 export function DockviewContainer({ tabManager, onReady }: DockviewContainerProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const apiRef = useRef<DockviewApi | null>(null)
   const seededRef = useRef(false)
-  // Hold the latest tabManager so the mount-once effect reads fresh methods
-  // without re-running when the memoized tabManager identity changes on tab
-  // state updates (which would otherwise tear down + rebuild the dockview).
   const tabManagerRef = useRef(tabManager)
   tabManagerRef.current = tabManager
 
-  // Keep the live theme/i18n context values for the isolated panel roots.
+  // Collect live context values from the outer tree.
   const themeValue = useTheme()
   const i18nValue = useI18n()
-  const ctxRef = useRef<ContextRefs>({ theme: themeValue, i18n: i18nValue })
+  const wsValue = useWSConnection()
+  const cwdValue = useCwd()
+  const authValue = useAuth()
+  const ctxRef = useRef<ContextRefs>({ theme: themeValue, i18n: i18nValue, ws: wsValue, cwd: cwdValue, auth: authValue })
   ctxRef.current.theme = themeValue
   ctxRef.current.i18n = i18nValue
+  ctxRef.current.ws = wsValue
+  ctxRef.current.cwd = cwdValue
+  ctxRef.current.auth = authValue
 
-  // Panel content/tabs render in isolated React roots (dockview hands each a
-  // detached element), so they do NOT re-render when the outer tree's theme or
-  // locale changes. Force every live panel + tab renderer to re-read the
-  // (just-updated) ctx ref and re-render. MonacoEditor re-applies its theme in
-  // its own effect; i18n consumers pick up the new strings here too.
+  // Force all panels + tab headers to re-render when theme/i18n changes.
   useEffect(() => {
     const api = apiRef.current
     if (!api) return
     for (const panel of api.panels) {
-      // Re-running panel.update triggers ReactContentRenderer.update() and the
-      // tab header's update(); an empty params event keeps the logical params.
       panel.update({ params: panel.params as Record<string, unknown> })
     }
   }, [themeValue, i18nValue])
@@ -109,6 +110,8 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
       theme: themeVisualStudio,
       createComponent: (opts) => new ReactContentRenderer(opts.name, ctxRef),
       createTabComponent: () => new ReactTabRenderer(ctxRef),
+      // Suppress the right-click context menu which has a "close" action.
+      getTabContextMenuItems: () => [],
     }
 
     let dockview: DockviewComponent
@@ -139,8 +142,6 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
       apiRef.current = null
       try { dockview.dispose() } catch { /* ignore */ }
     }
-    // Mount-once: dockview owns the panels; rebuilding it on every tabManager
-    // identity change would dispose live panels. onReady is fire-once.
   }, [])
 
   return <div ref={hostRef} className="h-full w-full" />
@@ -148,12 +149,20 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
 
 /* ── React ↔ dockview renderers ── */
 
-/** Wrap a node in the app's theme/i18n providers for an isolated React root. */
+/** Wrap a node in the app's full provider stack for an isolated React root. */
 function withProviders(node: ReactNode, ctxRef: RefObject<ContextRefs>): ReactNode {
   const ctx = ctxRef.current
   return (
     <ThemeContext.Provider value={ctx.theme}>
-      <I18nContext.Provider value={ctx.i18n}>{node}</I18nContext.Provider>
+      <I18nContext.Provider value={ctx.i18n}>
+        <WSContext.Provider value={ctx.ws}>
+          <CwdContext.Provider value={ctx.cwd}>
+            <AuthContext.Provider value={ctx.auth}>
+              {node}
+            </AuthContext.Provider>
+          </CwdContext.Provider>
+        </WSContext.Provider>
+      </I18nContext.Provider>
     </ThemeContext.Provider>
   )
 }

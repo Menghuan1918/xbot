@@ -4,12 +4,12 @@
  * Uses a plain Input + absolute-positioned dropdown (no Radix Popover) to
  * avoid focus/z-index conflicts when used inside a Dialog.
  *
- * Features:
- *   - Input field showing the current path value
- *   - Debounced (300ms) autocomplete of subdirectories using GET /api/fs/list
- *   - Dropdown with clickable candidates
- *   - Keyboard navigation: ↑/↓ to move, Enter to select, Esc to close
- *   - Starts from `/` — typing shows matching subdirs of the parent path
+ * VSCode-style folder navigation:
+ *   - "/" shows all dirs under "/"
+ *   - Selecting a dir appends "/" and lists its contents
+ *   - Typing filters by name prefix within the parent dir
+ *   - Enter on a highlighted entry navigates into it
+ *   - Enter without highlight submits the current path
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ChevronRight, Folder, Loader2 } from 'lucide-react'
@@ -31,7 +31,7 @@ export interface PathPickerProps {
   onKeyDown?: (e: React.KeyboardEvent) => void
 }
 
-const DEBOUNCE_MS = 300
+const DEBOUNCE_MS = 200
 
 export function PathPicker({ value, onChange, placeholder, className, compact, onKeyDown: externalOnKeyDown }: PathPickerProps) {
   const { t } = useI18n()
@@ -84,12 +84,14 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
-  const selectEntry = useCallback(
+  // Navigate into a directory: set value to dir + "/" and keep dropdown open.
+  const navigateInto = useCallback(
     (entry: FsEntry) => {
       const fullPath = entry.name === '/' ? '/' : `${dirPath === '/' ? '' : dirPath}/${entry.name}`
-      onChange(fullPath)
-      setOpen(false)
-      inputRef.current?.focus()
+      onChange(fullPath + '/')
+      setOpen(true)
+      // Reset highlight for the new directory listing
+      setHighlightIdx(-1)
     },
     [dirPath, onChange],
   )
@@ -102,14 +104,32 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
       } else if (e.key === 'ArrowUp' && open && entries.length > 0) {
         e.preventDefault()
         setHighlightIdx((prev) => (prev <= 0 ? entries.length - 1 : prev - 1))
-      } else if (e.key === 'Enter' && open && highlightIdx >= 0) {
-        e.preventDefault()
-        selectEntry(entries[highlightIdx])
+      } else if (e.key === 'Enter') {
+        // If a dir is highlighted, navigate into it (don't submit the dialog)
+        if (open && highlightIdx >= 0 && entries[highlightIdx]) {
+          e.preventDefault()
+          navigateInto(entries[highlightIdx])
+          return
+        }
+        // If the current value doesn't end with '/', and there's exactly one
+        // match, navigate into it too.
+        if (open && entries.length === 1 && !value.endsWith('/')) {
+          e.preventDefault()
+          navigateInto(entries[0])
+          return
+        }
+        // Otherwise fall through to the external onKeyDown (submit dialog)
       } else if (e.key === 'Escape') {
         setOpen(false)
+      } else if (e.key === 'Tab') {
+        // Tab on a highlighted entry navigates into it
+        if (open && highlightIdx >= 0 && entries[highlightIdx]) {
+          e.preventDefault()
+          navigateInto(entries[highlightIdx])
+        }
       }
     },
-    [open, entries, highlightIdx, selectEntry],
+    [open, entries, highlightIdx, navigateInto, value],
   )
 
   return (
@@ -124,7 +144,8 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
         onFocus={() => setOpen(true)}
         onKeyDown={(e) => {
           onKeyDown(e)
-          externalOnKeyDown?.(e)
+          // If the internal handler didn't preventDefault, call external
+          if (!e.defaultPrevented) externalOnKeyDown?.(e)
         }}
         placeholder={placeholder ?? t('session.workPathPlaceholder')}
         className={cn(compact ? 'h-8' : 'h-9', 'text-sm', className)}
@@ -149,7 +170,7 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
                     key={fullPath}
                     type="button"
                     onMouseEnter={() => setHighlightIdx(idx)}
-                    onClick={() => selectEntry(entry)}
+                    onClick={() => navigateInto(entry)}
                     className={cn(
                       'flex w-full items-center gap-1.5 px-3 py-1.5 text-left transition-colors hover:bg-bg-tertiary',
                       highlightIdx === idx && 'bg-bg-tertiary',
@@ -176,17 +197,20 @@ export function PathPicker({ value, onChange, placeholder, className, compact, o
 /**
  * Parse a path input into the directory to list and a name prefix to filter by.
  *
+ * VSCode-style: the input always represents "where am I + what am I typing".
+ *
  * Examples:
- *   "/"           → dirPath="/", prefix=""
- *   "/root"       → dirPath="/", prefix="root"
- *   "/root/Code"  → dirPath="/root", prefix="Code"
- *   "/root/Code/" → dirPath="/root/Code", prefix=""
+ *   "/"            → dirPath="/", prefix=""         → show all dirs under /
+ *   "/r"           → dirPath="/", prefix="r"         → filter dirs under / starting with r
+ *   "/root/"       → dirPath="/root", prefix=""     → show all dirs under /root
+ *   "/root/Co"     → dirPath="/root", prefix="Co"   → filter dirs under /root
+ *   "/root/Code/"  → dirPath="/root/Code", prefix="" → show all dirs under /root/Code
  */
 function parseInput(input: string): { dirPath: string; prefix: string } {
   const trimmed = input.trim()
   if (!trimmed) return { dirPath: '/', prefix: '' }
 
-  // If it ends with '/', the whole thing is a directory path.
+  // If it ends with '/', the whole thing is a directory path → list its contents
   if (trimmed.endsWith('/')) {
     const clean = trimmed.replace(/\/+$/, '') || '/'
     return { dirPath: clean, prefix: '' }
