@@ -18,18 +18,18 @@ import { useAskUser } from '@/hooks/useAskUser'
 import { useChatMessages } from '@/hooks/useChatMessages'
 import { useCollapseLevel } from '@/hooks/useCollapseLevel'
 import { useProgressStream } from '@/hooks/useProgressStream'
-import { useWSConnection } from '@/hooks/useWSConnection'
-import { useSessionStore } from '@/hooks/useSessionStore'
 
 import { AskUserPanel } from '@/components/agent/AskUserPanel'
 import { MessageInput } from '@/components/agent/MessageInput'
 import { MessageList } from '@/components/agent/MessageList'
+import { useDockviewContext } from '@/workspace/types'
 import type { PanelProps } from '@/workspace/panels/types'
 
 export function AgentPanel({ params }: PanelProps) {
-  const ws = useWSConnection()
+  const ctx = useDockviewContext()
+  const ws = ctx.ws
+  const store = ctx.sessionStore
   const { level } = useCollapseLevel()
-  const store = useSessionStore()
 
   // Resolve the chatID: explicit tab sessionId, else follow store's
   // activeSessionId (updates on session switch), with resolvedChatID as
@@ -41,7 +41,7 @@ export function AgentPanel({ params }: PanelProps) {
     ws.subscribe(chatID)
   }, [ws, chatID])
 
-  const chat = useChatMessages({ chatID, enabled: true })
+  const chat = useChatMessages({ chatID, enabled: true, ws })
 
   // Follow activeSessionId from the shared store. When the user switches
   // sessions, activeSessionId changes → chatID updates → useChatMessages
@@ -58,9 +58,10 @@ export function AgentPanel({ params }: PanelProps) {
     onAssistantComplete: (finalText, iterations) => {
       chat.appendAssistant(finalText, iterations)
     },
+    ws,
   })
 
-  const askUser = useAskUser({ chatID })
+  const askUser = useAskUser({ chatID, ws })
 
   // Busy while streaming (live or hydrated from a resumed session).
   const busy = isStreaming

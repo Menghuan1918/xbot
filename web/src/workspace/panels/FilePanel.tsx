@@ -26,6 +26,7 @@ import {
 } from '@/components/file/fileTypes'
 import { useFileContent } from '@/hooks/useFileContent'
 import { useI18n } from '@/providers/i18n'
+import { useDockviewContext } from '@/workspace/types'
 import type { PanelProps } from '@/workspace/panels/types'
 
 /** "basename" of a posix path, defensive against undefined. */
@@ -36,13 +37,14 @@ function baseName(filePath?: string): string {
 }
 
 export function FilePanel({ params }: PanelProps) {
+  const { ws, cwd } = useDockviewContext()
   const filePath = params.filePath ?? ''
   const fileName = useMemo(() => baseName(filePath), [filePath])
   const isImage = isImageFile(fileName)
   const canToggle = canTogglePreview(fileName)
   const language = useMemo(() => languageOf(fileName), [fileName])
 
-  const { content, loading, error, setContent, imageUrl } = useFileContent(filePath)
+  const { content, loading, error, setContent, imageUrl } = useFileContent({ filePath, ws, cwd: cwd.cwd })
   const [mode, setMode] = useState<FileViewMode>(() => defaultViewMode(fileName))
 
   // Re-seed the view mode if the file ever changes (dockview reuses a panel

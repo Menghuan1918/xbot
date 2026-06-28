@@ -13,11 +13,18 @@
  *
  * Context bridging: dockview hands the renderer its own detached DOM element,
  * so each `createRoot` is an isolated React tree that does NOT inherit the
- * app's Context providers. We re-wrap every panel/tab in the app's providers
- * (Theme, I18n, WS, Cwd, Auth), reading the live values via a ref kept in sync
- * from the outer tree.
+ * app's Context providers. We bridge all needed values through a single
+ * `DockviewContext` (aggregating Theme, I18n, WS, Cwd, Auth, SessionStore)
+ * so panels read from one typed source via `useDockviewContext()`.
  */
-import { useEffect, useRef, type ReactNode, type RefObject } from 'react'
+import {
+  createElement,
+  useEffect,
+  useMemo,
+  useRef,
+  type ReactElement,
+  type RefObject,
+} from 'react'
 import {
   DockviewComponent,
   themeVisualStudio,
@@ -35,19 +42,22 @@ import { AgentPanel } from '@/workspace/panels/AgentPanel'
 import { FilePanel } from '@/workspace/panels/FilePanel'
 import { TerminalPanel } from '@/workspace/panels/TerminalPanel'
 import { TabHeader } from '@/workspace/TabHeader'
-import { ThemeContext } from '@/providers/theme'
-import { I18nContext, type I18nContextValue } from '@/providers/i18n'
-import { WSContext } from '@/providers/WSProvider'
-import type { WSConnection } from '@/types/ws'
-import { CwdContext, type CwdContextValue } from '@/providers/CwdProvider'
-import { AuthContext, type AuthContextValue } from '@/providers/AuthProvider'
+import {
+  DockviewContext,
+  type DockviewContextValue,
+} from '@/workspace/types'
 import { useTheme } from '@/hooks/useTheme'
 import { useI18n } from '@/providers/i18n'
 import { useWSConnection } from '@/providers/WSProvider'
 import { useCwd } from '@/providers/CwdProvider'
 import { useAuth } from '@/hooks/useAuth'
-import { useSessionStore, type SessionStore as SessionStoreType, SessionStoreContext } from '@/hooks/useSessionStore'
-import type { ThemeContextValue } from '@/types/theme'
+import { useSessionStore } from '@/hooks/useSessionStore'
+import { ThemeContext } from '@/providers/theme'
+import { I18nContext } from '@/providers/i18n'
+import { WSContext } from '@/providers/WSProvider'
+import { CwdContext } from '@/providers/CwdProvider'
+import { AuthContext } from '@/providers/AuthProvider'
+import { SessionStoreContext } from '@/hooks/useSessionStore'
 import type { PanelParams } from '@/types/tab'
 import type { TabManager } from '@/hooks/useTabManager'
 
@@ -65,16 +75,6 @@ const CONTENT_COMPONENTS = {
   terminal: TerminalPanel,
 } as const
 
-/** Live outer-tree context values handed to each isolated panel root. */
-interface ContextRefs {
-  theme: ThemeContextValue
-  i18n: I18nContextValue
-  ws: WSConnection
-  cwd: CwdContextValue
-  auth: AuthContextValue
-  sessionStore: SessionStoreType
-}
-
 export function DockviewContainer({ tabManager, onReady }: DockviewContainerProps) {
   const hostRef = useRef<HTMLDivElement>(null)
   const apiRef = useRef<DockviewApi | null>(null)
@@ -89,25 +89,34 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
   const cwdValue = useCwd()
   const authValue = useAuth()
   const sessionStoreValue = useSessionStore()
-  const ctxRef = useRef<ContextRefs>({ theme: themeValue, i18n: i18nValue, ws: wsValue, cwd: cwdValue, auth: authValue, sessionStore: sessionStoreValue })
-  ctxRef.current.theme = themeValue
-  ctxRef.current.i18n = i18nValue
-  ctxRef.current.ws = wsValue
-  ctxRef.current.cwd = cwdValue
-  ctxRef.current.auth = authValue
-  ctxRef.current.sessionStore = sessionStoreValue
 
-  // Force all panels + tab headers to re-render when theme/i18n/sessionStore changes.
-  // sessionStore must be included because panels render in isolated React roots
-  // that don't re-render when the outer tree's Context values change. Without this,
-  // AgentPanel never sees activeSessionId updates from SessionSidebar's switchSession.
+  // Single aggregated value — new reference when any sub-value changes.
+  const ctxValue = useMemo<DockviewContextValue>(
+    () => ({
+      theme: themeValue,
+      i18n: i18nValue,
+      ws: wsValue,
+      cwd: cwdValue,
+      auth: authValue,
+      sessionStore: sessionStoreValue,
+    }),
+    [themeValue, i18nValue, wsValue, cwdValue, authValue, sessionStoreValue],
+  )
+
+  // Keep ctxRef in sync so isolated panel roots read the latest values.
+  const ctxRef = useRef<DockviewContextValue>(ctxValue)
+  ctxRef.current = ctxValue
+
+  // Force all panels + tab headers to re-render when the aggregated
+  // context value changes. Panels live in isolated React roots that don't
+  // re-render when outer-tree Context values change; this bridges them.
   useEffect(() => {
     const api = apiRef.current
     if (!api) return
     for (const panel of api.panels) {
       panel.update({ params: panel.params as Record<string, unknown> })
     }
-  }, [themeValue, i18nValue, sessionStoreValue])
+  }, [ctxValue])
 
   useEffect(() => {
     const host = hostRef.current
@@ -159,23 +168,33 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
 
 /* ── React ↔ dockview renderers ── */
 
-/** Wrap a node in the app's full provider stack for an isolated React root. */
-function withProviders(node: ReactNode, ctxRef: RefObject<ContextRefs>): ReactNode {
-  const ctx = ctxRef.current
-  return (
-    <ThemeContext.Provider value={ctx.theme}>
-      <I18nContext.Provider value={ctx.i18n}>
-        <WSContext.Provider value={ctx.ws}>
-          <CwdContext.Provider value={ctx.cwd}>
-            <AuthContext.Provider value={ctx.auth}>
-              <SessionStoreContext.Provider value={ctx.sessionStore}>
-                {node}
-              </SessionStoreContext.Provider>
-            </AuthContext.Provider>
-          </CwdContext.Provider>
-        </WSContext.Provider>
-      </I18nContext.Provider>
-    </ThemeContext.Provider>
+/**
+ * Wrap a node in the single aggregated DockviewContext for an isolated
+ * React root. Panels read all context values via `useDockviewContext()`.
+ *
+ * Individual context providers are also included (driven by the single
+ * aggregated `ctx` value) so child components that still call `useI18n()`,
+ * `useTheme()`, etc. work inside the isolated root. One bridge value →
+ * one force-re-render dep — the simplification over the old per-context
+ * tracking.
+ */
+function withProviders(node: ReactElement, ctx: DockviewContextValue): ReactElement {
+  return createElement(
+    DockviewContext.Provider,
+    { value: ctx },
+    createElement(ThemeContext.Provider, { value: ctx.theme },
+      createElement(I18nContext.Provider, { value: ctx.i18n },
+        createElement(WSContext.Provider, { value: ctx.ws },
+          createElement(CwdContext.Provider, { value: ctx.cwd },
+            createElement(AuthContext.Provider, { value: ctx.auth },
+              createElement(SessionStoreContext.Provider, { value: ctx.sessionStore },
+                node,
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
   )
 }
 
@@ -188,9 +207,9 @@ class ReactContentRenderer implements IContentRenderer {
   private root: Root | null = null
   private params: GroupPanelPartInitParameters | null = null
   private readonly name: string
-  private readonly ctxRef: RefObject<ContextRefs>
+  private readonly ctxRef: RefObject<DockviewContextValue>
 
-  constructor(name: string, ctxRef: RefObject<ContextRefs>) {
+  constructor(name: string, ctxRef: RefObject<DockviewContextValue>) {
     this.name = name
     this.ctxRef = ctxRef
     this.element = document.createElement('div')
@@ -219,7 +238,7 @@ class ReactContentRenderer implements IContentRenderer {
           api={this.params.api}
           containerApi={this.params.containerApi}
         />,
-        this.ctxRef,
+        this.ctxRef.current,
       ),
     )
   }
@@ -233,32 +252,42 @@ class ReactContentRenderer implements IContentRenderer {
 
 /**
  * Mounts the custom TabHeader React component as the dockview tab.
- * Active state comes from `containerApi.onDidActivePanelChange` (comparing the
- * event's panel id with this tab's panel id) so the accent bar tracks focus.
+ *
+ * Active state is computed from `containerApi.activePanel?.id === api.id`
+ * on init, then kept in sync via `onDidActivePanelChange`.
+ *
+ * VS theme borders (`.dv-tab` border-top, `.dv-tabs-and-actions-container`
+ * border-bottom) are suppressed via inline styles on the parent elements
+ * rather than CSS overrides, so no `.dv-dockview`/`.dv-tab` CSS rules
+ * are needed.
  */
 class ReactTabRenderer implements ITabRenderer {
   readonly element: HTMLElement
   private root: Root | null = null
   private params: TabPartInitParameters | null = null
   private activeSub: DockviewIDisposable | null = null
-  private readonly ctxRef: RefObject<ContextRefs>
+  private readonly ctxRef: RefObject<DockviewContextValue>
 
-  constructor(ctxRef: RefObject<ContextRefs>) {
+  constructor(ctxRef: RefObject<DockviewContextValue>) {
     this.ctxRef = ctxRef
     this.element = document.createElement('div')
-    this.element.className = 'relative flex h-full min-w-0 items-center'
   }
 
   init(parameters: TabPartInitParameters): void {
     this.params = parameters
     this.root = createRoot(this.element)
-    // Track the panel id this tab renders so we can match active-panel events.
-    const panelId = (parameters.params as PanelParams & { id?: string }).tabId
+
+    // Suppress VS theme decorative borders on parent elements via inline
+    // styles (no CSS rules needed in index.css).
+    this.suppressThemeBorders()
+
+    // Subscribe to active-panel changes to keep the accent bar in sync.
     const onActive = parameters.containerApi.onDidActivePanelChange
     this.activeSub = onActive((e) => {
-      const activeId = e.panel ? (e.panel.params as PanelParams).tabId : null
-      this.render(activeId === panelId)
+      this.render(e.panel ? e.panel.id === this.params?.api.id : false)
     })
+
+    // Initial active state from the dockview API.
     this.render(this.isActive())
   }
 
@@ -271,7 +300,26 @@ class ReactTabRenderer implements ITabRenderer {
     if (!this.params) return false
     const active = this.params.containerApi.activePanel
     if (!active) return false
-    return (active.params as PanelParams).tabId === (this.params.params as PanelParams).tabId
+    return active.id === this.params.api.id
+  }
+
+  /**
+   * Remove the VS theme's border-top on `.dv-tab` and border-bottom on
+   * `.dv-tabs-and-actions-container` by setting inline styles on the
+   * parent elements. Called once during init().
+   */
+  private suppressThemeBorders(): void {
+    // `.dv-tab` is the immediate parent of our renderer element.
+    const tabEl = this.element.parentElement
+    if (tabEl) {
+      tabEl.style.borderTop = 'none'
+      tabEl.style.backgroundColor = 'transparent'
+    }
+    // Walk up to the tab strip container and remove its border-bottom.
+    const stripEl = tabEl?.closest('.dv-tabs-and-actions-container')
+    if (stripEl) {
+      (stripEl as HTMLElement).style.borderBottom = 'none'
+    }
   }
 
   private render(isActive: boolean): void {
@@ -285,7 +333,7 @@ class ReactTabRenderer implements ITabRenderer {
           isActive={isActive}
           onActivate={() => this.params?.api.setActive()}
         />,
-        this.ctxRef,
+        this.ctxRef.current,
       ),
     )
   }

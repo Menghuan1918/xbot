@@ -29,7 +29,7 @@ import {
   normalizeTool,
   parseIterations,
 } from '@/components/agent/normalize'
-import { useWSConnection } from '@/hooks/useWSConnection'
+import type { WSConnection } from '@/types/ws'
 import {
   EMPTY_LIVE_PROGRESS,
   type ChatMessage,
@@ -52,6 +52,8 @@ interface UseProgressStreamOptions {
    * Spec 4 §3.8.
    */
   initialProgress?: HistProgress | null
+  /** The WS connection (injected from DockviewContext for isolated roots). */
+  ws: WSConnection
 }
 
 export interface UseProgressStreamResult {
@@ -66,8 +68,8 @@ export function useProgressStream({
   chatID,
   onAssistantComplete,
   initialProgress,
+  ws,
 }: UseProgressStreamOptions): UseProgressStreamResult {
-  const ws = useWSConnection()
   const storeRef = useRef<ProgressStore | null>(null)
   if (storeRef.current === null) {
     storeRef.current = new ProgressStore()
