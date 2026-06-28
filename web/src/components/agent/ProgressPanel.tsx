@@ -17,10 +17,11 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { ReasoningBlock } from './ReasoningBlock'
 import { ToolGroupCard, formatDuration } from './ToolGroupCard'
 import { useI18n } from '@/providers/i18n'
-import type { IterationSnapshot, IterationTool, LiveProgress, ToolProgress } from '@/types/agent'
+import type { IterationSnapshot, IterationTool, ToolProgress } from '@/types/agent'
+import type { ProgressSnapshot } from '@/types/shared'
 
 interface ProgressPanelProps {
-  progress: LiveProgress
+  progress: ProgressSnapshot
   defaultOpenTool?: boolean
   defaultOpenReasoning?: boolean
   defaultOpenIteration?: boolean
@@ -34,7 +35,7 @@ export const ProgressPanel = memo(function ProgressPanel({
 }: ProgressPanelProps) {
   const { t } = useI18n()
   const hasIteration = progress.iteration > 0
-  const hasReasoning = Boolean(progress.reasoningContent)
+  const hasReasoning = Boolean(progress.reasoningStreamContent)
   const hasActive = progress.activeTools.length > 0
   const hasCompleted = progress.completedTools.length > 0
   const hasHistory = progress.iterationHistory.length > 0
@@ -77,7 +78,7 @@ export const ProgressPanel = memo(function ProgressPanel({
       {/* Current iteration: reasoning + tools being executed */}
       {hasReasoning && (
         <ReasoningBlock
-          content={progress.reasoningContent}
+          content={progress.reasoningStreamContent}
           streaming={progress.streaming}
           defaultOpen={defaultOpenReasoning}
         />

@@ -1,13 +1,15 @@
 /**
  * useChatMessages — owns the committed chat message list for one Agent panel
- * (Spec 4 §3.8, §3.7).
+ * (Spec 3/4 §3.8, §3.7).
  *
  * Responsibilities:
  *   - load history via GET /api/history and normalize rows into ChatMessage[]
- *     (parsing the `detail` JSON into iteration snapshots)
+ *     (parsing the `detail` JSON into WebIteration snapshots)
  *   - expose send / cancel / upload so the input area can drive the WS channel
  *   - append a committed assistant message when useProgressStream finalizes a
  *     run (onAssistantComplete), and echo user messages on send
+ *   - dedup messages by (turnID, role) when turnID > 0 — prevents duplicate
+ *     messages from PhaseDone + handleAgentMessage racing
  *
  * The hook does NOT own live streaming — that lives in useProgressStream. The
  * split keeps the high-frequency token stream out of the committed-list state
@@ -22,9 +24,10 @@ import {
   type HistProgress,
   type UploadResponse,
 } from '@/components/agent/api'
-import { parseIterations } from '@/components/agent/normalize'
-import type { ChatMessage, IterationSnapshot } from '@/types/agent'
+import { parseWebIterations } from '@/components/agent/normalize'
+import { dedupMessages } from '@/components/agent/progressStore'
 import type { WSConnection } from '@/types/ws'
+import type { ChatMessage, WebIteration } from '@/types/shared'
 import type { WSMessage } from '@/types/shared'
 
 interface UseChatMessagesOptions {
@@ -53,7 +56,7 @@ export interface UseChatMessagesResult {
   /** Upload a file; returns the server upload metadata for sending with a message. */
   upload: (file: File) => Promise<UploadResponse>
   /** Append a finalized assistant message (called by useProgressStream). */
-  appendAssistant: (content: string, iterations: IterationSnapshot[]) => void
+  appendAssistant: (content: string, iterations: WebIteration[]) => void
   /** Remove the trailing assistant message by id (for cancellation cleanup). */
   removeMessage: (id: string) => void
 }
@@ -114,12 +117,15 @@ export function useChatMessages({
           id: String(m.id),
           role: m.role,
           content: m.content ?? '',
-          createdAt: m.created_at,
+          iterations: parseWebIterations(m.detail ?? undefined),
+          timestamp: m.created_at ?? '',
+          isPartial: false,
+          turnID: 0,
           displayOnly: m.display_only,
-          iterations: parseIterations(m.detail ?? undefined),
         })
       }
-      setMessages(normalized)
+      // Apply dedup (harmless for history — turnID=0 means keep all).
+      setMessages(dedupMessages(normalized))
       setInitialProgress(data.active_progress ?? null)
       if (data.chat_id) setResolvedChatID(data.chat_id)
     } catch (e) {
@@ -150,16 +156,26 @@ export function useChatMessages({
       const content = msg.content ?? msg.original_content ?? ''
       if (!content) return
       const id = `echo-${msg.ts ?? Date.now()}-${echoSeq++}`
+      const ts = msg.ts ? new Date(msg.ts * 1000).toISOString() : new Date().toISOString()
       setMessages((prev) => {
         // Replace the last optimistic user message (id starts with 'user-')
         // instead of appending a duplicate.
         const lastUserIdx = prev.findLastIndex((m) => m.id.startsWith('user-'))
+        const newMsg: ChatMessage = {
+          id,
+          role: 'user',
+          content,
+          iterations: [],
+          timestamp: ts,
+          isPartial: false,
+          turnID: 0,
+        }
         if (lastUserIdx >= 0) {
           const copy = [...prev]
-          copy[lastUserIdx] = { id, role: 'user', content }
+          copy[lastUserIdx] = newMsg
           return copy
         }
-        return [...prev, { id, role: 'user', content }]
+        return [...prev, newMsg]
       })
     })
     return off
@@ -171,7 +187,16 @@ export function useChatMessages({
       if (!text && !attachments?.uploadKeys.length) return
       const id = `user-${Date.now()}-${echoSeq++}`
       // Optimistically show the user's message.
-      setMessages((prev) => [...prev, { id, role: 'user', content: text }])
+      const newMsg: ChatMessage = {
+        id,
+        role: 'user',
+        content: text,
+        iterations: [],
+        timestamp: new Date().toISOString(),
+        isPartial: false,
+        turnID: 0,
+      }
+      setMessages((prev) => [...prev, newMsg])
       ws.send({
         type: 'message',
         chat_id: chatIDRef.current ?? undefined,
@@ -191,10 +216,19 @@ export function useChatMessages({
 
   const upload = useCallback(async (file: File) => uploadFile(file), [])
 
-  const appendAssistant = useCallback((content: string, iterations: IterationSnapshot[]) => {
+  const appendAssistant = useCallback((content: string, iterations: WebIteration[]) => {
     if (!content && !iterations.length) return
     const id = `asst-${Date.now()}-${echoSeq++}`
-    setMessages((prev) => [...prev, { id, role: 'assistant', content, iterations }])
+    const newMsg: ChatMessage = {
+      id,
+      role: 'assistant',
+      content,
+      iterations,
+      timestamp: new Date().toISOString(),
+      isPartial: false,
+      turnID: 0,
+    }
+    setMessages((prev) => dedupMessages([...prev, newMsg]))
   }, [])
 
   const removeMessage = useCallback((id: string) => {

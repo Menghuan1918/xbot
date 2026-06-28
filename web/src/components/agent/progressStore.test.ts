@@ -7,7 +7,7 @@
  */
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 
-import { ProgressStore } from '@/components/agent/progressStore'
+import { ProgressStore, dedupMessages } from '@/components/agent/progressStore'
 
 describe('ProgressStore', () => {
   let rafSpy: ReturnType<typeof vi.spyOn>
@@ -71,7 +71,7 @@ describe('ProgressStore', () => {
     const store = new ProgressStore()
     store.replace({
       streamContent: 'x',
-      reasoningContent: '',
+      reasoningStreamContent: '',
       activeTools: [],
       completedTools: [],
       iteration: 2,
@@ -101,16 +101,16 @@ describe('ProgressStore', () => {
     store.appendReasoningContent('foo ')
     store.appendReasoningContent('bar')
     flushRaf()
-    expect(store.getSnapshot().reasoningContent).toBe('foo bar')
+    expect(store.getSnapshot().reasoningStreamContent).toBe('foo bar')
     store.dispose()
   })
 
-  it('pushIteration appends a snapshot', () => {
+  it('setIterationHistory appends snapshots', () => {
     const store = new ProgressStore()
-    store.pushIteration({ iteration: 1, tools: [] })
-    store.pushIteration({ iteration: 2, tools: [{ name: 'Read', status: 'done' }] })
+    store.setIterationHistory([{ iteration: 1, thinking: '', reasoning: '', tools: [], toolCount: 0 }])
+    store.setIterationHistory([{ iteration: 2, thinking: '', reasoning: '', tools: [{ name: 'Read', label: '', status: 'done', elapsedMs: 0, summary: '', detail: '', args: '', toolHints: '' }], toolCount: 1 }])
     flushRaf()
-    expect(store.getSnapshot().iterationHistory).toHaveLength(2)
+    expect(store.getSnapshot().iterationHistory).toHaveLength(1) // second call replaces
     store.dispose()
   })
 
@@ -122,5 +122,171 @@ describe('ProgressStore', () => {
     store.appendStreamContent('z')
     flushRaf()
     expect(calls).not.toHaveBeenCalled()
+  })
+})
+
+// ── Spec 3: stream-only patch, carry-forward, iteration snapshot, dedup ──
+
+describe('ProgressStore stream-only patch + carry-forward (Spec 3)', () => {
+  let rafSpy: ReturnType<typeof vi.spyOn>
+  let rafCallbacks: Array<() => void>
+
+  beforeEach(() => {
+    rafCallbacks = []
+    rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      rafCallbacks.push(cb as () => void)
+      return rafCallbacks.length
+    })
+  })
+  afterEach(() => rafSpy.mockRestore())
+
+  function flushRaf() {
+    rafCallbacks.splice(0, rafCallbacks.length).forEach((cb) => cb())
+  }
+
+  it('carry-forward: structured event preserves accumulated streamContent', () => {
+    const store = new ProgressStore()
+    // Step 1: accumulate stream content
+    store.appendStreamContent('Hello ')
+    store.appendStreamContent('world')
+    flushRaf()
+    expect(store.getSnapshot().streamContent).toBe('Hello world')
+
+    // Step 2: structured event arrives — streamContent must NOT be overwritten
+    store.setStructuredTools({
+      phase: 'tool_exec',
+      iteration: 1,
+      activeTools: [{ name: 'Read', label: '', status: 'running', elapsedMs: 0, summary: '', detail: '', args: '', toolHints: '' }],
+    })
+    flushRaf()
+
+    const snap = store.getSnapshot()
+    expect(snap.streamContent).toBe('Hello world') // preserved!
+    expect(snap.phase).toBe('tool_exec')
+    expect(snap.iteration).toBe(1)
+    expect(snap.activeTools[0].name).toBe('Read')
+    store.dispose()
+  })
+
+  it('carry-forward: structured event preserves reasoningStreamContent', () => {
+    const store = new ProgressStore()
+    store.appendReasoningContent('thinking ')
+    store.appendReasoningContent('deeply')
+    flushRaf()
+
+    store.setStructuredTools({ phase: 'thinking', iteration: 1 })
+    flushRaf()
+
+    expect(store.getSnapshot().reasoningStreamContent).toBe('thinking deeply')
+    store.dispose()
+  })
+
+  it('iteration snapshot: iteration change snapshots previous iteration', () => {
+    const store = new ProgressStore()
+    // First iteration — set up state
+    store.setStructuredTools({ phase: 'thinking', iteration: 1 })
+    store.appendStreamContent('iter1 text')
+    store.setStructuredTools({
+      phase: 'tool_exec',
+      iteration: 1,
+      reasoning: 'iter1 reasoning',
+      completedTools: [{ name: 'Read', label: '', status: 'done', elapsedMs: 10, summary: 'ok', detail: '', args: '', toolHints: '' }],
+    })
+    flushRaf()
+
+    // Second iteration — should snapshot iteration 1
+    store.setStructuredTools({ phase: 'thinking', iteration: 2 })
+    flushRaf()
+
+    const snap = store.getSnapshot()
+    expect(snap.iterationHistory).toHaveLength(1)
+    expect(snap.iterationHistory[0].iteration).toBe(1)
+    expect(snap.iterationHistory[0].reasoning).toBe('iter1 reasoning')
+    expect(snap.iterationHistory[0].tools).toHaveLength(1)
+    expect(snap.iterationHistory[0].tools[0].name).toBe('Read')
+    store.dispose()
+  })
+
+  it('iteration snapshot: no snapshot on first iteration (lastIter=-1)', () => {
+    const store = new ProgressStore()
+    // First structured event — lastIter starts at -1, no snapshot
+    store.setStructuredTools({ phase: 'thinking', iteration: 1 })
+    flushRaf()
+    expect(store.getSnapshot().iterationHistory).toHaveLength(0)
+    expect(store.getSnapshot().lastIter).toBe(1)
+    store.dispose()
+  })
+})
+
+describe('ProgressStore tool dedup (Spec 3)', () => {
+  let rafSpy: ReturnType<typeof vi.spyOn>
+  let rafCallbacks: Array<() => void>
+
+  beforeEach(() => {
+    rafCallbacks = []
+    rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+      rafCallbacks.push(cb as () => void)
+      return rafCallbacks.length
+    })
+  })
+  afterEach(() => rafSpy.mockRestore())
+
+  function flushRaf() {
+    rafCallbacks.splice(0, rafCallbacks.length).forEach((cb) => cb())
+  }
+
+  it('dedupTools: generating tools are never deduped', () => {
+    const store = new ProgressStore()
+    const genTool = (name: string) => ({ name, label: '', status: 'generating' as const, elapsedMs: 0, summary: '', detail: '', args: '', toolHints: '' })
+    store.setStructuredTools({
+      phase: 'tool_exec',
+      iteration: 1,
+      activeTools: [genTool('Read'), genTool('Read'), genTool('Read')],
+    })
+    flushRaf()
+    expect(store.getSnapshot().activeTools).toHaveLength(3) // all 3 kept
+    store.dispose()
+  })
+
+  it('dedupTools: running/done/error tools dedup by name+label', () => {
+    const store = new ProgressStore()
+    const doneTool = (name: string, label = '') => ({ name, label, status: 'done' as const, elapsedMs: 0, summary: '', detail: '', args: '', toolHints: '' })
+    store.setStructuredTools({
+      phase: 'tool_exec',
+      iteration: 1,
+      completedTools: [
+        doneTool('Read', 'file1.go'),
+        doneTool('Read', 'file1.go'), // dup — should be removed
+        doneTool('Read', 'file2.go'), // different label — kept
+        doneTool('Grep', ''),                          // different name — kept
+      ],
+    })
+    flushRaf()
+    expect(store.getSnapshot().completedTools).toHaveLength(3)
+    store.dispose()
+  })
+})
+
+describe('dedupMessages (Spec 3)', () => {
+  it('keeps only the last message with the same turnID+role', () => {
+    const msgs = [
+      { turnID: 1, role: 'assistant', id: 'a1' },
+      { turnID: 1, role: 'user', id: 'u1' },
+      { turnID: 1, role: 'assistant', id: 'a2' }, // dup of a1
+    ]
+    const result = dedupMessages(msgs)
+    expect(result).toHaveLength(2)
+    expect(result.find((m) => m.role === 'assistant')!.id).toBe('a2') // last wins
+  })
+
+  it('keeps all messages with turnID=0 (history)', () => {
+    const msgs = [
+      { turnID: 0, role: 'user', id: 'u1' },
+      { turnID: 0, role: 'assistant', id: 'a1' },
+      { turnID: 0, role: 'user', id: 'u2' },
+      { turnID: 0, role: 'assistant', id: 'a2' },
+    ]
+    const result = dedupMessages(msgs)
+    expect(result).toHaveLength(4) // all kept
   })
 })

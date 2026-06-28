@@ -52,13 +52,16 @@ export function AgentPanel({ params }: PanelProps) {
     if (next && next !== chatID) setChatID(next)
   }, [params.sessionId, store.activeSessionId, chat.resolvedChatID, chatID])
 
-  const { progress, liveMessage, isStreaming } = useProgressStream({
+  const { progressSnapshot, liveMessage, isStreaming } = useProgressStream({
     chatID,
     initialProgress: chat.initialProgress,
     onAssistantComplete: (finalText, iterations) => {
       chat.appendAssistant(finalText, iterations)
     },
     ws,
+    onHistoryCompacted: () => {
+      chat.reload()
+    },
   })
 
   const askUser = useAskUser({ chatID, ws })
@@ -71,7 +74,7 @@ export function AgentPanel({ params }: PanelProps) {
       <MessageList
         messages={chat.messages}
         liveMessage={liveMessage}
-        liveProgress={liveMessage ? progress : null}
+        liveProgress={liveMessage ? progressSnapshot : null}
         collapseLevel={level}
         loading={chat.loading}
         error={chat.error}

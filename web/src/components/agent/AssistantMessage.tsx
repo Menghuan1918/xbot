@@ -38,7 +38,7 @@ interface AssistantMessageProps {
 
 function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMessageProps) {
   const { t } = useI18n()
-  const showProgress = Boolean(progress && (progress.streaming || progress.activeTools.length || progress.completedTools.length || progress.reasoningContent || progress.iteration))
+  const showProgress = Boolean(progress && (progress.streaming || progress.activeTools.length || progress.completedTools.length || progress.reasoningStreamContent || progress.iteration))
   const iterations = message.iterations ?? progress?.iterationHistory ?? []
   const iterationDefaultOpen = defaultOpenForLevel(collapseLevel, 'iteration')
   const reasoningDefaultOpen = defaultOpenForLevel(collapseLevel, 'reasoning')

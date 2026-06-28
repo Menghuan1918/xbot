@@ -1,42 +1,43 @@
 /**
  * useProgressStream — subscribes a ProgressStore to the WS event stream for one
- * chatID and exposes the live progress + streaming-preview message (Spec 4).
+ * chatID and exposes the live progress + streaming-preview message (Spec 3/4).
  *
  * Event mapping (see protocol/ws.go, channel/web/web.go):
- *   stream_content     → append to streamContent / reasoningContent (throttled)
- *   progress_structured → update activeTools/completedTools/iteration/reasoning
- *   text               → finalize: hand the full text to `onAssistantComplete`,
- *                        then clear the store for the next turn.
- *   session(idle)      → if still streaming with accumulated content, finalize
- *                        using the accumulated text (resilience for servers
- *                        that close without a trailing `text`).
+ *   stream_content      → append to streamContent/reasoningStreamContent +
+ *                         patch streamingTools (stream-only, no snapshot replace)
+ *   progress_structured → applyStructuredEvent (carry-forward + iteration
+ *                         snapshot + replace non-stream fields)
+ *   text                → finalize: hand the full text to onAssistantComplete,
+ *                         then reset the store for the next turn.
+ *   session(HistoryCompacted) → onHistoryCompacted (reset + reload)
+ *   session(idle)       → defensive finalize if stream content accumulated
+ *                         without a trailing `text`.
  *
  * The hook returns:
- *   - `progress`: throttled immutable LiveProgress snapshot (useSyncExternalStore)
- *   - `liveMessage`: a transient assistant ChatMessage built from the current
- *     stream, so the list can render it inline without waiting for finalization.
+ *   - `progressSnapshot`: throttled immutable ProgressSnapshot (useSyncExternalStore)
+ *   - `liveMessage`: a transient assistant ChatMessage built from the snapshot,
+ *     so the list can render it inline without waiting for finalization.
+ *   - `isStreaming`: true while there is accumulated streaming content.
  *
  * `liveMessage` is derived from the same store snapshot (memoized), so it only
  * changes when the snapshot changes — i.e. at most once per frame.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { useSyncExternalStore } from 'react'
 
-import { ProgressStore } from '@/components/agent/progressStore'
+import { ProgressStore, normalizeWebTools } from '@/components/agent/progressStore'
 import {
   historyProgressToLive,
-  normalizeIteration,
-  normalizeTool,
-  parseIterations,
+  normalizeWebIteration,
+  parseWebIterations,
 } from '@/components/agent/normalize'
 import type { WSConnection } from '@/types/ws'
-import {
-  EMPTY_LIVE_PROGRESS,
-  type ChatMessage,
-  type IterationSnapshot,
-  type LiveProgress,
-  type ToolProgress,
-} from '@/types/agent'
+import type {
+  ProgressSnapshot,
+  WebIteration,
+  ChatMessage,
+} from '@/types/shared'
+import { EMPTY_PROGRESS_SNAPSHOT } from '@/types/shared'
 import type { HistProgress } from '@/components/agent/api'
 import type { WSMessage } from '@/types/shared'
 
@@ -44,7 +45,9 @@ interface UseProgressStreamOptions {
   /** Chat ID this stream tracks (events for other chats are ignored). */
   chatID: string | null
   /** Called with the finalized assistant text when a `text` event arrives. */
-  onAssistantComplete?: (finalText: string, iterations: IterationSnapshot[]) => void
+  onAssistantComplete?: (finalText: string, iterations: WebIteration[]) => void
+  /** Called when the server signals HistoryCompacted (reset + reload). */
+  onHistoryCompacted?: () => void
   /**
    * Optional live-progress snapshot from history (active_progress). When the
    * tracked chat is busy (phase != done) this hydrates the store so a page
@@ -57,16 +60,44 @@ interface UseProgressStreamOptions {
 }
 
 export interface UseProgressStreamResult {
-  progress: LiveProgress
+  /** Throttled immutable progress snapshot. */
+  progressSnapshot: ProgressSnapshot
   /** Transient streaming assistant message, or null when idle. */
   liveMessage: ChatMessage | null
   /** True while there is accumulated streaming content. */
   isStreaming: boolean
 }
 
+/**
+ * 3-layer chatID check: some messages carry chat_id at the top level (text),
+ * some in msg.session.chat_id (session events), and some in msg.progress.chat_id
+ * with a "web:" prefix (stream_content, progress_structured). Strip the prefix
+ * and compare.
+ *
+ * If the message carries NO chat_id in any layer, it passes through (legacy
+ * behavior — early events may not carry chat_id).
+ */
+export function matchesChatID(msg: WSMessage, targetChatID: string): boolean {
+  // If no chat_id anywhere, don't filter (legacy behavior)
+  if (!msg.chat_id && !msg.session?.chat_id && !msg.progress?.chat_id) {
+    return true
+  }
+  // Layer 1: top-level chat_id
+  if (msg.chat_id === targetChatID) return true
+  // Layer 2: session.chat_id
+  if (msg.session?.chat_id === targetChatID) return true
+  // Layer 3: progress.chat_id (strip "web:" prefix)
+  if (msg.progress?.chat_id) {
+    const stripped = String(msg.progress.chat_id).replace(/^web:/, '')
+    if (stripped === targetChatID) return true
+  }
+  return false
+}
+
 export function useProgressStream({
   chatID,
   onAssistantComplete,
+  onHistoryCompacted,
   initialProgress,
   ws,
 }: UseProgressStreamOptions): UseProgressStreamResult {
@@ -76,80 +107,77 @@ export function useProgressStream({
   }
   const store = storeRef.current
 
-  // Keep the latest completion callback in a ref so the effect's handlers don't
-  // re-subscribe whenever the parent re-renders.
+  // Keep the latest callbacks in refs so the effect's handlers don't re-subscribe
+  // whenever the parent re-renders.
   const completeRef = useRef(onAssistantComplete)
   completeRef.current = onAssistantComplete
+  const compactedRef = useRef(onHistoryCompacted)
+  compactedRef.current = onHistoryCompacted
 
   // Track chatID inside the handlers via ref so we don't tear down the store on
   // every chat switch (we just reset it).
   const chatIDRef = useRef(chatID)
   chatIDRef.current = chatID
 
-  const progress = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const [liveId] = useState(() => `live-${Math.random().toString(36).slice(2, 9)}`)
+  const progressSnapshot = useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+    store.getSnapshot,
+  )
 
+  // Reset and hydrate when chatID or initialProgress changes.
   useEffect(() => {
-    // Reset progress whenever the tracked chat changes, then hydrate from the
-    // history active_progress snapshot if the session is still busy (phase !=
-    // done). This resumes the progress panel after a page refresh (Spec §3.8).
     store.reset()
-    const snap = initialProgress
-    if (snap && snap.phase && snap.phase !== 'done') {
-      const live = historyProgressToLive(snap)
-      store.replace({
-        streamContent: live.streamContent,
-        reasoningContent: '',
-        activeTools: live.activeTools,
-        completedTools: live.completedTools,
-        iteration: live.iteration,
-        iterationHistory: live.iterations,
-        streaming: true,
-      })
+    if (!initialProgress || !initialProgress.phase || initialProgress.phase === 'done') return
+    const live = historyProgressToLive(initialProgress)
+    // Only hydrate if we got something meaningful (non-empty snapshot)
+    if (live.phase) {
+      store.replace(live)
     }
   }, [store, chatID, initialProgress])
 
+  // Dispose on unmount.
   useEffect(() => {
-    // Reset on (un)mount.
     return () => {
       store.dispose()
       storeRef.current = null
     }
   }, [store])
 
+  // Subscribe to WS messages.
   useEffect(() => {
     const offMessage = ws.onMessage((msg: WSMessage) => {
-      // Unified chatID filtering: some messages carry chat_id at the top
-      // level (text), some in msg.session.chat_id (session events), and
-      // some in msg.progress.chat_id with a "web:" prefix (stream_content,
-      // progress_structured). Check all three and strip the "web:" prefix.
-      const eventChatID = msg.chat_id
-        ?? msg.session?.chat_id
-        ?? (msg.progress?.chat_id ? String(msg.progress.chat_id).replace(/^web:/, '') : undefined)
-      if (chatIDRef.current && eventChatID && eventChatID !== chatIDRef.current) {
+      // 3-layer chatID filtering.
+      if (chatIDRef.current && !matchesChatID(msg, chatIDRef.current)) {
         return
       }
-      handleProgressMessage(msg, store, completeRef)
+      handleProgressMessage(msg, store, completeRef, compactedRef)
     })
     return offMessage
   }, [ws, store])
 
   // Derive a transient streaming message from the snapshot. Only the snapshot's
-  // streamContent drives this, so it updates at frame rate (not per token).
+  // streamContent/streaming drives this, so it updates at frame rate (not per token).
   const liveMessage = useMemo<ChatMessage | null>(() => {
-    if (!progress.streamContent && !progress.streaming) return null
-    return {
-      id: liveId,
-      role: 'assistant',
-      content: progress.streamContent,
-      iterations: progress.iterationHistory,
+    const snap = progressSnapshot
+    if (!snap.streamContent && !snap.streaming && !snap.reasoningStreamContent) {
+      return null
     }
-  }, [progress, liveId])
+    return {
+      id: `live-${chatID ?? 'unknown'}`,
+      role: 'assistant',
+      content: snap.streamContent || '',
+      iterations: snap.iterationHistory,
+      timestamp: new Date().toISOString(),
+      isPartial: true,
+      turnID: 0,
+    }
+  }, [progressSnapshot, chatID])
 
   return {
-    progress: progress ?? EMPTY_LIVE_PROGRESS,
+    progressSnapshot: progressSnapshot ?? EMPTY_PROGRESS_SNAPSHOT,
     liveMessage,
-    isStreaming: progress.streaming || Boolean(progress.streamContent),
+    isStreaming: progressSnapshot.streaming || Boolean(progressSnapshot.streamContent),
   }
 }
 
@@ -158,72 +186,94 @@ function handleProgressMessage(
   msg: WSMessage,
   store: ProgressStore,
   completeRef: React.MutableRefObject<UseProgressStreamOptions['onAssistantComplete']>,
+  compactedRef: React.MutableRefObject<UseProgressStreamOptions['onHistoryCompacted']>,
 ): void {
   switch (msg.type) {
     case 'stream_content': {
-      // stream_content carries content in progress.stream_content /
+      // stream_content carries content deltas in progress.stream_content /
       // progress.reasoning_stream_content (channel/web/web.go SendStreamContent).
+      // Also carries streaming_tools (generating status, for tool name detection).
       const p = msg.progress
-      if (p?.stream_content) store.appendStreamContent(String(p.stream_content))
-      if (p?.reasoning_stream_content) {
+      if (!p) return
+
+      // Append text deltas (stream-only, does not replace the snapshot)
+      if (p.stream_content) store.appendStreamContent(String(p.stream_content))
+      if (p.reasoning_stream_content) {
         store.appendReasoningContent(p.reasoning_stream_content)
+      }
+      // Streaming tools (generating status) — patch only, no snapshot replace
+      if (p.streaming_tools) {
+        store.setStreamOnlyFields({
+          streamingTools: normalizeWebTools(p.streaming_tools as unknown[]),
+        })
       }
       return
     }
+
     case 'progress_structured': {
       const p = msg.progress
       if (!p) return
-      const active = p.active_tools
-        ? (p.active_tools.map(normalizeTool).filter(Boolean) as ToolProgress[])
-        : undefined
-      const completed = p.completed_tools
-        ? (p.completed_tools.map(normalizeTool).filter(Boolean) as ToolProgress[])
-        : undefined
+
+      // Normalize tools from the structured event
+      const active = normalizeWebTools(p.active_tools)
+      const completed = normalizeWebTools(p.completed_tools)
       const iteration = typeof p.iteration === 'number' ? p.iteration : undefined
+      const phase = typeof p.phase === 'string' ? p.phase : undefined
+      const reasoning = typeof p.reasoning === 'string' ? p.reasoning : undefined
+
+      // Iteration history (live, from the structured event)
+      let iterHistory: WebIteration[] | undefined
+      if (Array.isArray(p.iteration_history)) {
+        iterHistory = p.iteration_history
+          .map(normalizeWebIteration)
+          .filter(Boolean) as WebIteration[]
+      }
+
+      // Apply structured event with carry-forward (stream-only fields preserved)
       store.setStructuredTools({
-        activeTools: active,
-        completedTools: completed,
+        phase,
         iteration,
-        streaming: p.phase && p.phase !== 'done' ? true : undefined,
+        activeTools: active.length ? active : undefined,
+        completedTools: completed.length ? completed : undefined,
+        reasoning,
+        iterationHistory: iterHistory,
       })
-      // Reasoning block text may arrive via progress.reasoning.
-      if (typeof p.reasoning === 'string' && p.reasoning) {
-        // Reasoning is a snapshot, not a delta; replace rather than append.
-        store.mutate((d) => {
-          d.reasoningContent = p.reasoning as string
-        })
-      }
-      // Iteration history snapshot (live).
-      const hist = p.iteration_history
-      if (Array.isArray(hist)) {
-        const snaps = hist.map(normalizeIteration).filter(Boolean) as IterationSnapshot[]
-        store.mutate((d) => {
-          d.iterationHistory = snaps
-        })
-      }
       return
     }
+
     case 'text': {
       // Final assistant message: commit then clear the live stream.
       const finalText = msg.content ?? ''
-      const iterations = parseIterations(msg.progress_history)
+      const iterations = parseWebIterations(msg.progress_history)
       store.reset()
       completeRef.current?.(finalText, iterations)
       return
     }
+
     case 'session': {
+      const action = msg.session?.action
+
+      // HistoryCompacted: reset store and trigger reload
+      if (action === 'HistoryCompacted') {
+        store.reset()
+        compactedRef.current?.()
+        return
+      }
+
       // On idle, if we had accumulated stream content without a closing text,
       // finalize defensively.
-      const snap = store.getSnapshot()
-      const action = msg.session?.action
-      if (action === 'idle' && snap.streamContent) {
-        const text = snap.streamContent
-        const iters = snap.iterationHistory
-        store.reset()
-        completeRef.current?.(text, iters)
+      if (action === 'idle') {
+        const snap = store.getSnapshot()
+        if (snap.streamContent) {
+          const text = snap.streamContent
+          const iters = snap.iterationHistory
+          store.reset()
+          completeRef.current?.(text, iters)
+        }
       }
       return
     }
+
     default:
       return
   }

@@ -1,17 +1,54 @@
 /**
  * Normalizers turning raw backend shapes (history rows, WS progress payloads,
- * iteration-history JSON) into the clean Agent domain types (Spec 4).
+ * iteration-history JSON) into the clean Agent domain types (Spec 3/4).
  *
  * Shared by useChatMessages (history hydration) and useProgressStream (live
  * events) so the two paths never diverge on how a tool/iteration is parsed.
  */
+import {
+  normalizeWebTool,
+  normalizeWebTools,
+} from '@/components/agent/progressStore'
 import type { HistProgress } from '@/components/agent/api'
+import type { WebIteration, WebToolProgress, ProgressSnapshot } from '@/types/shared'
+import { EMPTY_PROGRESS_SNAPSHOT } from '@/types/shared'
 import type { IterationSnapshot, IterationTool, ToolProgress } from '@/types/agent'
 
+// ── WebIteration normalizers (Spec 3 shared types) ─────────────────────────
+
+/** Coerce a raw iteration-history entry into WebIteration.
+ *  Reads `tools` (from `detail` JSON) and falls back to `completed_tools`
+ *  (the slim histIterSnapshot shape from GET /api/history active_progress). */
+export function normalizeWebIteration(raw: unknown): WebIteration | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Record<string, unknown>
+  const rawTools = Array.isArray(r.tools) ? r.tools : Array.isArray(r.completed_tools) ? r.completed_tools : []
+  const tools = rawTools.map(normalizeWebTool).filter(Boolean) as WebToolProgress[]
+  return {
+    iteration: typeof r.iteration === 'number' ? r.iteration : 0,
+    thinking: typeof r.thinking === 'string' ? r.thinking : '',
+    reasoning: typeof r.reasoning === 'string' ? r.reasoning : '',
+    tools,
+    toolCount: tools.length,
+  }
+}
+
+/** Parse a `detail`/`progress_history` JSON string into WebIteration[]. */
+export function parseWebIterations(json: string | undefined | null): WebIteration[] {
+  if (!json) return []
+  try {
+    const parsed = JSON.parse(json)
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(normalizeWebIteration).filter(Boolean) as WebIteration[]
+  } catch {
+    return []
+  }
+}
+
+// ── Legacy normalizers (kept for backward compat with components using IterationSnapshot) ──
+
 /** Coerce a raw iteration-history entry (from `detail` JSON) into IterationSnapshot.
- *  Reads `tools` (IterationSnapshot JSON from `detail`/`progress_history`) and
- *  falls back to `completed_tools` (the slim histIterSnapshot shape from
- *  GET /api/history active_progress). */
+ *  @deprecated use normalizeWebIteration instead */
 export function normalizeIteration(raw: unknown): IterationSnapshot | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
@@ -37,7 +74,8 @@ export function normalizeIterationTool(raw: unknown): IterationTool | null {
   }
 }
 
-/** Coerce a raw tool_calls/active_tools entry (from a progress event) into ToolProgress. */
+/** Coerce a raw tool_calls/active_tools entry (from a progress event) into ToolProgress.
+ *  @deprecated use normalizeWebTool from progressStore instead */
 export function normalizeTool(raw: unknown): ToolProgress | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
@@ -53,7 +91,8 @@ export function normalizeTool(raw: unknown): ToolProgress | null {
   }
 }
 
-/** Parse a `detail`/`progress_history` JSON string into iteration snapshots. */
+/** Parse a `detail`/`progress_history` JSON string into IterationSnapshot[].
+ *  @deprecated use parseWebIterations instead */
 export function parseIterations(json: string | undefined | null): IterationSnapshot[] {
   if (!json) return []
   try {
@@ -65,31 +104,34 @@ export function parseIterations(json: string | undefined | null): IterationSnaps
   }
 }
 
+// ── History hydration (Spec 3 §2.4) ─────────────────────────────────────────
+
 /**
- * Normalize a history `active_progress` snapshot into live tool lists +
- * iterations + stream content, so a busy session resumed after a page refresh
- * can hydrate the ProgressStore (Spec 4 §3.8: "if processing=true → show the
- * progress panel").
+ * Normalize a history `active_progress` snapshot into a ProgressSnapshot
+ * suitable for store.replace(). A busy session (phase != done) resumed after
+ * a page refresh can hydrate the ProgressStore so the progress panel resumes
+ * instead of showing an empty stream.
  */
-export function historyProgressToLive(p: HistProgress | null): {
-  activeTools: ToolProgress[]
-  completedTools: ToolProgress[]
-  iterations: IterationSnapshot[]
-  streamContent: string
-  iteration: number
-} {
-  if (!p)
-    return { activeTools: [], completedTools: [], iterations: [], streamContent: '', iteration: 0 }
-  const active = (p.active_tools ?? []).map(normalizeTool).filter(Boolean) as ToolProgress[]
-  const completed = (p.completed_tools ?? []).map(normalizeTool).filter(Boolean) as ToolProgress[]
-  const iterations = (p.iteration_history ?? [])
-    .map(normalizeIteration)
-    .filter(Boolean) as IterationSnapshot[]
+export function historyProgressToLive(p: HistProgress | null): ProgressSnapshot {
+  if (!p || !p.phase || p.phase === 'done') {
+    return { ...EMPTY_PROGRESS_SNAPSHOT }
+  }
+  const active = normalizeWebTools(p.active_tools)
+  const completed = normalizeWebTools(p.completed_tools)
+  const iterHistory = (p.iteration_history ?? [])
+    .map(normalizeWebIteration)
+    .filter(Boolean) as WebIteration[]
   return {
+    phase: p.phase,
+    iteration: typeof p.iteration === 'number' ? p.iteration : 0,
+    streamContent: p.stream_content ?? '',
+    reasoningStreamContent: '',
+    streaming: true,
     activeTools: active,
     completedTools: completed,
-    iterations,
-    streamContent: p.stream_content ?? '',
-    iteration: typeof p.iteration === 'number' ? p.iteration : 0,
+    iterationHistory: iterHistory,
+    streamingTools: [],
+    lastIter: typeof p.iteration === 'number' ? p.iteration : 0,
+    lastReasoning: '',
   }
 }
