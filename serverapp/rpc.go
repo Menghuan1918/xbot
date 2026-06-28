@@ -24,11 +24,27 @@ var rpcCtxKey = rpcCtxKeyType{}
 type RPCCtxData struct {
 	AuthSenderID string
 	BizID        string
+	// ActiveChannel/ActiveChatID are the user's currently active session
+	// (channel + chatID), resolved from the web channel's getCurrentSession.
+	// When non-empty, RPCs that resolve sessions by channel+chatID should use
+	// these instead of falling back to defaults ("web" / bizID).
+	ActiveChannel string
+	ActiveChatID  string
 }
 
 // WithRPCCtx injects per-request identity into context.
 func WithRPCCtx(ctx context.Context, authSenderID, bizID string) context.Context {
 	return context.WithValue(ctx, rpcCtxKey, &RPCCtxData{AuthSenderID: authSenderID, BizID: bizID})
+}
+
+// WithRPCCtxActive injects per-request identity + active session into context.
+func WithRPCCtxActive(ctx context.Context, authSenderID, bizID, activeChannel, activeChatID string) context.Context {
+	return context.WithValue(ctx, rpcCtxKey, &RPCCtxData{
+		AuthSenderID:  authSenderID,
+		BizID:         bizID,
+		ActiveChannel: activeChannel,
+		ActiveChatID:  activeChatID,
+	})
 }
 
 func rpcAuthID(ctx context.Context) string {
@@ -41,6 +57,20 @@ func rpcAuthID(ctx context.Context) string {
 func rpcBizID(ctx context.Context) string {
 	if v, ok := ctx.Value(rpcCtxKey).(*RPCCtxData); ok {
 		return v.BizID
+	}
+	return ""
+}
+
+func rpcActiveChannel(ctx context.Context) string {
+	if v, ok := ctx.Value(rpcCtxKey).(*RPCCtxData); ok {
+		return v.ActiveChannel
+	}
+	return ""
+}
+
+func rpcActiveChatID(ctx context.Context) string {
+	if v, ok := ctx.Value(rpcCtxKey).(*RPCCtxData); ok {
+		return v.ActiveChatID
 	}
 	return ""
 }

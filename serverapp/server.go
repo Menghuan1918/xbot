@@ -735,7 +735,10 @@ func Run(args []string) error {
 	// Wire RPC handler for CLI RemoteBackend clients (after disp/msgBus are available).
 	if webCh != nil {
 		webCh.SetRPCHandler(func(method string, params json.RawMessage, senderID string) (json.RawMessage, error) {
-			return HandleCLIRPC(rpcTable, method, params, senderID)
+			// Resolve the user's active session so RPCs like get_cwd/set_cwd
+			// can use it when params don't carry explicit channel/chat_id.
+			sel := webCh.GetCurrentSession(senderID)
+			return HandleCLIRPCActive(rpcTable, method, params, senderID, sel.Channel, sel.ChatID)
 		})
 	}
 

@@ -748,7 +748,7 @@ func (wc *WebChannel) validateCLIToken(token string) (string, error) {
 // Waits up to 2s for the client's sync message, then replays.
 func (wc *WebChannel) replayMissedEvents(client *Client, senderID string) {
 	// Resolve the user's currently active session (channel + chatID, respects chat switching)
-	sel := wc.getCurrentSession(senderID)
+	sel := wc.GetCurrentSession(senderID)
 	chatID := sel.ChatID
 	// The client sends sync immediately after WS connect.
 	// If no sync arrives within 2s, send current state anyway (backward compat).
@@ -948,7 +948,7 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 			// Reuse existing /cancel mechanism: push "/cancel" text into msgBus.
 			// Resolve business channel/chatID from getCurrentSession (same as message handler)
 			// so the cancel key matches the one used during message processing.
-			cancelSel := wc.getCurrentSession(c.userID)
+			cancelSel := wc.GetCurrentSession(c.userID)
 			msgChannel := cancelSel.Channel
 			msgChatID := cancelSel.ChatID
 			msgSenderID := c.userID
@@ -1097,7 +1097,7 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 			}
 
 			// Resolve active session (channel + chatID) — supports cross-channel browsing.
-			sel := wc.getCurrentSession(c.userID)
+			sel := wc.GetCurrentSession(c.userID)
 			msgChannel := sel.Channel
 			msgSenderID := c.userID
 			msgSenderName := username
@@ -1170,7 +1170,7 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 			}
 			// Resolve business channel/chatID (same as message/cancel handlers)
 			// so the response routes to the correct chatroom session.
-			respSel := wc.getCurrentSession(c.userID)
+			respSel := wc.GetCurrentSession(c.userID)
 			respChatID := respSel.ChatID
 			respChannel := respSel.Channel
 			if c.isCLI && msg.Channel != "" && msg.ChatID != "" {

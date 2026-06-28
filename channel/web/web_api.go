@@ -87,7 +87,7 @@ func (wc *WebChannel) handleHistory(w http.ResponseWriter, r *http.Request) {
 func (wc *WebChannel) handleHistoryGet(w http.ResponseWriter, r *http.Request, senderID string) {
 
 	// Use the currently active session (channel + chatID, respects chat switching)
-	sel := wc.getCurrentSession(senderID)
+	sel := wc.GetCurrentSession(senderID)
 
 	// Cross-channel access requires admin.
 	if sel.Channel != "web" && !wc.isAdmin(r.Context(), senderID) {
@@ -227,7 +227,7 @@ func (wc *WebChannel) handleHistoryGet(w http.ResponseWriter, r *http.Request, s
 // handleHistoryDelete clears all messages for the current user.
 func (wc *WebChannel) handleHistoryDelete(w http.ResponseWriter, r *http.Request, senderID string) {
 	// Use the currently active session (channel + chatID, respects chat switching)
-	sel := wc.getCurrentSession(senderID)
+	sel := wc.GetCurrentSession(senderID)
 
 	// Cross-channel history deletion is not allowed — admin can browse but
 	// not delete other channels' history from the Web UI.
@@ -1200,7 +1200,7 @@ func (wc *WebChannel) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find tenant ID for this user's active session
-	sel := wc.getCurrentSession(senderID)
+	sel := wc.GetCurrentSession(senderID)
 	// Cross-channel access requires admin.
 	if sel.Channel != "web" && !wc.isAdmin(r.Context(), senderID) {
 		jsonErrorResponse(w, http.StatusForbidden, "access denied")
@@ -1400,7 +1400,7 @@ func (wc *WebChannel) handleSessionMessages(w http.ResponseWriter, r *http.Reque
 // handleMainSessionMessages returns the main conversation history as session messages.
 func (wc *WebChannel) handleMainSessionMessages(w http.ResponseWriter, r *http.Request, senderID string) {
 	// Use the currently active session (channel + chatID, respects chat switching)
-	sel := wc.getCurrentSession(senderID)
+	sel := wc.GetCurrentSession(senderID)
 	// Cross-channel access requires admin.
 	if sel.Channel != "web" && !wc.isAdmin(r.Context(), senderID) {
 		jsonErrorResponse(w, http.StatusForbidden, "access denied")
@@ -1481,7 +1481,7 @@ func (wc *WebChannel) handleChats(w http.ResponseWriter, r *http.Request) {
 		}
 		// getCurrentSession already returns the right {channel, chatID};
 		// only use it when the requested channel matches the active session.
-		sel := wc.getCurrentSession(senderID)
+		sel := wc.GetCurrentSession(senderID)
 		currentChatID := sel.ChatID
 		if sel.Channel != channel {
 			// Listing a different channel — no "current" chat to highlight
@@ -1684,7 +1684,7 @@ func (wc *WebChannel) handleContextInfo(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Use the currently active session (channel + chatID, respects chat switching)
-	sel := wc.getCurrentSession(senderID)
+	sel := wc.GetCurrentSession(senderID)
 	// Cross-channel access requires admin.
 	if sel.Channel != "web" && !wc.isAdmin(r.Context(), senderID) {
 		jsonErrorResponse(w, http.StatusForbidden, "access denied")
@@ -1754,8 +1754,9 @@ func (wc *WebChannel) getCurrentChatID(senderID string) string {
 	return senderID
 }
 
-// getCurrentSession returns the active SessionSelector (channel + chatID).
-func (wc *WebChannel) getCurrentSession(senderID string) SessionSelector {
+// GetCurrentSession returns the active SessionSelector (channel + chatID).
+// Public so serverapp can inject it into RPC context for get_cwd/set_cwd.
+func (wc *WebChannel) GetCurrentSession(senderID string) SessionSelector {
 	wc.userCurrentSessionMu.RLock()
 	defer wc.userCurrentSessionMu.RUnlock()
 	if sel, ok := wc.userCurrentSession[senderID]; ok {

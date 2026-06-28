@@ -241,10 +241,7 @@ export function useTerminal(tabManager: TabManager): TerminalManager {
     let cwd = ''
     if (chatID) {
       try {
-        const r = await ws.rpc<{ dir?: string }>('get_cwd', {
-          channel: 'web',
-          chat_id: chatID,
-        })
+        const r = await ws.rpc<{ dir?: string }>('get_cwd')
         cwd = r?.dir ?? ''
       } catch {
         /* non-fatal; backend falls back to the user's home dir */

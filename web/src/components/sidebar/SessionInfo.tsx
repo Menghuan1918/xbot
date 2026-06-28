@@ -53,7 +53,7 @@ export function SessionInfo() {
     }
     setCwdBusy(true)
     try {
-      await ws.rpc('set_cwd', { channel: 'web', chat_id: activeId ?? '', dir: path })
+      await ws.rpc('set_cwd', { dir: path })
       // Manually update CwdContext — the CwdProvider listens to progress
       // events for CWD changes, but set_cwd RPC doesn't emit a progress event.
       // We dispatch a synthetic update by calling get_cwd after set_cwd.

@@ -161,11 +161,20 @@ func registerSettingsHandlers(t RPCTable, h *RPCContext) {
 		ChatID  string `json:"chat_id"`
 		Dir     string `json:"dir"`
 	}) error {
-		if err := ownOrAdmin(ctx, p.ChatID); err != nil {
+		channel := p.Channel
+		chatID := p.ChatID
+		// When params are empty, use the active session from RPC context.
+		if channel == "" {
+			channel = rpcActiveChannel(ctx)
+		}
+		if chatID == "" {
+			chatID = rpcActiveChatID(ctx)
+		}
+		if err := ownOrAdmin(ctx, chatID); err != nil {
 			return err
 		}
 		// SetCWD internally refreshes plugin workDir with correct tenantID
-		return h.Ag.SetCWD(p.Channel, p.ChatID, p.Dir)
+		return h.Ag.SetCWD(channel, chatID, p.Dir)
 	})
 	t["get_cwd"] = rpc1(func(ctx context.Context, p struct {
 		Channel string `json:"channel"`
@@ -174,6 +183,15 @@ func registerSettingsHandlers(t RPCTable, h *RPCContext) {
 		bizID := rpcBizID(ctx)
 		channel := p.Channel
 		chatID := p.ChatID
+		if channel == "" {
+			// Use the active session's channel from RPC context.
+			channel = rpcActiveChannel(ctx)
+		}
+		if chatID == "" {
+			// Use the active session's chatID from RPC context.
+			chatID = rpcActiveChatID(ctx)
+		}
+		// Final fallback: default channel and bizID.
 		if channel == "" {
 			channel = "web"
 		}
@@ -1314,6 +1332,16 @@ func HandleCLIRPC(table RPCTable, method string, params json.RawMessage, senderI
 	return table.Dispatch(ctx, method, params)
 }
 
+// HandleCLIRPCActive is like HandleCLIRPC but also injects the user's active
+// session (channel + chatID) into the RPC context. RPCs that resolve sessions
+// by channel+chatID (get_cwd, set_cwd, list_files, etc.) use these instead of
+// falling back to defaults when the client doesn't pass explicit params.
+func HandleCLIRPCActive(table RPCTable, method string, params json.RawMessage, senderID, activeChannel, activeChatID string) (json.RawMessage, error) {
+	bizID := senderIDFromParams(params, senderID)
+	ctx := WithRPCCtxActive(context.Background(), senderID, bizID, activeChannel, activeChatID)
+	return table.Dispatch(ctx, method, params)
+}
+
 // ── Complex subscription handlers (extracted for readability) ──
 
 func (h *RPCContext) listSubscriptions(ctx context.Context) ([]channel.Subscription, error) {
@@ -1613,8 +1641,16 @@ func marshalBgTasks(tasks []*tools.BackgroundTask) []bgTaskJSON {
 
 // resolveSessionCwd resolves the working directory for the session identified
 // by channel+chatID, falling back to the configured agent work directory.
+// When channel/chatID are empty, uses the active session from RPC context.
 func (h *RPCContext) resolveSessionCwd(ctx context.Context, channel, chatID string) (string, error) {
 	bizID := rpcBizID(ctx)
+	if channel == "" {
+		channel = rpcActiveChannel(ctx)
+	}
+	if chatID == "" {
+		chatID = rpcActiveChatID(ctx)
+	}
+	// Final fallback.
 	if channel == "" {
 		channel = "web"
 	}
