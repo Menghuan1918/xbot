@@ -382,6 +382,9 @@
   --dv-inactivegroup-hiddenpanel-tab-background-color: var(--bg-tertiary);
   --dv-draggable-tabs-active-tab-color: var(--text-primary);
   --dv-draggable-tabs-inactive-tab-color: var(--text-secondary);
+  /* Override VS theme's default 20px tab height to match our 35px TabHeader */
+  --dv-tabs-and-actions-container-height: 35px;
+  --dv-tabs-and-actions-container-font-size: 13px;
 }
 
 /* Remove VS theme decorative borders — replaces fragile inline style approach */

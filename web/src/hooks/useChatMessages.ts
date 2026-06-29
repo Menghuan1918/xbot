@@ -71,28 +71,67 @@ export interface Attachments {
 }
 
 /**
- * Parse raw history rows into ChatMessage[], filtering out:
- *   - display_only messages (cron results, [interrupted] markers)
- *   - intermediate assistant messages (empty content + no detail + has
- *     tool_calls) — their iteration info is captured in the final message's
- *     `detail` field, so showing them would produce duplicate empty bubbles.
+ * Parse raw history rows into ChatMessage[], porting master's defensive logic:
  *
- * Spec 5 §2.5 — aligned with TUI's history filtering logic.
+ * 1. Skip display_only messages (cron results, [interrupted] markers).
+ * 2. Parse `detail` JSON into WebIteration[] for each message.
+ * 3. Tool_calls fallback: if NO message in the entire history has a non-empty
+ *    detail, synthesize iteration history from tool_calls — preserves tool
+ *    visibility for cancelled/unsaved runs (master ChatPage.tsx:607-623).
+ * 4. Compression tool summary stripping: clear content of assistant messages
+ *    that are >500 chars, start with `- **ToolName**:`, and have no
+ *    tool_calls/detail — these are LLM-context compression artifacts (master
+ *    ChatPage.tsx:638-646).
+ * 5. Broader empty filter: skip assistant messages with no content AND no
+ *    iterations (master ChatPage.tsx:654).
+ * 6. Merge consecutive tool_calls-only fallback messages into one message
+ *    with sequential iteration numbers (master ChatPage.tsx:656-663).
  */
 function parseHistoryMessages(rows: HistMsg[]): ChatMessage[] {
+  // First pass: check if any message has a non-empty detail.
+  const hasDetailInHistory = rows.some(
+    (m) => m.detail && m.detail.trim() !== '' && m.detail.trim() !== '[]',
+  )
+
+  // Second pass: normalize each row, with tool_calls fallback if needed.
   const normalized: ChatMessage[] = []
   for (const m of rows) {
-    // Skip display_only messages (cron results, [interrupted] markers).
+    // Skip display_only messages.
     if (m.display_only) continue
 
-    // Skip intermediate assistant messages: no content, no detail, has
-    // tool_calls — these are intermediate iterations whose info is
-    // already captured in the final message's detail field.
+    // Parse iterations from detail (primary path).
+    let iterations: WebIteration[] = parseWebIterations(m.detail ?? undefined)
+
+    // Tool_calls fallback: if no message in history has detail, synthesize
+    // iterations from tool_calls (preserves tool visibility for cancelled runs).
+    if (
+      !hasDetailInHistory &&
+      m.role === 'assistant' &&
+      m.tool_calls &&
+      (!m.content || m.content.trim() === '')
+    ) {
+      iterations = synthesizeIterationsFromToolCalls(m.tool_calls)
+    }
+
+    // Compression tool summary stripping: clear content if it's a compression
+    // artifact (starts with `- **ToolName**:`, >500 chars, no tool_calls/detail).
+    let content = m.content ?? ''
     if (
       m.role === 'assistant' &&
-      (!m.content || m.content.trim() === '') &&
-      !m.detail &&
-      m.tool_calls
+      content.length > 500 &&
+      !m.tool_calls &&
+      (!m.detail || m.detail.trim() === '') &&
+      /^\s*-\s+\*\*/.test(content)
+    ) {
+      content = ''
+    }
+
+    // Broader empty filter: skip assistant messages with no content AND no
+    // iterations (not just ones with tool_calls — catches all empty shells).
+    if (
+      m.role === 'assistant' &&
+      (!content || content.trim() === '') &&
+      iterations.length === 0
     ) {
       continue
     }
@@ -100,16 +139,50 @@ function parseHistoryMessages(rows: HistMsg[]): ChatMessage[] {
     normalized.push({
       id: String(m.id),
       role: m.role,
-      content: m.content ?? '',
-      iterations: parseWebIterations(m.detail ?? undefined),
+      content,
+      iterations,
       timestamp: m.created_at ?? '',
       isPartial: false,
       turnID: 0,
       displayOnly: m.display_only,
     })
   }
+
   // Apply dedup (harmless for history — turnID=0 means keep all).
   return dedupMessages(normalized)
+}
+
+/**
+ * Synthesize WebIteration[] from tool_calls JSON (fallback when no detail).
+ * Parses the tool_calls array and maps each call to a tool progress entry.
+ */
+function synthesizeIterationsFromToolCalls(toolCalls: unknown): WebIteration[] {
+  try {
+    const calls = typeof toolCalls === 'string' ? JSON.parse(toolCalls) : toolCalls
+    if (!Array.isArray(calls) || calls.length === 0) return []
+    return [{
+      iteration: 0,
+      thinking: '',
+      reasoning: '',
+      tools: calls.map((call: Record<string, unknown>) => {
+        const fn = (call.function ?? {}) as Record<string, unknown>
+        const name = String(fn.name ?? call.name ?? 'tool')
+        return {
+          name,
+          label: name,
+          status: 'done' as const,
+          elapsedMs: 0,
+          summary: '',
+          detail: '',
+          args: typeof fn.arguments === 'string' ? fn.arguments : '',
+          toolHints: '',
+        }
+      }),
+      toolCount: calls.length,
+    }]
+  } catch {
+    return []
+  }
 }
 
 let echoSeq = 0

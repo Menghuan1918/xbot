@@ -275,6 +275,11 @@ class ReactTabRenderer implements ITabRenderer {
   constructor(ctxRef: RefObject<DockviewContextValue>) {
     this.ctxRef = ctxRef
     this.element = document.createElement('div')
+    // Ensure the renderer element fills its .dv-tab parent and constrains content
+    this.element.style.height = '100%'
+    this.element.style.width = '100%'
+    this.element.style.display = 'flex'
+    this.element.style.overflow = 'hidden'
   }
 
   init(parameters: TabPartInitParameters): void {
