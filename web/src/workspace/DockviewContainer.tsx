@@ -281,10 +281,6 @@ class ReactTabRenderer implements ITabRenderer {
     this.params = parameters
     this.root = createRoot(this.element)
 
-    // Suppress VS theme decorative borders on parent elements via inline
-    // styles (no CSS rules needed in index.css).
-    this.suppressThemeBorders()
-
     // Subscribe to active-panel changes to keep the accent bar in sync.
     const onActive = parameters.containerApi.onDidActivePanelChange
     this.activeSub = onActive((e) => {
@@ -305,25 +301,6 @@ class ReactTabRenderer implements ITabRenderer {
     const active = this.params.containerApi.activePanel
     if (!active) return false
     return active.id === this.params.api.id
-  }
-
-  /**
-   * Remove the VS theme's border-top on `.dv-tab` and border-bottom on
-   * `.dv-tabs-and-actions-container` by setting inline styles on the
-   * parent elements. Called once during init().
-   */
-  private suppressThemeBorders(): void {
-    // `.dv-tab` is the immediate parent of our renderer element.
-    const tabEl = this.element.parentElement
-    if (tabEl) {
-      tabEl.style.borderTop = 'none'
-      tabEl.style.backgroundColor = 'transparent'
-    }
-    // Walk up to the tab strip container and remove its border-bottom.
-    const stripEl = tabEl?.closest('.dv-tabs-and-actions-container')
-    if (stripEl) {
-      (stripEl as HTMLElement).style.borderBottom = 'none'
-    }
   }
 
   private render(isActive: boolean): void {

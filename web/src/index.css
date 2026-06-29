@@ -243,6 +243,31 @@
       sans-serif;
     -webkit-font-smoothing: antialiased;
   }
+
+  /* ── Global scrollbar — VSCode style: thin, borderless, semi-transparent ── */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(128, 128, 128, 0.35) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: rgba(128, 128, 128, 0.35);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(128, 128, 128, 0.6);
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }
 
 /* ---------------------------------------------------------------------------
@@ -341,6 +366,36 @@
  * The virtualizer already keeps the DOM light, but this protects the live
  * streaming card and any non-virtualized fallback from layout thrash. */
 .agent-msg-card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
+
+/* ── Dockview theme override — follow app light/dark palette ────────────────
+ * dockview's `.dockview-theme-vs` hardcodes dark background variables (#1e1e1e
+ * etc), ignoring the app's `.dark` class. We override these CSS variables to
+ * reference the app's semantic tokens, so dockview panels automatically follow
+ * the light/dark theme without runtime switching.
+ */
+.dockview-theme-vs {
+  --dv-group-view-background-color: var(--bg-primary);
+  --dv-tabs-and-actions-container-background-color: var(--bg-secondary);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg-primary);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--bg-tertiary);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg-primary);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--bg-tertiary);
+  --dv-draggable-tabs-active-tab-color: var(--text-primary);
+  --dv-draggable-tabs-inactive-tab-color: var(--text-secondary);
+}
+
+/* Remove VS theme decorative borders — replaces fragile inline style approach */
+.dockview-theme-vs .dv-tab {
+  border-top: none !important;
+  background-color: transparent !important;
+}
+.dockview-theme-vs .dv-tabs-and-actions-container {
+  border-bottom: none !important;
+}
+
+/* ── Shimmer color variable — defined for both themes ────────────────────── */
+:root { --shimmer-color: rgba(0, 0, 0, 0.06); }
+.dark { --shimmer-color: rgba(255, 255, 255, 0.08); }
 
 /* ── Shimmer "正在思考" effect ──────────────────────────────────────────────
  * A sliding gradient light band from left to right, similar to skeleton
