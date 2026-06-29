@@ -58,6 +58,8 @@ export class WSConnectionImpl implements WSConnection {
   private disposed = false
 
   private pending = new Map<string, PendingRPC>()
+  /** Messages queued while WS is not OPEN; flushed on reconnect. */
+  private pendingMessages: WSClientMessage[] = []
 
   private messageHandlers = new Set<Handler<WSMessage>>()
   private sessionHandlers = new Set<Handler<SessionEvent>>()
@@ -79,7 +81,14 @@ export class WSConnectionImpl implements WSConnection {
   }
 
   send(msg: WSClientMessage): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Buffer message — will be flushed on reconnect (prevents silent drops).
+      // Dedup: subscribe/sync are idempotent; only buffer 'message' type.
+      if (msg.type === 'message') {
+        this.pendingMessages.push(msg)
+      }
+      return
+    }
     this.ws.send(JSON.stringify(msg))
   }
 
@@ -157,6 +166,15 @@ export class WSConnectionImpl implements WSConnection {
       this.send({ type: 'sync' })
       // Re-establish subscription after reconnect so events resume.
       if (this._chatID) this.send({ type: 'subscribe', chat_id: this._chatID })
+      // Flush any messages that were queued while WS was disconnected.
+      if (this.pendingMessages.length > 0) {
+        const pending = this.pendingMessages.splice(0)
+        for (const msg of pending) {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify(msg))
+          }
+        }
+      }
     }
     ws.onmessage = (ev) => this.handleMessage(ev)
     ws.onerror = () => {

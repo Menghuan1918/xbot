@@ -1,12 +1,9 @@
 /**
  * FileExplorer — file browser for the agent's working directory.
  *
- * Renders the file tree from the `list_files` RPC (via useFileTree), which
- * auto-refreshes when the CWD changes. Expand/collapse directories, file-type
- * icons (Lucide), and click → openTab in the shared workspace. A context menu
- * offers "copy path" and "open in tab".
- *
- * Expand state is keyed by directory path so it survives re-renders.
+ * Renders the file tree from useFileTree (lazy loading: only top-level
+ * is fetched initially, subdirectories loaded on expand). Click → openTab
+ * in the shared workspace.
  */
 import { useCallback, useState } from 'react'
 import { ChevronRight, ChevronDown, FolderOpen, Loader2 } from 'lucide-react'
@@ -31,17 +28,24 @@ interface FileExplorerProps {
 
 export function FileExplorer({ tabManager }: FileExplorerProps) {
   const { t } = useI18n()
-  const { tree, loading, error } = useFileTree()
+  const { tree, loading, error, expandDir, expandingPath } = useFileTree()
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
 
-  const toggle = useCallback((path: string) => {
+  const toggle = useCallback(async (path: string, hasChildren: boolean) => {
     setExpanded((prev) => {
       const next = new Set(prev)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
+      if (next.has(path)) {
+        next.delete(path)
+      } else {
+        next.add(path)
+      }
       return next
     })
-  }, [])
+    // If children not loaded yet, fetch them on expand
+    if (!hasChildren) {
+      await expandDir(path)
+    }
+  }, [expandDir])
 
   const openFile = useCallback(
     (node: FileNode) => {
@@ -83,8 +87,9 @@ export function FileExplorer({ tabManager }: FileExplorerProps) {
             node={node}
             depth={0}
             expanded={expanded}
-            onToggleDir={toggle}
+            onToggleDir={(path, hasChildren) => void toggle(path, hasChildren)}
             onOpenFile={openFile}
+            expandingPath={expandingPath}
           />
         ))}
         {tree.length === 0 && !loading && (
@@ -99,25 +104,33 @@ interface FileTreeNodeProps {
   node: FileNode
   depth: number
   expanded: Set<string>
-  onToggleDir: (path: string) => void
+  onToggleDir: (path: string, hasChildren: boolean) => void
   onOpenFile: (node: FileNode) => void
+  expandingPath: string | null
 }
 
-function FileTreeNode({ node, depth, expanded, onToggleDir, onOpenFile }: FileTreeNodeProps) {
+function FileTreeNode({ node, depth, expanded, onToggleDir, onOpenFile, expandingPath }: FileTreeNodeProps) {
   const { t } = useI18n()
   const isOpen = expanded.has(node.path)
   const isDir = node.type === 'directory'
+  const isExpanding = expandingPath === node.path
 
   const row = (
     <button
       type="button"
-      onClick={() => (isDir ? onToggleDir(node.path) : onOpenFile(node))}
+      onClick={() => (isDir ? onToggleDir(node.path, !!node.children) : onOpenFile(node))}
       className="flex w-full items-center gap-1 py-[3px] pr-2 text-left transition-colors hover:bg-bg-tertiary"
       style={{ paddingLeft: depth * 12 + 4 }}
     >
       {isDir ? (
         <span className="flex size-4 shrink-0 items-center justify-center text-text-muted">
-          {isOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+          {isExpanding ? (
+            <Loader2 className="size-3.5 animate-spin" />
+          ) : isOpen ? (
+            <ChevronDown className="size-3.5" />
+          ) : (
+            <ChevronRight className="size-3.5" />
+          )}
         </span>
       ) : (
         <span className="size-4 shrink-0" />
@@ -160,6 +173,7 @@ function FileTreeNode({ node, depth, expanded, onToggleDir, onOpenFile }: FileTr
               expanded={expanded}
               onToggleDir={onToggleDir}
               onOpenFile={onOpenFile}
+              expandingPath={expandingPath}
             />
           ))}
         </div>

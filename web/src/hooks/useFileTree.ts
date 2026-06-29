@@ -1,11 +1,10 @@
 /**
  * useFileTree — fetches the file tree for the current working directory.
  *
- * Uses the REST API (GET /api/fs/list) via useFileSystem's listDir() to
- * fetch directory entries. Builds a nested FileNode[] tree from the flat
- * results. Auto-refreshes when the CWD changes.
+ * Lazy loading: only fetches the top level on initial load. Subdirectories
+ * are fetched on demand when the user expands them (via expandDir).
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { useCwd } from '@/providers/CwdProvider'
 import { flattenFiles, type FileNode } from '@/types/file'
@@ -20,40 +19,40 @@ interface UseFileTreeResult {
   error: string | null
   /** Manually reload the tree. */
   reload: () => void
+  /** Expand a directory node, fetching its children if not yet loaded. */
+  expandDir: (path: string) => Promise<void>
+  /** Whether a specific directory is currently loading. */
+  expandingPath: string | null
 }
 
-/** Build a nested FileNode[] by recursively listing directories (lazy: 2 levels). */
-async function buildTree(cwd: string): Promise<FileNode[]> {
+/** Build top-level FileNode[] from a single listDir call (no recursion). */
+async function buildTopLevel(cwd: string): Promise<FileNode[]> {
   const entries = await listDir(cwd)
-  const nodes: FileNode[] = []
-  for (const entry of entries) {
+  return entries.map((entry) => {
     const path = joinPath(cwd, entry.name)
-    const node: FileNode = {
+    return {
       name: entry.name,
       path,
       type: entry.isDir ? 'directory' : 'file',
+    } as FileNode
+  })
+}
+
+/** Recursively find a node by path in the tree. */
+function findNode(nodes: FileNode[], path: string): FileNode | null {
+  for (const node of nodes) {
+    if (node.path === path) return node
+    if (node.children) {
+      const found = findNode(node.children, path)
+      if (found) return found
     }
-    if (entry.isDir) {
-      // Lazy: don't recurse automatically — children will be loaded on expand.
-      // But pre-load first level for a better UX.
-      try {
-        const children = await listDir(path)
-        node.children = children.map((child) => {
-          const childPath = joinPath(path, child.name)
-          const childNode: FileNode = {
-            name: child.name,
-            path: childPath,
-            type: child.isDir ? 'directory' : 'file',
-          }
-          return childNode
-        })
-      } catch {
-        node.children = []
-      }
-    }
-    nodes.push(node)
   }
-  return nodes
+  return null
+}
+
+/** Deep clone the tree (shallow per-level) for immutable updates. */
+function cloneTree(nodes: FileNode[]): FileNode[] {
+  return nodes.map((n) => ({ ...n, children: n.children ? cloneTree(n.children) : undefined }))
 }
 
 export function useFileTree(): UseFileTreeResult {
@@ -61,20 +60,25 @@ export function useFileTree(): UseFileTreeResult {
   const [tree, setTree] = useState<FileNode[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [expandingPath, setExpandingPath] = useState<string | null>(null)
+  const reloadTokenRef = useRef(0)
 
   const reload = useCallback(async () => {
     if (!cwd) return
+    const token = ++reloadTokenRef.current
     setLoading(true)
     setError(null)
     try {
       invalidateFsCache()
-      const result = await buildTree(cwd)
+      const result = await buildTopLevel(cwd)
+      if (token !== reloadTokenRef.current) return // stale
       setTree(result)
     } catch (e) {
+      if (token !== reloadTokenRef.current) return
       setError(e instanceof Error ? e.message : String(e))
       setTree([])
     } finally {
-      setLoading(false)
+      if (token === reloadTokenRef.current) setLoading(false)
     }
   }, [cwd])
 
@@ -82,6 +86,32 @@ export function useFileTree(): UseFileTreeResult {
   useEffect(() => {
     void reload()
   }, [reload])
+
+  /** Expand a directory: fetch children if not yet loaded. */
+  const expandDir = useCallback(async (path: string) => {
+    setExpandingPath(path)
+    try {
+      const entries = await listDir(path)
+      const children = entries.map((entry) => {
+        const childPath = joinPath(path, entry.name)
+        return {
+          name: entry.name,
+          path: childPath,
+          type: entry.isDir ? 'directory' : 'file',
+        } as FileNode
+      })
+      setTree((prev) => {
+        const cloned = cloneTree(prev)
+        const node = findNode(cloned, path)
+        if (node) node.children = children
+        return cloned
+      })
+    } catch {
+      // Silently fail — node will just show no children
+    } finally {
+      setExpandingPath(null)
+    }
+  }, [])
 
   const flatFiles = useCallback(() => flattenFiles(tree), [tree])
 
@@ -91,5 +121,7 @@ export function useFileTree(): UseFileTreeResult {
     loading,
     error,
     reload,
+    expandDir,
+    expandingPath,
   }
 }

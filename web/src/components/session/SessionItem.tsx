@@ -1,11 +1,8 @@
 /**
- * SessionItem — a single chatroom row in the session list (Spec 3 §3.6).
+ * SessionItem — a single chatroom row in the session list.
  *
- * Layout: star toggle · title + relative time · preview · status dot.
- * Active session gets an accent background; starred sessions render a gold star.
- * The whole row is the context-menu trigger (right-click → menu) and the
- * click target for switching. The menu actions (star/rename/delete) are
- * delegated to the parent so a single dialog pair serves every row.
+ * Single-line layout: [status dot] + title + relative time.
+ * No left decoration bar; active session uses background highlight.
  */
 import { Star, Pencil, Trash2 } from 'lucide-react'
 import {
@@ -58,56 +55,47 @@ export function SessionItem({
         }
       }}
       className={cn(
-        'group relative flex cursor-pointer flex-col gap-1 rounded-md px-2 py-1.5 text-left transition-colors',
+        'group flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
         active ? 'bg-bg-tertiary' : 'hover:bg-bg-tertiary/60',
       )}
-      style={active ? { boxShadow: 'inset 2px 0 0 0 var(--accent)' } : undefined}
     >
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          aria-label={starred ? t('session.unstar') : t('session.star')}
-          onClick={(e) => {
-            e.stopPropagation()
-            onToggleStar(session.chatID)
-          }}
-          className={cn(
-            'shrink-0 rounded p-0.5 transition-opacity',
-            starred ? 'opacity-100' : 'opacity-0 group-hover:opacity-60',
-          )}
-          style={starred ? { color: '#e6a700' } : { color: 'var(--text-muted)' }}
-        >
-          <Star className="size-3.5" fill={starred ? 'currentColor' : 'none'} />
-        </button>
-        <span
-          className="flex-1 truncate text-xs font-medium"
-          style={{ color: 'var(--text-primary)' }}
-          title={session.label}
-        >
-          {session.label || session.chatID}
-        </span>
-        <span className="shrink-0 text-[10px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
-          {relativeTime(session.lastActive, t)}
-        </span>
-      </div>
-      {session.preview && (
-        <p
-          className="line-clamp-1 pl-6 text-[11px] leading-tight"
-          style={{ color: 'var(--text-secondary)' }}
-        >
-          {session.preview}
-        </p>
-      )}
-      <div className="flex items-center gap-1 pl-6">
-        <span
-          className="size-1.5 shrink-0 rounded-full"
-          style={{ backgroundColor: STATUS_COLOR[session.status] }}
-          aria-hidden
-        />
-        <span className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-          {t(`session.status.${statusKey(session.status)}`)}
-        </span>
-      </div>
+      {/* Status dot */}
+      <span
+        className="size-2 shrink-0 rounded-full"
+        style={{ backgroundColor: STATUS_COLOR[session.status] }}
+        aria-hidden
+      />
+
+      {/* Star toggle (hover/starred) */}
+      <button
+        type="button"
+        aria-label={starred ? t('session.unstar') : t('session.star')}
+        onClick={(e) => {
+          e.stopPropagation()
+          onToggleStar(session.chatID)
+        }}
+        className={cn(
+          'shrink-0 rounded p-0.5 transition-opacity',
+          starred ? 'opacity-100' : 'opacity-0 group-hover:opacity-60',
+        )}
+        style={starred ? { color: '#e6a700' } : { color: 'var(--text-muted)' }}
+      >
+        <Star className="size-3.5" fill={starred ? 'currentColor' : 'none'} />
+      </button>
+
+      {/* Title */}
+      <span
+        className="flex-1 truncate text-xs font-medium"
+        style={{ color: 'var(--text-primary)' }}
+        title={session.label}
+      >
+        {session.label || session.chatID}
+      </span>
+
+      {/* Relative time */}
+      <span className="shrink-0 text-[10px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
+        {relativeTime(session.lastActive, t)}
+      </span>
     </div>
   )
 
@@ -134,15 +122,6 @@ export function SessionItem({
       </ContextMenuContent>
     </ContextMenu>
   )
-}
-
-function statusKey(s: SessionStatus): 'running' | 'waiting' | 'idle' | 'error' {
-  switch (s) {
-    case 'waiting_input':
-      return 'waiting'
-    default:
-      return s
-  }
 }
 
 function relativeTime(
