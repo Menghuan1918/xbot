@@ -233,7 +233,8 @@ export class ProgressStore {
       // When iteration advances (N→N+1), snapshot the previous iteration.
       // lastIter starts at -1; first advance sets it without snapshotting.
       if (opts.iteration !== undefined && opts.iteration > draft.lastIter) {
-        if (draft.lastIter >= 0) {
+        const hadPreviousIteration = draft.lastIter >= 0
+        if (hadPreviousIteration) {
           const snap: WebIteration = {
             iteration: draft.lastIter,
             thinking: draft.streamContent,
@@ -244,17 +245,43 @@ export class ProgressStore {
           draft.iterationHistory = [...draft.iterationHistory, snap]
         }
         draft.lastIter = opts.iteration
+        // Clear stream/structured fields from the previous iteration so the
+        // new iteration starts clean. Only clear when there was an actual
+        // previous iteration (lastIter was >= 0 before the update).
+        // Mirrors TUI: iteration switch = sameIter=false → no carry-forward.
+        if (hadPreviousIteration) {
+          draft.streamContent = ''
+          draft.reasoningStreamContent = ''
+          draft.streamingTools = []
+          draft.activeTools = []
+          draft.completedTools = []
+          draft.lastReasoning = ''
+        }
       }
 
-      // ── carry-forward: preserve stream-only fields ──
-      // streamContent, reasoningStreamContent, streamingTools are NOT touched
-      // here — they are only modified by stream_content events (appendStreamContent
-      // / appendReasoningContent / setStreamOnlyFields). This is the core fix.
+      // ── carry-forward: preserve stream-only fields within same iteration ──
+      // streamContent, reasoningStreamContent are NOT overwritten here — they
+      // are only modified by stream_content events. streamingTools is filtered
+      // below to remove stale generating tools that have transitioned to active.
 
       // ── replace structured fields ──
       if (opts.activeTools) draft.activeTools = dedupTools(opts.activeTools)
       if (opts.completedTools) draft.completedTools = dedupTools(opts.completedTools)
       if (opts.iteration !== undefined) draft.iteration = opts.iteration
+
+      // ── filter stale generating tools ──
+      // A tool that was "generating" (from stream_content) may have transitioned
+      // to "running"/"done" (in activeTools/completedTools). Filter it out of
+      // streamingTools to prevent showing the same tool twice.
+      // Mirrors TUI carryForwardProgressState (cli_update_progress.go:119-131).
+      if (draft.streamingTools.length > 0 && (opts.activeTools || opts.completedTools)) {
+        const activeNames = new Set<string>()
+        for (const t of draft.activeTools) activeNames.add(t.name)
+        for (const t of draft.completedTools) activeNames.add(t.name)
+        draft.streamingTools = draft.streamingTools.filter(
+          (t) => !activeNames.has(t.name),
+        )
+      }
 
       // ── phase + streaming ──
       if (opts.phase !== undefined) {

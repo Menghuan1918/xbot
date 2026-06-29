@@ -400,24 +400,21 @@
 :root { --shimmer-color: rgba(0, 0, 0, 0.06); }
 .dark { --shimmer-color: rgba(255, 255, 255, 0.08); }
 
-/* ── Shimmer "正在思考" effect ──────────────────────────────────────────────
- * A sliding gradient light band from left to right, similar to skeleton
- * screen loading. Used by ShimmerThinking component during streaming.
+/* ── "正在思考" character sweep effect ───────────────────────────────────────
+ * Each character lights up in sequence, then the whole text dims and
+ * repeats — a bold, borderless loading indicator.
  */
-@keyframes shimmer {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(100%); }
+@keyframes thinkingCharSweep {
+  0%, 100% { opacity: 0.3; }
+  50%      { opacity: 1; }
 }
-.shimmer-overlay {
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--shimmer-color, rgba(255,255,255,0.08)) 50%,
-    transparent 100%
-  );
-  animation: shimmer 1.8s ease-in-out infinite;
+.thinking-shimmer {
+  font-size: 0.875rem;
+  letter-spacing: 0.05em;
+}
+.thinking-char {
+  display: inline-block;
+  animation: thinkingCharSweep 1.5s ease-in-out infinite;
 }
 
 /* ── Fold/expand animation ───────────────────────────────────────────────────

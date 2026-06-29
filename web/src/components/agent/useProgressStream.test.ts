@@ -72,12 +72,13 @@ function emitAndFlush(msg: WSMessage) {
 const { useProgressStream } = await import('@/hooks/useProgressStream')
 
 describe('useProgressStream event dispatch', () => {
-  it('appends stream_content tokens to the live message', () => {
+  it('sets cumulative stream_content to the live message', () => {
     const { result } = renderHook(() => useProgressStream({ chatID: 'c1', ws: currentWS as unknown as WSConnection }))
+    // Server sends cumulative values: first "Hello", then "Hello world"
     emitAndFlush({ type: 'stream_content', progress: { stream_content: 'Hello' } })
     expect(result.current.liveMessage?.content).toBe('Hello')
     expect(result.current.isStreaming).toBe(true)
-    emitAndFlush({ type: 'stream_content', progress: { stream_content: ' world' } })
+    emitAndFlush({ type: 'stream_content', progress: { stream_content: 'Hello world' } })
     expect(result.current.liveMessage?.content).toBe('Hello world')
   })
 

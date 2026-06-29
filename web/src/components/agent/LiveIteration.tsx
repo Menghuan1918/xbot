@@ -1,9 +1,8 @@
 /**
- * LiveIteration — renders the in-flight iteration from a ProgressSnapshot
- * (Spec 4 §3.3, §3.5).
+ * LiveIteration — renders the in-flight iteration from a ProgressSnapshot.
  *
  * Streaming T (reasoning): FoldedLine wrapping ReasoningBlock with streaming
- *   indicator.
+ *   indicator. Falls back to lastReasoning when streamContent is empty.
  * Streaming C (tools): FoldedToolGroup with merged streaming/active/completed
  *   tools from the snapshot.
  * Streaming O (text): MarkdownRenderer with a streaming cursor indicator.
@@ -15,26 +14,13 @@ import { FoldedToolGroup } from './FoldedToolGroup'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { ReasoningBlock } from './ReasoningBlock'
 import { useI18n } from '@/providers/i18n'
+import { dedupTools } from './progressStore'
 import type { CollapseLevel } from '@/types/agent'
-import type { ProgressSnapshot, WebToolProgress } from '@/types/shared'
+import type { ProgressSnapshot } from '@/types/shared'
 
 interface LiveIterationProps {
   progress: ProgressSnapshot
   level: CollapseLevel
-}
-
-/** Deduplicate tools by name+label, preserving first occurrence order. */
-function dedupTools(tools: WebToolProgress[]): WebToolProgress[] {
-  const seen = new Set<string>()
-  const result: WebToolProgress[] = []
-  for (const tool of tools) {
-    const key = `${tool.name}-${tool.label}`
-    if (!seen.has(key)) {
-      seen.add(key)
-      result.push(tool)
-    }
-  }
-  return result
 }
 
 export const LiveIteration = memo(function LiveIteration({
@@ -43,7 +29,9 @@ export const LiveIteration = memo(function LiveIteration({
 }: LiveIterationProps) {
   const { t } = useI18n()
 
-  const hasReasoning = Boolean(progress.reasoningStreamContent)
+  // Reasoning: prefer streaming value, fall back to structured (mirrors TUI)
+  const reasoningContent = progress.reasoningStreamContent || progress.lastReasoning || ''
+  const hasReasoning = Boolean(reasoningContent)
   const hasTools =
     progress.streamingTools.length > 0 ||
     progress.activeTools.length > 0 ||
@@ -52,7 +40,7 @@ export const LiveIteration = memo(function LiveIteration({
 
   if (!hasReasoning && !hasTools && !hasStreamContent) return null
 
-  // Merge all tool groups for the current iteration.
+  // Merge all tool groups, using the shared dedupTools (generating skips dedup)
   const allTools = dedupTools([
     ...progress.streamingTools,
     ...progress.activeTools,
@@ -61,15 +49,15 @@ export const LiveIteration = memo(function LiveIteration({
 
   return (
     <div className="flex flex-col gap-1">
-      {/* Streaming T — show character count instead of T0/T1 */}
+      {/* Streaming T — show character count */}
       {hasReasoning && (
         <FoldedLine
-          title={t('agent.thinkingChars', { count: progress.reasoningStreamContent.length })}
+          title={t('agent.thinkingChars', { count: reasoningContent.length })}
           defaultOpen={false}
         >
           <ReasoningBlock
-            content={progress.reasoningStreamContent}
-            streaming
+            content={reasoningContent}
+            streaming={progress.streaming}
           />
         </FoldedLine>
       )}
