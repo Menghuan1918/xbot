@@ -118,20 +118,16 @@ export function dedupMessages<T extends { turnID: number; role: string; content?
     }
     // For turnID=0 assistant messages, only dedup live-append messages (id starts with 'asst-').
     // History messages (DB numeric id) are never deduped — they have unique ids.
-    // Use content + iteration count as dedup key so that messages with empty
-    // content but identical iterations are also deduped (prevents WS reconnect
-    // replay from creating duplicate "已处理 N 次迭代" summaries).
     const content = messages[i].content ?? ''
     const id = messages[i].id ?? ''
-    if (messages[i].role === 'assistant' && id.startsWith('asst-')) {
-      const iterCount = (messages[i] as { iterations?: unknown[] }).iterations?.length ?? 0
-      const dedupKey = `asst:${content}:${iterCount}`
-      const existingIdx = seen.get(dedupKey)
+    if (content && messages[i].role === 'assistant' && id.startsWith('asst-')) {
+      const contentKey = `${messages[i].role}:${content}`
+      const existingIdx = seen.get(contentKey)
       if (existingIdx !== undefined) {
         result[existingIdx] = messages[i]
         continue
       }
-      seen.set(dedupKey, result.length)
+      seen.set(contentKey, result.length)
     }
     result.push(messages[i])
   }
