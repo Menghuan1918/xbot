@@ -1796,12 +1796,18 @@ func (wc *WebChannel) readPersistedCWD(channel, chatID string) string {
 	if err != nil {
 		return ""
 	}
-	cwd := strings.TrimSpace(string(data))
+	cwd := string(data) // no TrimSpace — mirrors session/tenant.go:loadPersistedCWD
 	if cwd == "" {
+		return ""
+	}
+	// Safety: reject worktree paths (must never leak into other sessions)
+	if strings.Contains(cwd, ".xbot-worktrees") {
+		_ = os.Remove(cwdFile)
 		return ""
 	}
 	// Safety: reject non-existent directories
 	if info, err := os.Stat(cwd); err != nil || !info.IsDir() {
+		_ = os.Remove(cwdFile)
 		return ""
 	}
 	return cwd

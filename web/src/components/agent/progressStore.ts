@@ -94,11 +94,11 @@ export function dedupTools(tools: WebToolProgress[]): WebToolProgress[] {
 
 /**
  * Dedup messages by (turnID, role): only the last occurrence is kept.
- * For turnID=0 messages (history, appendAssistant), dedup by (role, content)
- * when content is non-empty — prevents duplicate committed messages from
- * multiple onAssistantComplete calls (WS reconnect replay, defensive finalize).
+ * For turnID=0 messages, only dedup live-append messages (id starts with 'asst-')
+ * by (role, content) — prevents duplicate committed messages from multiple
+ * onAssistantComplete calls. History messages (DB id) are never deduped.
  */
-export function dedupMessages<T extends { turnID: number; role: string; content?: string }>(
+export function dedupMessages<T extends { turnID: number; role: string; content?: string; id?: string }>(
   messages: T[],
 ): T[] {
   const seen = new Map<string, number>()
@@ -116,15 +116,14 @@ export function dedupMessages<T extends { turnID: number; role: string; content?
       }
       continue
     }
-    // For turnID=0 (untracked) messages, dedup by role:content when content
-    // is non-empty. This catches duplicate assistant messages from reconnect
-    // replay or multiple onAssistantComplete calls.
+    // For turnID=0 assistant messages, only dedup live-append messages (id starts with 'asst-').
+    // History messages (DB numeric id) are never deduped — they have unique ids.
     const content = messages[i].content ?? ''
-    if (content && messages[i].role === 'assistant') {
+    const id = messages[i].id ?? ''
+    if (content && messages[i].role === 'assistant' && id.startsWith('asst-')) {
       const contentKey = `${messages[i].role}:${content}`
       const existingIdx = seen.get(contentKey)
       if (existingIdx !== undefined) {
-        // Replace existing with newer version (may have updated iterations)
         result[existingIdx] = messages[i]
         continue
       }
