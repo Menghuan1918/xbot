@@ -339,7 +339,21 @@ export function useChatMessages({
       isPartial: false,
       turnID: 0,
     }
-    setMessages((prev) => dedupMessages([...prev, newMsg]))
+    setMessages((prev) => {
+      // Guard: if the last assistant message has identical content and
+      // iteration count, skip — this is a WS reconnect replay duplicate.
+      const last = prev[prev.length - 1]
+      if (
+        last &&
+        last.role === 'assistant' &&
+        last.id.startsWith('asst-') &&
+        last.content === content &&
+        (last.iterations?.length ?? 0) === iterations.length
+      ) {
+        return prev
+      }
+      return dedupMessages([...prev, newMsg])
+    })
   }, [])
 
   const removeMessage = useCallback((id: string) => {
