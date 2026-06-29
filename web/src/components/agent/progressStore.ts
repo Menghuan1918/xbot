@@ -94,30 +94,43 @@ export function dedupTools(tools: WebToolProgress[]): WebToolProgress[] {
 
 /**
  * Dedup messages by (turnID, role): only the last occurrence is kept.
- * This prevents PhaseDone + handleAgentMessage from creating duplicate
- * messages for the same turn.
+ * For turnID=0 messages (history, appendAssistant), dedup by (role, content)
+ * when content is non-empty — prevents duplicate committed messages from
+ * multiple onAssistantComplete calls (WS reconnect replay, defensive finalize).
  */
-export function dedupMessages<T extends { turnID: number; role: string }>(
+export function dedupMessages<T extends { turnID: number; role: string; content?: string }>(
   messages: T[],
 ): T[] {
   const seen = new Map<string, number>()
   const result: T[] = []
   for (let i = 0; i < messages.length; i++) {
-    // Only dedup messages with a positive turnID (live messages from
-    // PhaseDone + handleAgentMessage). turnID=0 means no turn tracking
-    // (history messages, optimistic echoes) — keep all.
-    if (messages[i].turnID <= 0) {
-      result.push(messages[i])
+    // Dedup by turnID:role for tracked turns
+    if (messages[i].turnID > 0) {
+      const key = `${messages[i].turnID}:${messages[i].role}`
+      const existing = seen.get(key)
+      if (existing !== undefined) {
+        result[existing] = messages[i]
+      } else {
+        seen.set(key, result.length)
+        result.push(messages[i])
+      }
       continue
     }
-    const key = `${messages[i].turnID}:${messages[i].role}`
-    const existing = seen.get(key)
-    if (existing !== undefined) {
-      result[existing] = messages[i]
-    } else {
-      seen.set(key, result.length)
-      result.push(messages[i])
+    // For turnID=0 (untracked) messages, dedup by role:content when content
+    // is non-empty. This catches duplicate assistant messages from reconnect
+    // replay or multiple onAssistantComplete calls.
+    const content = messages[i].content ?? ''
+    if (content && messages[i].role === 'assistant') {
+      const contentKey = `${messages[i].role}:${content}`
+      const existingIdx = seen.get(contentKey)
+      if (existingIdx !== undefined) {
+        // Replace existing with newer version (may have updated iterations)
+        result[existingIdx] = messages[i]
+        continue
+      }
+      seen.set(contentKey, result.length)
     }
+    result.push(messages[i])
   }
   return result
 }
@@ -151,12 +164,23 @@ export class ProgressStore {
     this.scheduleNotify()
   }
 
-  /** Reset to idle (after a run completes or on errors). */
+  /** Reset to idle (after a run completes or on errors). Synchronously flushes
+   *  the snapshot so useSyncExternalStore immediately reads the empty state,
+   *  preventing liveMessage and committed message from coexisting for a frame.
+   */
   reset(): void {
-    this.mutate((draft) => {
-      this.current = { ...EMPTY_PROGRESS_SNAPSHOT }
-      Object.assign(draft, this.current)
-    })
+    if (this.disposed) return
+    this.current = { ...EMPTY_PROGRESS_SNAPSHOT }
+    // Synchronously update snapshot + cancel pending RAF — avoids a one-frame
+    // window where liveMessage is still non-null after reset.
+    this.snapshot = { ...EMPTY_PROGRESS_SNAPSHOT }
+    this.dirty = false
+    if (this.rafHandle !== null) {
+      cancelAnimationFrame(this.rafHandle)
+      this.rafHandle = null
+    }
+    // Notify listeners immediately (synchronous) so React re-render sees empty snapshot.
+    this.listeners.forEach((l) => l())
   }
 
   /** Set streamed assistant text (cumulative value from stream_content events). */

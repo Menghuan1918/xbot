@@ -114,6 +114,10 @@ export function useProgressStream({
   const compactedRef = useRef(onHistoryCompacted)
   compactedRef.current = onHistoryCompacted
 
+  // Guard against multiple onAssistantComplete calls per turn.
+  // Reset to false when new streaming begins (stream_content arrives).
+  const finalizedRef = useRef(false)
+
   // Track chatID inside the handlers via ref so we don't tear down the store on
   // every chat switch (we just reset it).
   const chatIDRef = useRef(chatID)
@@ -160,7 +164,7 @@ export function useProgressStream({
       if (chatIDRef.current && !matchesChatID(msg, chatIDRef.current)) {
         return
       }
-      handleProgressMessage(msg, store, completeRef, compactedRef)
+      handleProgressMessage(msg, store, completeRef, compactedRef, finalizedRef)
     })
     return offMessage
   }, [ws, store])
@@ -196,16 +200,20 @@ function handleProgressMessage(
   store: ProgressStore,
   completeRef: React.MutableRefObject<UseProgressStreamOptions['onAssistantComplete']>,
   compactedRef: React.MutableRefObject<UseProgressStreamOptions['onHistoryCompacted']>,
+  finalizedRef?: React.MutableRefObject<boolean>,
 ): void {
   switch (msg.type) {
     case 'stream_content': {
+      // New streaming content arriving → reset the finalize guard for the new turn.
+      if (finalizedRef) finalizedRef.current = false
+
       // stream_content carries content deltas in progress.stream_content /
       // progress.reasoning_stream_content (channel/web/web.go SendStreamContent).
       // Also carries streaming_tools (generating status, for tool name detection).
       const p = msg.progress
       if (!p) return
 
-      // Append text deltas (stream-only, does not replace the snapshot)
+      // Set cumulative text (stream-only, does not replace the snapshot)
       if (p.stream_content) store.appendStreamContent(String(p.stream_content))
       if (p.reasoning_stream_content) {
         store.appendReasoningContent(p.reasoning_stream_content)
@@ -252,6 +260,11 @@ function handleProgressMessage(
 
     case 'text': {
       // Final assistant message: commit then clear the live stream.
+      // Guard against duplicate onAssistantComplete within the same turn
+      // (e.g. text + session(idle) arriving before RAF flushes).
+      // Cross-reconnect replay is handled by dedupMessages in appendAssistant.
+      if (finalizedRef?.current) return
+      if (finalizedRef) finalizedRef.current = true
       const finalText = msg.content ?? ''
       const iterations = parseWebIterations(msg.progress_history)
       store.reset()
@@ -270,10 +283,12 @@ function handleProgressMessage(
       }
 
       // On idle, if we had accumulated stream content without a closing text,
-      // finalize defensively.
+      // finalize defensively. Skip if already finalized (text event arrived first).
       if (action === 'idle') {
+        if (finalizedRef?.current) return  // already finalized by text event
         const snap = store.getSnapshot()
         if (snap.streamContent) {
+          if (finalizedRef) finalizedRef.current = true
           const text = snap.streamContent
           const iters = snap.iterationHistory
           store.reset()

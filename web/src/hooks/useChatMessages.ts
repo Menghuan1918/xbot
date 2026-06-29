@@ -148,8 +148,10 @@ function parseHistoryMessages(rows: HistMsg[]): ChatMessage[] {
     })
   }
 
-  // Apply dedup (harmless for history — turnID=0 means keep all).
-  return dedupMessages(normalized)
+  // History messages have unique DB IDs — no dedup needed.
+  // dedupMessages is only used in the live append path (appendAssistant)
+  // to catch duplicate onAssistantComplete calls from reconnect replay.
+  return normalized
 }
 
 /**

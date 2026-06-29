@@ -46,10 +46,17 @@ export function MessageList({
   const { t } = useI18n()
 
   // Combined row list: committed messages + optional live streaming row.
-  const rows = useMemo<ChatMessage[]>(
-    () => (liveMessage ? [...messages, liveMessage] : messages),
-    [messages, liveMessage],
-  )
+  // Dedup: if liveMessage content matches the last committed assistant message,
+  // skip adding liveMessage (prevents one-frame overlap during finalize).
+  const rows = useMemo<ChatMessage[]>(() => {
+    if (!liveMessage) return messages
+    const last = messages[messages.length - 1]
+    if (last && last.role === 'assistant' && last.content && liveMessage.content &&
+        last.content === liveMessage.content) {
+      return messages
+    }
+    return [...messages, liveMessage]
+  }, [messages, liveMessage])
   const liveId = liveMessage?.id ?? null
 
   // TanStack Virtual returns imperative functions; React Compiler deliberately
