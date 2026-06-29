@@ -223,6 +223,8 @@ export function useChatMessages({
       // waiting for this response (rapid session switch or HistoryCompacted
       // during an in-flight reload).
       if (gen !== reloadGenRef.current) return
+      // Store last_seq for WS reconnect incremental replay.
+      if (data.last_seq) ws.setLastSeq(data.last_seq)
       const rows = data.messages ?? []
       setMessages(parseHistoryMessages(rows))
       setInitialProgress(data.active_progress ?? null)

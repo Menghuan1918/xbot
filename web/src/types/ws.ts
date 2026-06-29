@@ -23,6 +23,8 @@ export interface WSConnection {
   rpc: <T = unknown>(method: string, params?: unknown) => Promise<T>
   /** The chatID currently subscribed, if any. */
   chatID: string | null
+  /** Set the last event seq (from history API) for incremental WS reconnect replay. */
+  setLastSeq: (seq: number) => void
 
   /** Stream subscriptions; each returns an unsubscribe function. */
   onMessage: (handler: (msg: WSMessage) => void) => () => void

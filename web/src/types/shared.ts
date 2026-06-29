@@ -123,6 +123,9 @@ export interface WSClientMessage {
   answers?: Record<string, string>
   /** ask_user_response: true to cancel the prompt. */
   cancelled?: boolean
+  /** sync: last event seq the client has processed (from history API last_seq).
+   *  Omitted or 0 = full replay (backward compatible). */
+  last_seq?: number
 }
 
 /** Progress event (mirrors Go protocol/events.go ProgressEvent). */

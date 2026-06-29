@@ -52,6 +52,7 @@ export class WSConnectionImpl implements WSConnection {
   private ws: WebSocket | null = null
   private _connected = false
   private _chatID: string | null = null
+  private _lastSeq = 0
 
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnectAttempt = 0
@@ -78,6 +79,10 @@ export class WSConnectionImpl implements WSConnection {
 
   get chatID(): string | null {
     return this._chatID
+  }
+
+  setLastSeq(seq: number): void {
+    this._lastSeq = seq
   }
 
   send(msg: WSClientMessage): void {
@@ -162,8 +167,9 @@ export class WSConnectionImpl implements WSConnection {
     ws.onopen = () => {
       this.reconnectAttempt = 0
       this.setConnected(true)
-      // Send sync handshake so the server replays missed events.
-      this.send({ type: 'sync' })
+      // Send sync handshake with last_seq for incremental replay.
+      // Omitted or 0 = full replay (backward compatible with old server).
+      this.send({ type: 'sync', last_seq: this._lastSeq || undefined })
       // Re-establish subscription after reconnect so events resume.
       if (this._chatID) this.send({ type: 'subscribe', chat_id: this._chatID })
       // Flush any messages that were queued while WS was disconnected.
