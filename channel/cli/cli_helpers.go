@@ -85,35 +85,20 @@ func (m *cliModel) openSettingsFromQuickSwitch() {
 	if len(schema) == 0 {
 		return
 	}
-	// Refresh model list options in the schema (subscription change may affect available models)
-	if m.channel.modelLister != nil {
-		allModels := m.channel.modelLister.ListAllModels()
-		for i, s := range schema {
-			if (s.Key == "vanguard_model" || s.Key == "balance_model" || s.Key == "swift_model") && len(allModels) > 0 {
-				opts := make([]ch.SettingOption, len(allModels))
-				for j, ml := range allModels {
-					opts[j] = ch.SettingOption{Label: ml, Value: ml}
-				}
-				schema[i].Options = opts
-			}
-		}
-	}
 	// Re-read ALL values fresh (including LLM fields from new active subscription)
 	values := m.mergeCLISettingsValues()
-	// Overlay non-subscription values from backup (preserves user's in-memory edits).
-	// ch.Subscription quick switch should only refresh the active subscription-backed keys.
+	// Overlay non-subscription values from backup (preserves user's in-memory
+	// edits to global/user-scoped settings like thinking_mode, sandbox_mode).
 	for k, v := range m.panelState.valuesBackup {
-		if isSubscriptionScopedSettingKey(k) {
+		if ch.IsSubscriptionScopedSettingKey(k) {
 			continue
 		}
 		values[k] = v
 	}
 	cursor := m.panelState.cursorBackup
 	onSubmit := m.panelState.onSubmitBackup
-	// Clear backup
 	m.panelState.valuesBackup = nil
 	m.panelState.onSubmitBackup = nil
-	// Open panel with restored state
 	m.openSettingsPanel(schema, values, onSubmit)
 	m.panelState.cursor = cursor
 }
@@ -717,6 +702,7 @@ func (m *cliModel) applySessionLLMState(state SessionLLMState) {
 	m.cachedModelName = state.Model
 	m.cachedMaxContextTokens = ResolveEffectiveMaxContext(state, m.subscriptionMgr)
 	m.cachedMaxOutputTokens = int64(ResolveEffectiveMaxOutputTokens(state, m.subscriptionMgr))
+	m.refreshCachedSubName()
 }
 
 // ---------------------------------------------------------------------------
@@ -737,7 +723,7 @@ func (m *cliModel) resolveCompressRatio() float64 {
 }
 
 // resolveMaxOutputTokens returns the max output tokens from settings values.
-// Falls back to 0 if unavailable (renderContextTopBorder will use 8192 as default).
+// Falls back to 0 if unavailable (renderContextTopBorder will use config.DefaultMaxOutputTokens as default).
 func (m *cliModel) resolveMaxOutputTokens() int64 {
 	if m.channel == nil || m.channel.config.GetCurrentValues == nil {
 		return 0

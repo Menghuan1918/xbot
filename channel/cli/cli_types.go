@@ -290,8 +290,8 @@ func newGlamourRenderer(wrapWidth int) *glamour.TermRenderer {
 // cliCommands 已知命令列表（用于 Tab 补全，§8）
 var cliCommands = []string{
 	"/cancel", "/channel", "/chat", "/clear", "/commands", "/compress", "/context", "/exit",
-	"/help", "/list-sessions", "/model", "/models", "/new", "/palette", "/plugin", "/quit", "/rename", "/rewind",
-	"/search", "/sessions", "/settings", "/setup", "/ss", "/su", "/tasks", "/update",
+	"/help", "/list-sessions", "/llm", "/models", "/new", "/palette", "/plugin", "/quit", "/rename", "/rewind",
+	"/search", "/sessions", "/set-llm", "/set-model", "/settings", "/setup", "/ss", "/su", "/tasks", "/unset-llm", "/update",
 	"/usage", "/user",
 }
 
@@ -543,6 +543,14 @@ type ModelLister interface {
 	ListModels() []string
 	// ListAllModels returns models across all subscriptions (for global tier settings).
 	ListAllModels() []string
+	// ListAllModelEntries returns selectable models paired with their owning
+	// subscription (SubID/SubName empty for system-default models), for the model
+	// picker UI ("订阅名 · 模型名"). Skips disabled subscriptions and disabled models.
+	ListAllModelEntries() []protocol.ModelEntry
+	// RefreshModelEntries live-fetches /models for every enabled subscription,
+	// persists to CachedModels, and returns the fresh entry list. Use before
+	// opening the model picker so it reflects providers' true available models.
+	RefreshModelEntries() []protocol.ModelEntry
 	// EnsureModelsLoaded triggers a synchronous model list fetch if not yet loaded.
 	// After this call returns, ListModels() should return the full model list.
 	EnsureModelsLoaded()
@@ -559,6 +567,12 @@ type SubscriptionManager interface {
 	Rename(id, name string) error
 	Update(id string, sub *ch.Subscription) error
 	UpdatePerModelConfig(id, model string, pmc ch.PerModelConfig) error
+	// SetModelEnabled toggles a model's enabled flag (model-disable feature).
+	// Disabled models are excluded from cycling/model pickers and rejected by SelectModel.
+	SetModelEnabled(id, model string, enabled bool) error
+	// SetSubscriptionEnabled toggles a subscription's enabled flag (v40). A disabled
+	// subscription stops contributing models to the picker; credentials are preserved.
+	SetSubscriptionEnabled(id string, enabled bool) error
 	// GetSessionSubscription queries the backend for the session→subscription mapping.
 	// Returns empty strings if no mapping exists (server restart, first-time session, etc.).
 	GetSessionSubscription(senderID, chatID string) (subscriptionID, model string, err error)
@@ -567,7 +581,11 @@ type SubscriptionManager interface {
 // LLMSubscriber switches the active LLM for a user (called when subscription changes).
 type LLMSubscriber interface {
 	SwitchSubscription(senderID string, sub *ch.Subscription, chatID string) error
-	SwitchModel(senderID, model, chatID string)
+	// SelectModel switches to a specific (subscription, model) pair. Used by the
+	// model picker when the row carries an owning SubID, so the user picks the
+	// exact subscription that serves a model even when the same model name is
+	// served by multiple subscriptions.
+	SelectModel(senderID, subID, model, chatID string) error
 	GetDefaultModel() string
 }
 

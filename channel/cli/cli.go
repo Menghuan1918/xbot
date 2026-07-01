@@ -143,6 +143,10 @@ func (c *CLIChannel) Start() error {
 	// from Session JSON. Must happen after workDir AND chatID are both set
 	// so LoadSessionLLMState can find the correct session file.
 	c.model.refreshCachedModelName()
+	// Load the global thinking_mode user setting for the status-bar indicator.
+	// It is per-user (not per-session), so one refresh at startup is enough;
+	// the Ctrl+M toggle refreshes it inline.
+	c.model.refreshCachedThinkingMode()
 
 	// Refresh values cache with the session's actual subscription.
 	// At startup, valuesCache was populated with GetDefaultSubscription()
@@ -224,7 +228,7 @@ func (c *CLIChannel) Start() error {
 	// Resolve max context tokens immediately (not lazily on first progress event)
 	c.model.cachedMaxContextTokens = c.model.resolveMaxContextTokens()
 	// Also resolve max output tokens and compress ratio so the context bar
-	// threshold (red line) is correct from the first render, not defaulting to 8192.
+	// threshold (red line) is correct from the first render, not defaulting to 32768.
 	c.model.cachedMaxOutputTokens = c.model.resolveMaxOutputTokens()
 	c.model.cachedCompressRatio = c.model.resolveCompressRatio()
 

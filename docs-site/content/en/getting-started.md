@@ -118,10 +118,11 @@ Type `/` to see all slash commands. A few essentials:
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+K` | Command palette (fuzzy search) |
-| `Ctrl+N` | Cycle model |
-| `Ctrl+P` | Switch subscription |
-| `Ctrl+T` | Sub-agent progress panel |
-| `Ctrl+L` | Switch model (per-session) |
+| `Ctrl+N` | LLM panel (switch model + manage subscriptions: add/disable/delete) |
+| `Ctrl+T` | Sessions list |
+| `Ctrl+O` | Expand/collapse tools |
+| `Ctrl+J` | Newline in input |
+| `Ctrl+C` | Cancel current operation |
 
 ## Where to go next
 

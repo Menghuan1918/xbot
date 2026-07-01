@@ -16,13 +16,10 @@ func newTestConfig() *config.Config {
 	enableAutoCompress := false
 	return &config.Config{
 		LLM: config.LLMConfig{
-			Provider:      "openai",
-			APIKey:        "sk-test",
-			Model:         "gpt-4.1",
-			BaseURL:       "https://api.example.com/v1",
-			VanguardModel: "gpt-4.1-pro",
-			BalanceModel:  "gpt-4.1",
-			SwiftModel:    "gpt-4.1-mini",
+			Provider: "openai",
+			APIKey:   "sk-test",
+			Model:    "gpt-4.1",
+			BaseURL:  "https://api.example.com/v1",
 		},
 		Sandbox: config.SandboxConfig{Mode: "docker"},
 		Agent: config.AgentConfig{
@@ -52,9 +49,10 @@ func TestHandleCLIRPCAdminAddSubscription_ListRoundTrip(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 
 	aCfg := &config.Config{}
 	ag := &agent.Agent{}
@@ -106,9 +104,10 @@ func TestHandleCLIRPCAddSubscription_PreservesCredentials(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 
 	aCfg := &config.Config{}
 	ag := &agent.Agent{}
@@ -163,9 +162,10 @@ func TestHandleCLIRPCUpdateSubscription_PreservesCredentials(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 
 	aCfg := &config.Config{}
 	ag := &agent.Agent{}
@@ -334,15 +334,20 @@ func TestHandleCLIRPCSetDefaultSubscriptionRefreshesSenderCache(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 	// Admin's subscriptions are stored under cliSenderID ("cli_user") in production.
 	if err := subSvc.Add(&sqlite.LLMSubscription{ID: "sub-gpt", SenderID: "cli_user", Name: "gpt", Provider: "openai", BaseURL: "https://gpt.example/v1", APIKey: "sk-gpt", Model: "gpt-4.1", IsDefault: true}); err != nil {
 		t.Fatalf("add gpt: %v", err)
 	}
 	if err := subSvc.Add(&sqlite.LLMSubscription{ID: "sub-glm", SenderID: "cli_user", Name: "glm", Provider: "openai", BaseURL: "https://glm.example/v1", APIKey: "sk-glm", Model: "glm-5.1", IsDefault: false}); err != nil {
 		t.Fatalf("add glm: %v", err)
+	}
+	// Explicitly seed user_default_model (Add no longer seeds it when IsDefault=true).
+	if err := subSvc.SetDefault("sub-gpt"); err != nil {
+		t.Fatalf("set default: %v", err)
 	}
 
 	aCfg := &config.Config{}
@@ -379,15 +384,20 @@ func TestHandleCLIRPCSetDefaultSubscription_CrossIdentity(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 	// Subscriptions belong to "cli_user" (business identity)
 	if err := subSvc.Add(&sqlite.LLMSubscription{ID: "sub-gpt", SenderID: "cli_user", Name: "gpt", Provider: "openai", BaseURL: "https://gpt.example/v1", APIKey: "sk-gpt", Model: "gpt-4.1", IsDefault: true}); err != nil {
 		t.Fatalf("add gpt: %v", err)
 	}
 	if err := subSvc.Add(&sqlite.LLMSubscription{ID: "sub-glm", SenderID: "cli_user", Name: "glm", Provider: "openai", BaseURL: "https://glm.example/v1", APIKey: "sk-glm", Model: "glm-5.1", IsDefault: false}); err != nil {
 		t.Fatalf("add glm: %v", err)
+	}
+	// Explicitly seed user_default_model (Add no longer seeds it when IsDefault=true).
+	if err := subSvc.SetDefault("sub-gpt"); err != nil {
+		t.Fatalf("set default: %v", err)
 	}
 
 	aCfg := &config.Config{}
@@ -423,9 +433,10 @@ func TestHandleCLIRPCGetSessionSubscription(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 	if err := subSvc.Add(&sqlite.LLMSubscription{ID: "sub-a", SenderID: "cli_user", Name: "sub-a", Provider: "openai", BaseURL: "https://a.example/v1", APIKey: "sk-a", Model: "gpt-4o", IsDefault: true}); err != nil {
 		t.Fatalf("add sub-a: %v", err)
 	}
@@ -469,7 +480,7 @@ func TestHandleCLIRPCGetSessionSubscription_Empty(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	factory.SetSubscriptionSvc(sqlite.NewLLMSubscriptionService(db))
 
 	aCfg := &config.Config{}
@@ -507,9 +518,10 @@ func TestSetDefaultSubscription_GlobalSwitch_PreservesPerSession(t *testing.T) {
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 
 	aCfg := &config.Config{}
 	ag := &agent.Agent{}
@@ -613,9 +625,10 @@ func TestSetDefaultSubscription_PerSessionSwitch_DoesNotAffectOtherSessions(t *t
 	}
 	defer db.Close()
 
-	factory := agent.NewLLMFactory(sqlite.NewUserLLMConfigService(db), &llm.MockLLM{}, "default-model")
+	factory := agent.NewLLMFactory(&llm.MockLLM{}, "default-model")
 	subSvc := sqlite.NewLLMSubscriptionService(db)
 	factory.SetSubscriptionSvc(subSvc)
+	factory.SetTenantSvc(sqlite.NewTenantService(db))
 
 	aCfg := &config.Config{}
 	ag := &agent.Agent{}

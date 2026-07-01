@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"strings"
-	ch "xbot/channel"
 
 	"xbot/session"
 	"xbot/tools"
@@ -52,19 +51,6 @@ func (m *cliModel) handleSlashCommand(cmd string) tea.Cmd {
 				// Get current values: config is the single source of truth for LLM settings.
 				// Only overlay non-LLM settings from SettingsService (e.g. theme, language).
 				currentValues := m.mergeCLISettingsValues()
-				// Inject model list into combo options for tier model selectors.
-				if m.channel.modelLister != nil {
-					allModels := m.channel.modelLister.ListAllModels()
-					for i, s := range schema {
-						if (s.Key == "vanguard_model" || s.Key == "balance_model" || s.Key == "swift_model") && len(allModels) > 0 {
-							opts := make([]ch.SettingOption, len(allModels))
-							for j, ml := range allModels {
-								opts[j] = ch.SettingOption{Label: ml, Value: ml}
-							}
-							schema[i].Options = opts
-						}
-					}
-				}
 				m.panelState.isSetup = false // regular settings, not setup wizard
 				m.openSettingsPanel(schema, currentValues, func(values map[string]string) {
 					// --- ch.Subscription generation guard ---

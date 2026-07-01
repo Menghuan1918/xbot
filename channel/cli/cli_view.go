@@ -293,6 +293,11 @@ func (m *cliModel) renderReadyStatus() string {
 	m.modelNameZoneXEnd = -1
 	if m.cachedModelName != "" {
 		modelHint := m.cachedModelName
+		// Show "模型名(订阅名)" so models served by different subscriptions are
+		// distinguishable. On narrow screens fall back to the model name only.
+		if m.cachedSubName != "" && !m.isNarrow() {
+			modelHint = m.cachedModelName + "(" + m.cachedSubName + ")"
+		}
 		// Track X position of the model name part for click detection.
 		// The model name is: prefixBeforeModel + modelHint
 		// where prefixBeforeModel = join(readyParts without modelHint) + " · "
@@ -307,6 +312,21 @@ func (m *cliModel) renderReadyStatus() string {
 		m.modelNameZoneXStart = lipgloss.Width(prefixBeforeModel)
 		m.modelNameZoneXEnd = m.modelNameZoneXStart + lipgloss.Width(modelHint)
 		readyParts = append(readyParts, modelHint)
+	}
+	// Thinking-mode indicator (global toggle, Ctrl+M). Skipped on narrow screens
+	// (the narrow truncation below would drop it anyway, leaving a stale click zone).
+	m.thinkingZoneXStart = -1
+	m.thinkingZoneXEnd = -1
+	if !m.isNarrow() {
+		thinkingHint := m.thinkingModeLabel()
+		thinkingIdx := len(readyParts) // index where the indicator will be appended
+		prefixBeforeThinking := ""
+		if thinkingIdx > 0 {
+			prefixBeforeThinking = strings.Join(readyParts, " · ") + " · "
+		}
+		m.thinkingZoneXStart = lipgloss.Width(prefixBeforeThinking)
+		m.thinkingZoneXEnd = m.thinkingZoneXStart + lipgloss.Width(thinkingHint)
+		readyParts = append(readyParts, thinkingHint)
 	}
 	// Narrow screen: drop msg count to save space
 	if m.isNarrow() && len(readyParts) > 2 {
@@ -1212,36 +1232,40 @@ func (m *cliModel) View() (v tea.View) {
 		v.Cursor.Color = m.styles.TACursor.GetForeground()
 	}
 
-	// Command palette overlay (highest priority — hides everything)
-	if m.paletteOpen {
-		if overlay := m.viewCommandPalette(m.width, m.height); overlay != "" {
-			v.Content = overlay
-		}
-		// Re-track zones for overlay
+	// Render active overlay (Palette > QuickSwitch > Rewind).
+	// Returns the overlay content and whether to short-circuit (return immediately).
+	if overlay, shortCircuit := m.renderActiveOverlay(m.width, m.height); overlay != "" {
+		v.Content = overlay
 		m.mouseZones.reset()
 		m.trackOverlayZones(&m.mouseZones)
-		return v
-	}
-
-	// Quick switch overlay
-	if m.quickSwitchMode != "" {
-		if overlay := m.viewQuickSwitch(m.width, m.height); overlay != "" {
-			v.Content = overlay
+		if shortCircuit {
+			return v
 		}
-		m.mouseZones.reset()
-		m.trackOverlayZones(&m.mouseZones)
-	}
-
-	// Rewind overlay
-	if m.rewindMode {
-		if overlay := m.viewRewindPanel(m.width, m.height); overlay != "" {
-			v.Content = overlay
-		}
-		m.mouseZones.reset()
-		m.trackOverlayZones(&m.mouseZones)
 	}
 
 	return v
+}
+
+// renderActiveOverlay renders the active overlay (Palette > QuickSwitch > Rewind).
+// Returns the overlay content and whether the caller should short-circuit
+// (return immediately, e.g. for Palette which hides everything).
+func (m *cliModel) renderActiveOverlay(width, height int) (overlay string, shortCircuit bool) {
+	// Command palette (highest priority — hides everything)
+	if m.paletteOpen {
+		overlay = m.viewCommandPalette(width, height)
+		return overlay, true
+	}
+	// Quick switch overlay
+	if m.quickSwitchMode != "" {
+		overlay = m.viewQuickSwitch(width, height)
+		return overlay, false
+	}
+	// Rewind overlay
+	if m.rewindMode {
+		overlay = m.viewRewindPanel(width, height)
+		return overlay, false
+	}
+	return "", false
 }
 
 // allTodosDone returns true when todos exist and every item is marked done.
@@ -1944,7 +1968,10 @@ func (m *cliModel) renderFooter() string {
 				hints = append(hints, m.footerHintItem("Ctrl+e", m.locale.FooterFold, "ctrl+e"))
 			}
 			if m.subscriptionMgr != nil && !m.isNarrow() {
-				hints = append(hints, m.footerHintItem("Ctrl+p", "Subs", "ctrl+p"))
+				hints = append(hints, m.footerHintItem("Ctrl+n", "Models", "ctrl+n"))
+			}
+			if !m.isNarrow() {
+				hints = append(hints, m.footerHintItem("Ctrl+m", "Thinking", "ctrl+m"))
 			}
 			if !m.isNarrow() {
 				hints = append(hints, m.footerHintItem("Ctrl+t", "Sessions", "ctrl+t"))

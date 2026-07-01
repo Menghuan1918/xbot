@@ -51,7 +51,9 @@ func (m *cliModel) readSettings() map[string]string {
 		}
 	}
 
-	// 3. ch.Subscription-scoped fields (provider, key, model, max_output, thinking_mode, max_context)
+	// 3. ch.Subscription-scoped fields (provider, key, model, max_output, max_context)
+	// thinking_mode is NOT subscription-scoped anymore — it's a global user
+	// setting (read in step 2 above via IsUserScopedSettingKey).
 	sub := m.activeSubscription()
 	if sub != nil {
 		values["llm_provider"] = sub.Provider
@@ -59,7 +61,6 @@ func (m *cliModel) readSettings() map[string]string {
 		values["llm_base_url"] = sub.BaseURL
 		values["llm_model"] = sub.Model
 		values["max_output_tokens"] = strconv.Itoa(sub.MaxOutputTokens)
-		values["thinking_mode"] = sub.ThinkingMode
 		// api_type: per-model config → subscription-level
 		// Use the SESSION's active model for per-model override, matching
 		// max_context_tokens behavior.
@@ -171,12 +172,8 @@ func (m *cliModel) saveSettings(values map[string]string) {
 						}
 					}
 				}
-				if v, ok := values["thinking_mode"]; ok {
-					if updated.ThinkingMode != v {
-						updated.ThinkingMode = v
-						changed = true
-					}
-				}
+				// thinking_mode is no longer subscription-scoped; it's a global user
+				// setting persisted below via settingsSvc.SetSetting.
 				if v, ok := values["api_type"]; ok {
 					if updated.APIType != v {
 						updated.APIType = v
@@ -268,9 +265,9 @@ func (m *cliModel) saveSettings(values map[string]string) {
 						}
 						// Update local cache so the context bar reflects the new value immediately.
 						m.cachedMaxContextTokens = n
-						// Persist to session JSON so it survives session switches.
+						// DB is the single source of truth — no local JSON persistence.
+						// SaveSessionLLMState only persists SubscriptionID + Model.
 						existing := LoadSessionLLMState(m.workDir, m.chatID)
-						existing.MaxContextTokens = n
 						SaveSessionLLMState(m.workDir, m.chatID, existing, m.remoteMode)
 					}
 				}
@@ -280,7 +277,19 @@ func (m *cliModel) saveSettings(values map[string]string) {
 
 	// --- User-scoped DB writes ---
 	if m.channel.settingsSvc != nil {
+		// thinking_mode is a global user toggle; "" (auto) is a valid, intentional
+		// value, so persist it even when empty (the generic loop below skips "" to
+		// avoid overwriting other keys with defaults). Without this, toggling back
+		// to "auto" wouldn't clear a previously-stored "enabled".
+		if v, ok := values["thinking_mode"]; ok && ch.IsUserScopedSettingKey("thinking_mode") {
+			if err := m.channel.settingsSvc.SetSetting(m.channelName, m.senderID, "thinking_mode", v); err != nil {
+				logrus.WithFields(logrus.Fields{"key": "thinking_mode", "err": err}).Warn("saveSettings: SetSetting failed")
+			}
+		}
 		for k, v := range values {
+			if k == "thinking_mode" {
+				continue // handled above
+			}
 			if v != "" && ch.IsUserScopedSettingKey(k) && !ch.IsSubscriptionScopedSettingKey(k) {
 				if err := m.channel.settingsSvc.SetSetting(m.channelName, m.senderID, k, v); err != nil {
 					logrus.WithFields(logrus.Fields{"key": k, "err": err}).Warn("saveSettings: SetSetting failed")
@@ -310,6 +319,12 @@ func (m *cliModel) saveSettings(values map[string]string) {
 				if k == "llm_api_key" && strings.TrimSpace(v) != "" {
 					llmCredsSaved = true
 				}
+				continue
+			}
+			// max_context_tokens is per-model (PerModelConfigs), already handled
+			// above via UpdatePerModelConfig. Never pass it to ApplySettings —
+			// that would call SetMaxContextTokens globally and contaminate all models.
+			if k == "max_context_tokens" {
 				continue
 			}
 			runtimeValues[k] = v

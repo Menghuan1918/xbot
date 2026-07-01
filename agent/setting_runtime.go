@@ -33,23 +33,6 @@ type SettingHandler struct {
 //  2. Add a handler here
 //  3. Done — no switch-case to update, no if-chain to extend.
 var SettingHandlerRegistry = map[string]SettingHandler{
-	// --- LLM tier settings (config-only, agent effects applied by caller via SetModelTiers) ---
-	"vanguard_model": {
-		ApplyConfig: func(cfg *config.Config, value string) {
-			cfg.LLM.VanguardModel = strings.TrimSpace(value)
-		},
-	},
-	"balance_model": {
-		ApplyConfig: func(cfg *config.Config, value string) {
-			cfg.LLM.BalanceModel = strings.TrimSpace(value)
-		},
-	},
-	"swift_model": {
-		ApplyConfig: func(cfg *config.Config, value string) {
-			cfg.LLM.SwiftModel = strings.TrimSpace(value)
-		},
-	},
-
 	// --- Agent settings ---
 	"sandbox_mode": {
 		ApplyConfig: func(cfg *config.Config, value string) { cfg.Sandbox.Mode = value },
@@ -126,23 +109,6 @@ var SettingHandlerRegistry = map[string]SettingHandler{
 			}
 		},
 	},
-	"max_context_tokens": {
-		// max_context is subscription-scoped, stored in PerModelConfigs.
-		// Do NOT write to cfg.Agent.MaxContextTokens (global fallback only).
-		ApplyConfig: nil,
-		ApplyAgent: func(ag *Agent, senderID, chatID, value string) {
-			if ag == nil {
-				return
-			}
-			if n, err := strconv.Atoi(value); err == nil && n >= 0 {
-				if chatID != "" {
-					ag.SetMaxContextTokens(n, chatID)
-				} else {
-					ag.SetMaxContextTokens(n)
-				}
-			}
-		},
-	},
 	"enable_auto_compress": {
 		ApplyConfig: func(cfg *config.Config, value string) {
 			b := cli.ParseSettingBool(value)
@@ -168,6 +134,20 @@ var SettingHandlerRegistry = map[string]SettingHandler{
 	"sidebar_sections": {},
 	"chat_max_width":   {},
 	"chat_center":      {},
+
+	// --- Global thinking mode ---
+	// thinking_mode is a global user setting (no longer subscription-scoped).
+	// ResolveLLM caches the resolved thinking value in sessionMemo, so changing
+	// it must drop every session memo for the user — the next call re-reads the
+	// new value from the user_settings DB.
+	"thinking_mode": {
+		ApplyAgent: func(ag *Agent, senderID, chatID, value string) {
+			if ag == nil || ag.llmFactory == nil {
+				return
+			}
+			ag.llmFactory.InvalidateSender(senderID)
+		},
+	},
 }
 
 // ApplyRuntimeSetting applies a single setting change to the in-memory config and agent.
@@ -182,14 +162,10 @@ func ApplyRuntimeSetting(cfg *config.Config, ag *Agent, senderID, key, value str
 		return
 	}
 	applyHandler(cfg, ag, senderID, "", handler, value)
-	if ag != nil {
-		ag.LLMFactory().SetModelTiers(cfg.LLM)
-	}
 }
 
 // ApplyRuntimeSettings applies a batch of setting changes.
 // context_mode is processed LAST so it correctly overrides enable_auto_compress.
-// SetModelTiers is called once after all keys are processed.
 // Caller should save config after this returns.
 func ApplyRuntimeSettings(cfg *config.Config, ag *Agent, senderID string, values map[string]string) {
 	for k, v := range values {
@@ -209,9 +185,6 @@ func ApplyRuntimeSettings(cfg *config.Config, ag *Agent, senderID string, values
 	if v, ok := values["context_mode"]; ok && v != "" {
 		handler := SettingHandlerRegistry["context_mode"]
 		applyHandler(cfg, ag, senderID, "", handler, v)
-	}
-	if ag != nil {
-		ag.LLMFactory().SetModelTiers(cfg.LLM)
 	}
 }
 

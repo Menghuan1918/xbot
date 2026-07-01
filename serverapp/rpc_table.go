@@ -19,6 +19,7 @@ import (
 	llm_pkg "xbot/llm"
 	log "xbot/logger"
 	"xbot/plugin"
+	"xbot/protocol"
 	"xbot/session"
 	"xbot/storage/sqlite"
 	"xbot/tools"
@@ -276,17 +277,6 @@ func registerSettingsHandlers(t RPCTable, h *RPCContext) {
 		h.Ag.SetMaxConcurrency(p.N)
 		return nil
 	}))
-	t["set_max_context_tokens"] = h.requireAdmin(rpc1void(func(ctx context.Context, p struct {
-		MaxContext int    `json:"max_context"`
-		ChatID     string `json:"chat_id,omitempty"`
-	}) error {
-		if p.ChatID != "" {
-			h.Ag.SetMaxContextTokens(p.MaxContext, p.ChatID)
-		} else {
-			h.Ag.SetMaxContextTokens(p.MaxContext)
-		}
-		return nil
-	}))
 	t["set_compression_threshold"] = h.requireAdmin(rpc1void(func(ctx context.Context, p struct {
 		Threshold float64 `json:"threshold"`
 	}) error {
@@ -300,13 +290,12 @@ func registerSettingsHandlers(t RPCTable, h *RPCContext) {
 func registerLLMHandlers(t RPCTable, h *RPCContext) {
 	t["get_default_model"] = rpc0(func(ctx context.Context) string {
 		bizID := rpcBizID(ctx)
-		model := ""
-		if subSvc := h.Ag.LLMFactory().GetSubscriptionSvc(); subSvc != nil {
-			if sub, err := subSvc.GetDefault(bizID); err == nil && sub != nil && sub.Model != "" {
-				model = sub.Model
-			}
-		}
-		if model == "" {
+		// Model-first: resolve the user's last-used (sub, model) pair via
+		// the model-first chain (sessionMemo → tenants → user_default_model),
+		// NOT the subscription's default Model field.
+		_, model, err := h.Ag.LLMFactory().ResolveActiveSubModel(bizID, "", "")
+		if err != nil || model == "" {
+			// Fallback to GetLLM resolution
 			_, m, _, _, _ := h.Ag.LLMFactory().GetLLM(bizID)
 			model = m
 		}
@@ -314,53 +303,59 @@ func registerLLMHandlers(t RPCTable, h *RPCContext) {
 		return model
 	})
 	t["set_user_model"] = rpc1void(func(ctx context.Context, p struct {
+		SubID string `json:"sub_id"`
 		Model string `json:"model"`
 	}) error {
-		return h.Ag.SetUserModel(rpcBizID(ctx), p.Model)
+		return h.Ag.SetUserModel(rpcBizID(ctx), p.SubID, p.Model)
 	})
-	t["switch_model"] = rpc1void(func(ctx context.Context, p struct {
+	// select_model: model-first per-session selection. Sets (subID, model) for a
+	// chat via the ResolveLLM/SelectModel path.
+	t["select_model"] = rpc1void(func(ctx context.Context, p struct {
+		SubID  string `json:"sub_id"`
 		Model  string `json:"model"`
 		ChatID string `json:"chat_id,omitempty"`
 	}) error {
 		bizID := rpcBizID(ctx)
-		log.WithField("sender_id", bizID).WithField("model", p.Model).WithField("chat_id", p.ChatID).Info("RPC switch_model")
-		if p.ChatID != "" {
-			h.Ag.LLMFactory().SwitchModel(bizID, p.Model, p.ChatID)
-		} else {
-			h.Ag.LLMFactory().SwitchModel(bizID, p.Model)
+		channel := "cli"
+		if p.ChatID == "" {
+			return fmt.Errorf("select_model requires a chat_id (use set_default_model for the user-level default)")
 		}
-		if subSvc := h.Ag.LLMFactory().GetSubscriptionSvc(); subSvc != nil {
-			if sub, err := subSvc.GetDefault(bizID); err == nil && sub != nil {
-				// Only persist to subscription model for user-level switches (no chatID).
-				// Per-session switches (with chatID) must NOT modify the subscription —
-				// otherwise switching model in one session contaminates all sessions
-				// sharing the same subscription.
-				if p.ChatID == "" {
-					if err := subSvc.SetModel(sub.ID, p.Model); err != nil {
-						log.WithError(err).Warn("RPC switch_model: SetModel failed")
-					}
-				}
-				// Per-session: persist model choice to tenants table so it survives restarts.
-				if p.ChatID != "" && h.Ag.MultiSession() != nil && h.Ag.MultiSession().DB() != nil {
-					if err := sqlite.NewTenantService(h.Ag.MultiSession().DB()).SetTenantSubscription("cli", p.ChatID, sub.ID, p.Model); err != nil {
-						log.WithError(err).Warn("RPC switch_model: SetTenantSubscription failed")
-					}
-				}
-			}
-		}
-		return nil
+		return h.Ag.LLMFactory().SelectModel(bizID, p.ChatID, channel, p.SubID, p.Model)
 	})
-	t["get_user_max_context"] = rpc0(func(ctx context.Context) int { return h.Ag.GetUserMaxContext(rpcBizID(ctx)) })
+	// set_default_model: model-first user-level default (subscription, model).
+	t["set_default_model"] = rpc1void(func(ctx context.Context, p struct {
+		SubID string `json:"sub_id"`
+		Model string `json:"model"`
+	}) error {
+		return h.Ag.LLMFactory().SetUserDefaultModel(rpcBizID(ctx), p.SubID, p.Model)
+	})
+	// set_model_enabled: toggle a model's enabled flag (model disable feature).
+	t["set_model_enabled"] = rpc1void(func(ctx context.Context, p struct {
+		SubID   string `json:"sub_id"`
+		Model   string `json:"model"`
+		Enabled bool   `json:"enabled"`
+	}) error {
+		return h.Ag.LLMFactory().SetModelEnabled(p.SubID, p.Model, p.Enabled)
+	})
+	// set_subscription_enabled: toggle a subscription's enabled flag (v40). A
+	// disabled subscription stops contributing models to the picker.
+	t["set_subscription_enabled"] = rpc1void(func(ctx context.Context, p struct {
+		SubID   string `json:"sub_id"`
+		Enabled bool   `json:"enabled"`
+	}) error {
+		return h.Ag.LLMFactory().SetSubscriptionEnabled(p.SubID, p.Enabled)
+	})
+	t["get_user_max_context"] = rpc0(func(ctx context.Context) int { return h.Ag.GetUserMaxContext(rpcBizID(ctx), "", "") })
 	t["set_user_max_context"] = rpc1void(func(ctx context.Context, p struct {
 		MaxContext int `json:"max_context"`
 	}) error {
-		return h.Ag.SetUserMaxContext(rpcBizID(ctx), p.MaxContext)
+		return h.Ag.SetUserMaxContext(rpcBizID(ctx), "", "", p.MaxContext)
 	})
-	t["get_user_max_output_tokens"] = rpc0(func(ctx context.Context) int { return h.Ag.GetUserMaxOutputTokens(rpcBizID(ctx)) })
+	t["get_user_max_output_tokens"] = rpc0(func(ctx context.Context) int { return h.Ag.GetUserMaxOutputTokens(rpcBizID(ctx), "", "") })
 	t["set_user_max_output_tokens"] = rpc1void(func(ctx context.Context, p struct {
 		MaxTokens int `json:"max_tokens"`
 	}) error {
-		return h.Ag.SetUserMaxOutputTokens(rpcBizID(ctx), p.MaxTokens)
+		return h.Ag.SetUserMaxOutputTokens(rpcBizID(ctx), "", "", p.MaxTokens)
 	})
 	t["get_user_thinking_mode"] = rpc0(func(ctx context.Context) string { return h.Ag.GetUserThinkingMode(rpcBizID(ctx)) })
 	t["set_user_thinking_mode"] = rpc1void(func(ctx context.Context, p struct {
@@ -398,20 +393,21 @@ func registerLLMHandlers(t RPCTable, h *RPCContext) {
 		log.WithField("count", len(models)).Debug("RPC list_all_models")
 		return models, nil
 	})
-	t["set_model_tiers"] = h.requireAdmin(rpc1void(func(ctx context.Context, p config.LLMConfig) error {
+	t["list_all_model_entries"] = rpc0err(func(ctx context.Context) ([]protocol.ModelEntry, error) {
 		if h.Ag.LLMFactory() == nil {
-			return fmt.Errorf("LLM factory not available")
+			return nil, fmt.Errorf("LLM factory not available")
 		}
-		h.Ag.LLMFactory().SetModelTiers(p)
-		return nil
-	}))
-	t["set_proxy_llm"] = rpc1void(func(ctx context.Context, p struct {
-		Model string `json:"model"`
-	}) error {
-		if h.Ag.LLMFactory() != nil {
-			h.Ag.LLMFactory().SwitchModel(rpcBizID(ctx), p.Model)
+		entries := h.Ag.LLMFactory().ListAllModelEntriesForUser(rpcBizID(ctx))
+		log.WithField("count", len(entries)).Debug("RPC list_all_model_entries")
+		return entries, nil
+	})
+	t["refresh_model_entries"] = rpc0err(func(ctx context.Context) ([]protocol.ModelEntry, error) {
+		if h.Ag.LLMFactory() == nil {
+			return nil, fmt.Errorf("LLM factory not available")
 		}
-		return nil
+		entries := h.Ag.LLMFactory().RefreshModelEntriesForUser(rpcBizID(ctx))
+		log.WithField("count", len(entries)).Info("RPC refresh_model_entries")
+		return entries, nil
 	})
 	t["clear_proxy_llm"] = rpc0void(func(ctx context.Context) error { h.Ag.ClearProxyLLM(rpcBizID(ctx)); return nil })
 	t["set_global_max_tokens"] = h.requireAdmin(rpc1void(func(ctx context.Context, p struct {
@@ -539,6 +535,9 @@ func registerSubscriptionHandlers(t RPCTable, h *RPCContext) {
 		// PerModelConfigs. InvalidateSender only clears the user-level entry, so
 		// GetLLMForChat hits the per-chat cache and returns the old MaxContext.
 		h.Ag.LLMFactory().Invalidate(bizID)
+		// Drop the new-path client cache + session memos for this subscription so
+		// ResolveLLM picks up the new per-model config.
+		h.Ag.LLMFactory().InvalidateSubscription(existing.ID)
 		return nil
 	})
 	t["remove_subscription"] = rpc1void(func(ctx context.Context, p struct {
@@ -558,7 +557,12 @@ func registerSubscriptionHandlers(t RPCTable, h *RPCContext) {
 		if err := svc.Remove(p.ID); err != nil {
 			return err
 		}
+		// Drop both the legacy entries map and the new clientCache/sessionMemo
+		// for this subscription. Invalidate(senderID) clears legacy entries;
+		// InvalidateSubscription(subID) drops the per-subscription client cache
+		// used by ResolveLLM.
 		h.Ag.LLMFactory().Invalidate(sub.SenderID)
+		h.Ag.LLMFactory().InvalidateSubscription(sub.ID)
 		return nil
 	})
 	t["set_default_subscription"] = rpc1void(h.setDefaultSubscription)
@@ -777,7 +781,7 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		// because ChatRenameFn writes labels with cliSenderID, not the WS auth identity.
 		senderID := bizID
 		if db := h.Ag.MultiSession().DB(); db != nil {
-			cs := sqlite.NewChatService(db.Conn())
+			cs := sqlite.NewChatService(db)
 			if err := cs.DeleteChat(p.Channel, senderID, p.ChatID); err != nil {
 				return nil, fmt.Errorf("delete chat: %w", err)
 			}
@@ -814,7 +818,7 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		// consistent with ChatRenameFn which writes labels with cliSenderID.
 		senderID := bizID
 		if db := h.Ag.MultiSession().DB(); db != nil {
-			cs := sqlite.NewChatService(db.Conn())
+			cs := sqlite.NewChatService(db)
 			if err := cs.RenameChat(p.Channel, senderID, p.ChatID, p.NewName); err != nil {
 				return nil, fmt.Errorf("rename chat: %w", err)
 			}
@@ -1235,36 +1239,11 @@ func (h *RPCContext) listSubscriptions(ctx context.Context) ([]channel.Subscript
 	}
 	result := make([]channel.Subscription, len(subs))
 	for i, s := range subs {
-		// Merge subscription_models table data into PerModelConfigs so the
-		// client sees a unified view. Without this, client-side
-		// ResolveEffectiveMaxContext (which only checks PerModelConfigs) misses
-		// values stored in the subscription_models table (v35+ authoritative source).
-		mergeSubscriptionModels(svc, s)
+		// PerModelConfigs is populated from the subscription_models table by the
+		// storage layer (loadPerModelConfigs, v42); no merge needed here.
 		result[i] = subToChannel(s)
 	}
 	return result, nil
-}
-
-// mergeSubscriptionModels merges subscription_models table rows into the
-// subscription's PerModelConfigs map. Table values are authoritative (v35+);
-// existing PerModelConfigs entries are preserved only if the table has no
-// entry for that model.
-func mergeSubscriptionModels(svc *sqlite.LLMSubscriptionService, sub *sqlite.LLMSubscription) {
-	models, err := svc.GetModels(sub.ID)
-	if err != nil || len(models) == 0 {
-		return
-	}
-	if sub.PerModelConfigs == nil {
-		sub.PerModelConfigs = make(map[string]sqlite.PerModelConfig, len(models))
-	}
-	for _, m := range models {
-		// subscription_models is authoritative — always overwrite.
-		sub.PerModelConfigs[m.Model] = sqlite.PerModelConfig{
-			MaxContext:      m.MaxContext,
-			MaxOutputTokens: m.MaxOutputTokens,
-			APIType:         m.APIType,
-		}
-	}
 }
 
 func (h *RPCContext) getDefaultSubscription(ctx context.Context) (*channel.Subscription, error) {
@@ -1280,7 +1259,6 @@ func (h *RPCContext) getDefaultSubscription(ctx context.Context) (*channel.Subsc
 	if sub == nil {
 		return nil, nil
 	}
-	mergeSubscriptionModels(svc, sub)
 	ch := subToChannel(sub)
 	return &ch, nil
 }
@@ -1355,6 +1333,13 @@ func (h *RPCContext) updateSubscription(ctx context.Context, p struct {
 	if p.Sub.APIKey != "" && !strings.HasSuffix(p.Sub.APIKey, "****") {
 		dbSub.APIKey = p.Sub.APIKey
 	}
+	// PerModelConfigs are persisted to the subscription_models table (v42 sole source).
+	// Update() no longer writes the JSON column, so persist them explicitly when provided.
+	if p.Sub.PerModelConfigs != nil {
+		if err := svc.UpdatePerModelConfigs(dbSub.ID, p.Sub.PerModelConfigs); err != nil {
+			return fmt.Errorf("update per-model configs: %w", err)
+		}
+	}
 	if err := svc.Update(dbSub); err != nil {
 		return err
 	}
@@ -1362,7 +1347,12 @@ func (h *RPCContext) updateSubscription(ctx context.Context, p struct {
 	// Updating a subscription's fields (name, model, key) should NOT wipe every
 	// session's per-session LLM override. Only the user-level default is affected.
 	h.Ag.LLMFactory().InvalidateSender(existing.SenderID)
-	if existing.IsDefault {
+	// Drop the new-path client cache for this subscription so ResolveLLM rebuilds
+	// the client with the updated credentials/base_url/config.
+	h.Ag.LLMFactory().InvalidateSubscription(dbSub.ID)
+	// If this subscription is the user's default (per user_default_model), re-switch
+	// the user-level entry so defaultLLM picks up the updated fields immediately.
+	if udm, _ := svc.GetUserDefaultModel(existing.SenderID); udm != nil && udm.SubscriptionID == existing.ID {
 		h.Ag.LLMFactory().SwitchSubscription(bizID, dbSub, "")
 	}
 	return nil
@@ -1405,6 +1395,15 @@ func (h *RPCContext) setDefaultSubscription(ctx context.Context, p struct {
 	if err := svc.SetDefault(p.ID); err != nil {
 		return err
 	}
+	// Keep user_default_model in sync so ResolveLLM's user-level fallback sees
+	// the new default subscription for fresh sessions.
+	defaultModel := sub.Model
+	if defaultModel == "" {
+		defaultModel = h.Ag.LLMFactory().PickDefaultModelForSub(sub)
+	}
+	if err := h.Ag.LLMFactory().SetUserDefaultModel(bizID, sub.ID, defaultModel); err != nil {
+		log.WithError(err).Warn("RPC setDefaultSubscription: SetUserDefaultModel failed")
+	}
 	h.Ag.LLMFactory().InvalidateSender(bizID)
 	return h.Ag.LLMFactory().SwitchSubscription(bizID, sub, "")
 }
@@ -1434,6 +1433,9 @@ func (h *RPCContext) setSubscriptionModel(ctx context.Context, p struct {
 	if updated != nil {
 		if def, _ := svc.GetDefault(updated.SenderID); def != nil && def.ID == updated.ID {
 			h.Ag.LLMFactory().InvalidateSender(updated.SenderID)
+			// Drop the new-path client cache for this subscription so ResolveLLM
+			// picks up the new default model + per-model config.
+			h.Ag.LLMFactory().InvalidateSubscription(updated.ID)
 			if err := h.Ag.LLMFactory().SwitchSubscription(updated.SenderID, updated, ""); err != nil {
 				return err
 			}
@@ -1589,11 +1591,12 @@ func subToChannel(s *sqlite.LLMSubscription) channel.Subscription {
 	return channel.Subscription{
 		ID: s.ID, Name: s.Name, Provider: s.Provider,
 		BaseURL: s.BaseURL, APIKey: maskAPIKey(s.APIKey),
-		Model: s.Model, Active: s.IsDefault,
+		Model: s.Model, Active: s.IsDefault, Enabled: s.Enabled,
 		MaxOutputTokens: s.MaxOutputTokens, MaxContext: s.MaxContext,
 		ThinkingMode:    s.ThinkingMode,
 		APIType:         s.APIType,
 		PerModelConfigs: s.PerModelConfigs,
+		IsSystem:        s.IsSystem,
 	}
 }
 

@@ -1,9 +1,7 @@
 package cli
 
 import (
-	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 	"testing"
 	"xbot/channel"
@@ -90,16 +88,48 @@ func (m *mockSubscriptionManager) GetSessionSubscription(senderID, chatID string
 	return "", "", nil
 }
 
-// TestApplyQuickSwitch tests that switching a subscription actually calls SwitchLLM.
-func TestApplyQuickSwitch(t *testing.T) {
-	// Track what SwitchLLM received
-	var switchedProvider, switchedBaseURL, switchedAPIKey, switchedModel string
-	switchCalled := false
+func (m *mockSubscriptionManager) SetModelEnabled(id, model string, enabled bool) error {
+	for i := range m.subs {
+		if m.subs[i].ID == id {
+			if m.subs[i].PerModelConfigs == nil {
+				m.subs[i].PerModelConfigs = make(map[string]channel.PerModelConfig)
+			}
+			pmc := m.subs[i].PerModelConfigs[model]
+			pmc.Enabled = enabled
+			m.subs[i].PerModelConfigs[model] = pmc
+		}
+	}
+	return nil
+}
 
+func (m *mockSubscriptionManager) SetSubscriptionEnabled(id string, enabled bool) error {
+	for i := range m.subs {
+		if m.subs[i].ID == id {
+			m.subs[i].Enabled = enabled
+		}
+	}
+	return nil
+}
+
+// findLLMRowBySubID returns the row index of the subscription with the given ID
+// in the unified LLM panel, or -1 if not found.
+func findLLMRowBySubID(m *cliModel, subID string) int {
+	for i, r := range m.quickSwitchRows {
+		if r.kind == qsSub && r.sub.ID == subID {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestApplyQuickSwitch tests that applying a subscription row toggles its
+// enabled state (model-first: the panel is management-only for subscriptions —
+// add / disable / delete — and no longer "switches" the active subscription).
+func TestApplyQuickSwitch(t *testing.T) {
 	mgr := &mockSubscriptionManager{
 		subs: []channel.Subscription{
-			{ID: "sub1", Name: "glm", Provider: "openai", BaseURL: "https://glm.example.com/v1", APIKey: "key1", Model: "glm-4", Active: true},
-			{ID: "sub2", Name: "gpt", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "key2", Model: "gpt-4.1", Active: false},
+			{ID: "sub1", Name: "glm", Provider: "openai", BaseURL: "https://glm.example.com/v1", APIKey: "key1", Model: "glm-4", Active: true, Enabled: true},
+			{ID: "sub2", Name: "gpt", Provider: "openai", BaseURL: "https://api.openai.com/v1", APIKey: "key2", Model: "gpt-4.1", Active: false, Enabled: true},
 		},
 	}
 
@@ -108,11 +138,7 @@ func TestApplyQuickSwitch(t *testing.T) {
 	model.channel = &CLIChannel{
 		config: &CLIChannelConfig{
 			SwitchLLM: func(provider, baseURL, apiKey, model string) error {
-				switchCalled = true
-				switchedProvider = provider
-				switchedBaseURL = baseURL
-				switchedAPIKey = apiKey
-				switchedModel = model
+				t.Fatal("SwitchLLM must NOT be called from the subscription panel anymore")
 				return nil
 			},
 			GetCurrentValues: func() map[string]string {
@@ -121,70 +147,47 @@ func TestApplyQuickSwitch(t *testing.T) {
 		},
 	}
 
-	// Open quick switch, select second subscription, apply
-	model.openQuickSwitch("subscription")
-	if model.quickSwitchMode != "subscription" {
-		t.Fatalf("expected quickSwitchMode=subscription, got %s", model.quickSwitchMode)
+	// Open the unified LLM panel.
+	model.openQuickSwitch("")
+	if model.quickSwitchMode != "llm" {
+		t.Fatalf("expected quickSwitchMode=llm, got %s", model.quickSwitchMode)
+	}
+	// Both subscriptions must be present as rows.
+	idx1 := findLLMRowBySubID(model, "sub1")
+	idx2 := findLLMRowBySubID(model, "sub2")
+	if idx1 < 0 || idx2 < 0 {
+		t.Fatalf("expected both subscriptions in rows, got idx1=%d idx2=%d", idx1, idx2)
+	}
+	// The active sub (sub1) should be pre-selected.
+	if model.quickSwitchCursor != idx1 {
+		t.Fatalf("expected cursor=%d (active sub), got %d", idx1, model.quickSwitchCursor)
 	}
 
-	// The active sub (sub1) should be pre-selected
-	if model.quickSwitchCursor != 0 {
-		t.Fatalf("expected cursor=0 (active sub), got %d", model.quickSwitchCursor)
-	}
-
-	// Move cursor to sub2 (index 1, before __add__ at index 2)
-	model.quickSwitchCursor = 1
+	// Move cursor to sub2 and apply — this toggles enabled (true → false).
+	model.quickSwitchCursor = idx2
 	model.applyQuickSwitch()
 
-	// applyQuickSwitch now defers SwitchLLM + SetDefault to a background Cmd.
-	// Verify pending Cmds were queued (async SwitchLLM).
-	// showTempStatus no longer uses pendingCmds — its timer is goroutine-based.
-	if len(model.pendingCmds) < 1 {
-		t.Fatalf("expected at least 1 pendingCmd (async switch), got %d", len(model.pendingCmds))
+	if mgr.subs[1].Enabled {
+		t.Errorf("expected sub2 disabled after toggle, got enabled=true")
 	}
-
-	// The pending Cmd is the async SwitchLLM
-	asyncCmd := model.pendingCmds[0]
-	msg := asyncCmd()
-	doneMsg, ok := msg.(cliSwitchLLMDoneMsg)
-	if !ok {
-		t.Fatalf("expected cliSwitchLLMDoneMsg, got %T", msg)
-	}
-	if doneMsg.err != nil {
-		t.Fatalf("unexpected SwitchLLM error: %v", doneMsg.err)
-	}
-
-	// Verify SwitchLLM was called with correct values
-	if !switchCalled {
-		t.Fatal("SwitchLLM was NOT called!")
-	}
-	if switchedProvider != "openai" {
-		t.Errorf("expected provider=openai, got %s", switchedProvider)
-	}
-	if switchedBaseURL != "https://api.openai.com/v1" {
-		t.Errorf("expected baseURL=https://api.openai.com/v1, got %s", switchedBaseURL)
-	}
-	if switchedAPIKey != "key2" {
-		t.Errorf("expected apiKey=key2, got %s", switchedAPIKey)
-	}
-	if switchedModel != "gpt-4.1" {
-		t.Errorf("expected model=gpt-4.1, got %s", switchedModel)
-	}
-
-	// Verify quick switch mode is cleared
-	if model.quickSwitchMode != "" {
-		t.Errorf("expected quickSwitchMode cleared, got %s", model.quickSwitchMode)
-	}
-
-	// Now simulate the Update handler processing the doneMsg (which calls SetDefault)
-	// The Update handler in cli_update.go does this when it receives cliSwitchLLMDoneMsg
-	if doneMsg.mgr != nil {
-		if err := doneMsg.mgr.SetDefault(doneMsg.subID, ""); err != nil {
-			t.Fatalf("SetDefault failed: %v", err)
+	// No async subscription switch should be queued.
+	for _, c := range model.pendingCmds {
+		if _, ok := c().(cliSwitchLLMDoneMsg); ok {
+			t.Fatal("a cliSwitchLLMDoneMsg was queued — subscription switching must not happen from the panel")
 		}
 	}
-	if mgr.setDefID != "sub2" {
-		t.Errorf("expected SetDefault(sub2), got SetDefault(%s)", mgr.setDefID)
+	// Panel stays open so the user can keep managing.
+	if model.quickSwitchMode != "llm" {
+		t.Errorf("expected panel to stay open, got quickSwitchMode=%q", model.quickSwitchMode)
+	}
+
+	// Toggle again (false → true). Re-resolve the row index (rebuild may have
+	// moved it) and apply.
+	idx2 = findLLMRowBySubID(model, "sub2")
+	model.quickSwitchCursor = idx2
+	model.applyQuickSwitch()
+	if !mgr.subs[1].Enabled {
+		t.Errorf("expected sub2 re-enabled after second toggle, got enabled=false")
 	}
 }
 
@@ -314,8 +317,10 @@ func TestAskUserLongOptionWraps(t *testing.T) {
 }
 
 // TestSubscriptionGenerationGuard tests that stale per-subscription values
-// (provider, api_key, base_url, model, max_output_tokens, thinking_mode)
+// (provider, api_key, base_url, model, max_output_tokens)
 // are NEVER written back after a subscription switch.
+// thinking_mode is intentionally NOT in this list — it is a global per-user
+// setting now (Ctrl+M toggle), so it must survive a subscription switch.
 // This is the structural guarantee against the subscription overwrite bug.
 func TestSubscriptionGenerationGuard(t *testing.T) {
 	model := newCLIModel()
@@ -332,8 +337,6 @@ func TestSubscriptionGenerationGuard(t *testing.T) {
 		"llm_model":         "old-model",
 		"max_output_tokens": "8192",
 		"thinking_mode":     "auto",
-		"vanguard_model":    "claude-opus-4",
-		"balance_model":     "claude-sonnet-4",
 	}
 
 	// Simulate: subscription switch happens (generation increments)
@@ -350,18 +353,15 @@ func TestSubscriptionGenerationGuard(t *testing.T) {
 	}
 
 	// Verify: per-subscription fields are GONE
-	for _, k := range []string{"llm_provider", "llm_api_key", "llm_base_url", "llm_model", "max_output_tokens", "thinking_mode"} {
+	for _, k := range []string{"llm_provider", "llm_api_key", "llm_base_url", "llm_model", "max_output_tokens"} {
 		if _, exists := values[k]; exists {
 			t.Errorf("BUG: stale subscription field %q should have been deleted after subscription switch", k)
 		}
 	}
 
-	// Verify: global/tier settings are PRESERVED
-	if values["vanguard_model"] != "claude-opus-4" {
-		t.Errorf("global setting vanguard_model should be preserved, got %q", values["vanguard_model"])
-	}
-	if values["balance_model"] != "claude-sonnet-4" {
-		t.Errorf("global setting balance_model should be preserved, got %q", values["balance_model"])
+	// Verify: thinking_mode (global user setting) is PRESERVED across subscription switch
+	if values["thinking_mode"] != "auto" {
+		t.Errorf("global thinking_mode should be preserved across subscription switch, got %q", values["thinking_mode"])
 	}
 }
 
@@ -398,11 +398,12 @@ func TestSubscriptionGenerationGuardNoSwitch(t *testing.T) {
 	}
 }
 
-// TestApplyQuickSwitchNilChannel tests that nil channel doesn't crash.
+// TestApplyQuickSwitchNilChannel tests that nil channel doesn't crash when
+// toggling a subscription row.
 func TestApplyQuickSwitchNilChannel(t *testing.T) {
 	mgr := &mockSubscriptionManager{
 		subs: []channel.Subscription{
-			{ID: "sub1", Name: "glm", Provider: "openai", Model: "glm-4", Active: true},
+			{ID: "sub1", Name: "glm", Provider: "openai", Model: "glm-4", Active: true, Enabled: true},
 		},
 	}
 
@@ -410,8 +411,10 @@ func TestApplyQuickSwitchNilChannel(t *testing.T) {
 	model.subscriptionMgr = mgr
 	// channel is nil!
 
-	model.openQuickSwitch("subscription")
-	model.quickSwitchCursor = 0
+	model.openQuickSwitch("")
+	if idx := findLLMRowBySubID(model, "sub1"); idx >= 0 {
+		model.quickSwitchCursor = idx
+	}
 	model.applyQuickSwitch() // should NOT panic
 
 	// SetDefault should NOT be called because SwitchLLM is unreachable (nil channel)
@@ -420,11 +423,12 @@ func TestApplyQuickSwitchNilChannel(t *testing.T) {
 	}
 }
 
-// TestApplyQuickSwitchNilSwitchLLM tests that nil SwitchLLM doesn't crash.
+// TestApplyQuickSwitchNilSwitchLLM tests that nil SwitchLLM doesn't crash when
+// toggling a subscription row.
 func TestApplyQuickSwitchNilSwitchLLM(t *testing.T) {
 	mgr := &mockSubscriptionManager{
 		subs: []channel.Subscription{
-			{ID: "sub1", Name: "glm", Provider: "openai", Model: "glm-4", Active: true},
+			{ID: "sub1", Name: "glm", Provider: "openai", Model: "glm-4", Active: true, Enabled: true},
 		},
 	}
 
@@ -439,8 +443,10 @@ func TestApplyQuickSwitchNilSwitchLLM(t *testing.T) {
 		},
 	}
 
-	model.openQuickSwitch("subscription")
-	model.quickSwitchCursor = 0
+	model.openQuickSwitch("")
+	if idx := findLLMRowBySubID(model, "sub1"); idx >= 0 {
+		model.quickSwitchCursor = idx
+	}
 	model.applyQuickSwitch() // should NOT panic, should NOT call SwitchLLM
 
 	// SetDefault should NOT be called because SwitchLLM is nil
@@ -449,65 +455,29 @@ func TestApplyQuickSwitchNilSwitchLLM(t *testing.T) {
 	}
 }
 
-// TestOpenQuickSwitchWithEmptySubs tests that add entry is shown even with no subs.
+// TestOpenQuickSwitchWithEmptySubs tests that the add-subscription action row is
+// shown even with no subscriptions.
 func TestOpenQuickSwitchWithEmptySubs(t *testing.T) {
 	mgr := &mockSubscriptionManager{subs: nil}
 
 	model := newCLIModel()
 	model.subscriptionMgr = mgr
 
-	model.openQuickSwitch("subscription")
+	model.openQuickSwitch("")
 
-	if model.quickSwitchMode != "subscription" {
-		t.Fatalf("expected mode=subscription, got %s", model.quickSwitchMode)
+	if model.quickSwitchMode != "llm" {
+		t.Fatalf("expected mode=llm, got %s", model.quickSwitchMode)
 	}
 
-	if !slices.ContainsFunc(model.quickSwitchList, func(s channel.Subscription) bool { return s.ID == "__add__" }) {
-		t.Error("expected __add__ entry in quick switch list")
+	foundAdd := false
+	for _, r := range model.quickSwitchRows {
+		if r.kind == qsAddSub {
+			foundAdd = true
+			break
+		}
 	}
-}
-
-// TestApplyQuickSwitchError tests error handling in SwitchLLM.
-func TestApplyQuickSwitchError(t *testing.T) {
-	mgr := &mockSubscriptionManager{
-		subs: []channel.Subscription{
-			{ID: "sub1", Name: "glm", Provider: "openai", BaseURL: "https://glm.example.com", APIKey: "k1", Model: "glm-4", Active: true},
-			{ID: "sub2", Name: "gpt", Provider: "openai", BaseURL: "https://bad.url", APIKey: "k2", Model: "gpt-4", Active: false},
-		},
-	}
-
-	model := newCLIModel()
-	model.subscriptionMgr = mgr
-	model.channel = &CLIChannel{
-		config: &CLIChannelConfig{
-			SwitchLLM: func(provider, baseURL, apiKey, model string) error {
-				return fmt.Errorf("connection refused")
-			},
-			GetCurrentValues: func() map[string]string {
-				return map[string]string{}
-			},
-		},
-	}
-
-	model.openQuickSwitch("subscription")
-	model.quickSwitchCursor = 1
-	model.applyQuickSwitch()
-
-	// SetDefault should NOT be called because SwitchLLM failed
-	if mgr.setDefID != "" {
-		t.Errorf("expected SetDefault NOT called after SwitchLLM error, got %s", mgr.setDefID)
-	}
-
-	// tempStatus should show error
-	if model.tempStatus == "" {
-		t.Error("expected tempStatus to show error")
-	}
-	// subs should remain unchanged — sub1 still active, sub2 still inactive
-	if !mgr.subs[0].Active {
-		t.Error("expected sub1 still active after SwitchLLM failure")
-	}
-	if mgr.subs[1].Active {
-		t.Error("expected sub2 still inactive after SwitchLLM failure")
+	if !foundAdd {
+		t.Error("expected an add-subscription action row in the panel")
 	}
 }
 

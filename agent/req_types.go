@@ -14,8 +14,10 @@ const (
 	MethodSetCWD                       = "set_cwd"
 	MethodSetContextMode               = "set_context_mode"
 	MethodGetContextMode               = "get_context_mode"
-	MethodSetUserModel                 = "set_user_model"
-	MethodSwitchModel                  = "switch_model"
+	MethodSelectModel                  = "select_model"
+	MethodSetDefaultModel              = "set_default_model"
+	MethodSetModelEnabled              = "set_model_enabled"
+	MethodSetSubscriptionEnabled       = "set_subscription_enabled"
 	MethodSetUserMaxContext            = "set_user_max_context"
 	MethodGetUserMaxContext            = "get_user_max_context"
 	MethodSetUserMaxOutputTokens       = "set_user_max_output_tokens"
@@ -29,7 +31,9 @@ const (
 	MethodGetDefaultModel              = "get_default_model"
 	MethodListModels                   = "list_models"
 	MethodListAllModels                = "list_all_models"
-	MethodSetModelTiers                = "set_model_tiers"
+	MethodListAllModelEntries          = "list_all_model_entries"
+	MethodRefreshModelEntries          = "refresh_model_entries"
+	MethodSetUserModel                 = "set_user_model"
 	MethodSetModelContexts             = "set_model_contexts"
 	MethodSetGlobalMaxTokens           = "set_global_max_tokens"
 	MethodSetRetryConfig               = "set_retry_config"
@@ -69,10 +73,8 @@ const (
 	MethodGetAgentSessionDumpByFullKey = "get_agent_session_dump_by_full_key"
 	MethodListTenants                  = "list_tenants"
 	MethodGetEffectiveMaxContext       = "get_effective_max_context"
-	MethodClearPerChatMaxContext       = "clear_per_chat_max_context"
 	MethodSetMaxIterations             = "set_max_iterations"
 	MethodSetMaxConcurrency            = "set_max_concurrency"
-	MethodSetMaxContextTokens          = "set_max_context_tokens"
 	MethodSetCompressionThreshold      = "set_compression_threshold"
 	MethodApplyRuntimeSettings         = "apply_runtime_settings"
 	MethodRunnerCreate                 = "runner_create"
@@ -127,13 +129,8 @@ type setCompressionThresholdReq struct {
 
 type setUserModelReq struct {
 	SenderID string `json:"sender_id"`
+	SubID    string `json:"sub_id,omitempty"`
 	Model    string `json:"model"`
-}
-
-type switchModelReq struct {
-	SenderID string `json:"sender_id"`
-	Model    string `json:"model"`
-	ChatID   string `json:"chat_id,omitempty"`
 }
 
 type setUserMaxContextReq struct {
@@ -383,10 +380,6 @@ type getAgentSessionDumpByFullKeyReq struct {
 type getEffectiveMaxContextReq struct {
 	SenderID string `json:"sender_id"`
 	ChatID   string `json:"chat_id"`
-}
-
-type clearPerChatMaxContextReq struct {
-	ChatID string `json:"chat_id"`
 }
 
 type applyRuntimeSettingsReq struct {

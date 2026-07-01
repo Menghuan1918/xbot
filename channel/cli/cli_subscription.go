@@ -2,62 +2,56 @@ package cli
 
 import (
 	"fmt"
+	"github.com/sirupsen/logrus"
 	ch "xbot/channel"
 
 	tea "charm.land/bubbletea/v2"
 )
 
-// cycleModel switches to the next model across all subscriptions.
-// Uses ListAllModels() so models from ALL subscriptions are visible (not just the
-// current default LLM). Cycles through the model names displayed in the status bar.
-// Note: this only changes the cached model name — the actual subscription switch
-// happens when a new LLM call is made (or via quick switch panel).
-func (m *cliModel) cycleModel() {
-	if m.channel == nil {
+// applyModelSwitch switches the session to the given model and re-syncs client
+// state. Because the model may belong to a different subscription than the
+// current one, the owning subscription is re-read from the backend
+// (GetSessionSubscription, authoritative in both local and remote modes) after
+// the switch RPC completes, so activeSubID/cachedModelName/context limits
+// reflect the new owner rather than the stale previous subscription.
+//
+// When subID is non-empty, the picker row carried an owning subscription, so
+// SelectModel pins that exact subscription (the same model name may be served
+// by several subscriptions; SelectModel disambiguates). When subID is empty
+// (no owning subscription, e.g. a bare system-default entry from the
+// subscriptionSvc==nil path), it falls back to SwitchModel, which resolves the
+// owner server-side by model name.
+func (m *cliModel) applyModelSwitch(nextModel, subID string) {
+	if nextModel == "" {
 		return
 	}
-
-	// Ensure models are loaded synchronously before cycling.
-	// Without this, the first Ctrl+N sees only the single fallback model
-	// (the async fetch hasn't completed yet).
-	m.channel.modelLister.EnsureModelsLoaded()
-
-	// Use ListModels (current subscription only) instead of ListAllModels.
-	// Ctrl+N should cycle through the current subscription's models only.
-	models := m.channel.modelLister.ListModels()
-	if len(models) < 2 {
-		m.showTempStatus("Only one model available")
-		return
-	}
-
-	current := m.cachedModelName
-	nextIdx := 0
-	for i, name := range models {
-		if name == current {
-			nextIdx = (i + 1) % len(models)
-			break
+	if m.llmSubscriber != nil && subID != "" {
+		if err := m.llmSubscriber.SelectModel(m.senderID, subID, nextModel, m.chatID); err != nil {
+			logrus.WithError(err).WithField("sub_id", subID).Warn("applyModelSwitch: SelectModel failed")
 		}
 	}
-	nextModel := models[nextIdx]
-
 	m.cachedModelName = nextModel
-	m.showTempStatus(fmt.Sprintf("Model: %s", nextModel))
-
-	// Switch model on the current subscription (no need to change subscription
-	// since we're already cycling within the current subscription's models).
-	if m.llmSubscriber != nil {
-		m.llmSubscriber.SwitchModel(m.senderID, nextModel, m.chatID)
+	// Re-resolve the owning subscription from the backend. switch_model persists
+	// (ownerSubID, model) to tenants; GetSessionSubscription reads it back. This
+	// works in local mode too (same RPC path through ChannelTransport → ServerCore).
+	if m.channel != nil && m.channel.subscriptionMgr != nil {
+		if subID, _, err := m.channel.subscriptionMgr.GetSessionSubscription(m.senderID, m.chatID); err == nil && subID != "" {
+			m.activeSubID = subID
+		}
 	}
-	// Persist per-session model choice
-	existing := LoadSessionLLMState(m.workDir, m.chatID)
-	existing.SubscriptionID = m.activeSubID
-	existing.Model = nextModel
-	SaveSessionLLMState(m.workDir, m.chatID, existing, m.remoteMode)
-	// Re-resolve context/output token limits for the new model so the
-	// context usage bar reflects the correct window size immediately.
-	m.cachedMaxContextTokens = ResolveEffectiveMaxContext(existing, m.subscriptionMgr)
-	m.cachedMaxOutputTokens = int64(ResolveEffectiveMaxOutputTokens(existing, m.subscriptionMgr))
+	m.refreshCachedSubName()
+	state := SessionLLMState{
+		SubscriptionID: m.activeSubID,
+		Model:          nextModel,
+	}
+	m.cachedMaxContextTokens = ResolveEffectiveMaxContext(state, m.subscriptionMgr)
+	m.cachedMaxOutputTokens = int64(ResolveEffectiveMaxOutputTokens(state, m.subscriptionMgr))
+	SaveSessionLLMState(m.workDir, m.chatID, SessionLLMState{
+		SubscriptionID: m.activeSubID,
+		Model:          nextModel,
+	}, m.remoteMode)
 	m.updateQuickSwitchModels(nextModel)
+	m.showTempStatus(fmt.Sprintf("Model: %s", nextModel))
 }
 
 // tickerTickMsg 是 ticker 定时 tick 消息
@@ -154,6 +148,24 @@ func (m *cliModel) invalidateSubCache() {
 	m.hasNoSubCacheValid = false
 }
 
+// refreshCachedSubName caches the owning subscription's display name for the
+// status bar ("订阅名 · 模型名"). Called whenever activeSubID changes. Reads the
+// subscription list (one RPC) — NOT per-frame; View() reads the cached field.
+func (m *cliModel) refreshCachedSubName() {
+	m.cachedSubName = ""
+	if m.activeSubID == "" || m.channel == nil || m.channel.subscriptionMgr == nil {
+		return
+	}
+	if subs, err := m.channel.subscriptionMgr.List(""); err == nil {
+		for _, s := range subs {
+			if s.ID == m.activeSubID {
+				m.cachedSubName = s.Name
+				return
+			}
+		}
+	}
+}
+
 // refreshCachedModelName caches the current model name to avoid repeated lookups in View().
 // Should be called after channel init, config changes, and settings saves.
 // Prefers per-session override (from disk or in-memory state) over global default.
@@ -161,6 +173,7 @@ func (m *cliModel) invalidateSubCache() {
 // Should be called after channel init, config changes, and settings saves.
 // Prefers per-session override (from disk or in-memory state) over global default.
 func (m *cliModel) refreshCachedModelName() {
+	defer m.refreshCachedSubName() // keep status-bar "订阅名 · 模型名" in sync with activeSubID
 	if m.channel == nil {
 		return
 	}
@@ -206,6 +219,64 @@ func (m *cliModel) refreshCachedModelName() {
 	if m.channel.modelLister != nil {
 		m.modelCount = len(m.channel.modelLister.ListAllModels())
 	}
+}
+
+// refreshCachedThinkingMode loads the global thinking_mode user setting from
+// the settings service into m.cachedThinkingMode for status-bar display. Called
+// on startup, session restore, and after the Ctrl+M toggle. Thinking is a
+// global per-user value stored under the canonical channel (agent.ThinkingModeChannel).
+func (m *cliModel) refreshCachedThinkingMode() {
+	if m.channel == nil || m.channel.settingsSvc == nil {
+		return
+	}
+	vals, err := m.channel.settingsSvc.GetSettings(ch.ThinkingModeChannel, m.senderID)
+	if err != nil || vals == nil {
+		return
+	}
+	m.cachedThinkingMode = vals["thinking_mode"]
+}
+
+// thinkingModeLabel renders the status-bar indicator for the current global
+// thinking mode. "" = auto (provider default), "enabled" = on, "disabled" = off.
+// Compact ASCII format for clean terminal rendering.
+func (m *cliModel) thinkingModeLabel() string {
+	switch m.cachedThinkingMode {
+	case "enabled":
+		return m.styles.Accent.Render("think+")
+	case "disabled":
+		return m.styles.TextMutedSt.Render("think-")
+	default:
+		return m.styles.TextMutedSt.Render("think")
+	}
+}
+
+// toggleThinkingMode cycles the global thinking_mode user setting
+// (auto → enabled → disabled → auto), persists it, applies the runtime effect
+// (InvalidateSender via the SettingHandlerRegistry), and refreshes the cache.
+func (m *cliModel) toggleThinkingMode() {
+	if m.channel == nil || m.channel.settingsSvc == nil {
+		return
+	}
+	next := ""
+	switch m.cachedThinkingMode {
+	case "":
+		next = "enabled"
+	case "enabled":
+		next = "disabled"
+	case "disabled":
+		next = ""
+	}
+	if err := m.channel.settingsSvc.SetSetting(ch.ThinkingModeChannel, m.senderID, "thinking_mode", next); err != nil {
+		m.showTempStatus(fmt.Sprintf("Failed to set thinking mode: %v", err))
+		return
+	}
+	// Apply runtime effect (the thinking_mode handler calls InvalidateSender so
+	// the next LLM call re-reads the new value).
+	if m.channel.config.ApplySettings != nil {
+		m.channel.config.ApplySettings(map[string]string{"thinking_mode": next}, m.chatID)
+	}
+	m.cachedThinkingMode = next
+	m.showTempStatus("Thinking mode: " + m.thinkingModeLabel())
 }
 
 // scheduleSessionLLMRestore triggers an async SwitchLLM + SetDefault RPC when

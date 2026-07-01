@@ -395,8 +395,22 @@ func (c *Client) ListAllModels() []string {
 	return r
 }
 
-func (c *Client) SetModelTiers(cfg config.LLMConfig) error {
-	return c.call(MethodSetModelTiers, cfg, nil)
+// ListAllModelEntries returns selectable models paired with their owning
+// subscription (SubID/SubName empty for system-default models), for the model
+// picker UI. Skips disabled subscriptions and disabled models.
+func (c *Client) ListAllModelEntries() []protocol.ModelEntry {
+	var r []protocol.ModelEntry
+	_ = c.call(MethodListAllModelEntries, struct{}{}, &r)
+	return r
+}
+
+// RefreshModelEntries live-fetches /models for every enabled subscription,
+// persists to CachedModels, and returns the fresh entry list. Use before
+// opening the model picker so it reflects providers' true available models.
+func (c *Client) RefreshModelEntries() []protocol.ModelEntry {
+	var r []protocol.ModelEntry
+	_ = c.call(MethodRefreshModelEntries, struct{}{}, &r)
+	return r
 }
 
 func (c *Client) SetDefaultThinkingMode(mode string) error {
@@ -471,12 +485,46 @@ func (c *Client) SetLLMConcurrency(senderID string, personal int) error {
 	return c.call(MethodSetLLMConcurrency, setLLMConcurrencyReq{SenderID: senderID, Personal: personal}, nil)
 }
 
-func (c *Client) SetUserModel(senderID, model string) error {
-	return c.call(MethodSetUserModel, setUserModelReq{SenderID: senderID, Model: model}, nil)
+func (c *Client) SetUserModel(senderID, subID, model string) error {
+	return c.call(MethodSetUserModel, setUserModelReq{SenderID: senderID, SubID: subID, Model: model}, nil)
 }
 
-func (c *Client) SwitchModel(senderID, model, chatID string) error {
-	return c.call(MethodSwitchModel, switchModelReq{SenderID: senderID, Model: model, ChatID: chatID}, nil)
+// SelectModel sets the per-session (subscription, model) for a chat.
+// Model-first replacement for SwitchModel when the subscription is known.
+func (c *Client) SelectModel(senderID, subID, model, chatID string) error {
+	return c.call(MethodSelectModel, struct {
+		SenderID string `json:"sender_id"`
+		SubID    string `json:"sub_id"`
+		Model    string `json:"model"`
+		ChatID   string `json:"chat_id,omitempty"`
+	}{SenderID: senderID, SubID: subID, Model: model, ChatID: chatID}, nil)
+}
+
+// SetDefaultModel sets the user-level default (subscription, model) for new sessions.
+func (c *Client) SetDefaultModel(senderID, subID, model string) error {
+	return c.call(MethodSetDefaultModel, struct {
+		SenderID string `json:"sender_id"`
+		SubID    string `json:"sub_id"`
+		Model    string `json:"model"`
+	}{SenderID: senderID, SubID: subID, Model: model}, nil)
+}
+
+// SetModelEnabled toggles a model's enabled flag (model disable feature).
+func (c *Client) SetModelEnabled(subID, model string, enabled bool) error {
+	return c.call(MethodSetModelEnabled, struct {
+		SubID   string `json:"sub_id"`
+		Model   string `json:"model"`
+		Enabled bool   `json:"enabled"`
+	}{SubID: subID, Model: model, Enabled: enabled}, nil)
+}
+
+// SetSubscriptionEnabled toggles a subscription's enabled flag (v40). A disabled
+// subscription stops contributing models to the picker.
+func (c *Client) SetSubscriptionEnabled(subID string, enabled bool) error {
+	return c.call(MethodSetSubscriptionEnabled, struct {
+		SubID   string `json:"sub_id"`
+		Enabled bool   `json:"enabled"`
+	}{SubID: subID, Enabled: enabled}, nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -489,17 +537,6 @@ func (c *Client) SetMaxIterations(n int) {
 
 func (c *Client) SetMaxConcurrency(n int) {
 	c.callVoid(MethodSetMaxConcurrency, setMaxConcurrencyReq{N: n})
-}
-
-func (c *Client) SetMaxContextTokens(n int, chatID ...string) {
-	chatIDVal := ""
-	if len(chatID) > 0 {
-		chatIDVal = chatID[0]
-	}
-	c.callVoid(MethodSetMaxContextTokens, struct {
-		MaxContext int    `json:"max_context"`
-		ChatID     string `json:"chat_id,omitempty"`
-	}{MaxContext: n, ChatID: chatIDVal})
 }
 
 func (c *Client) SetCompressionThreshold(f float64) {
@@ -528,10 +565,6 @@ func (c *Client) GetEffectiveMaxContext(senderID, chatID string) int {
 	var r int
 	_ = c.call(MethodGetEffectiveMaxContext, getEffectiveMaxContextReq{SenderID: senderID, ChatID: chatID}, &r)
 	return r
-}
-
-func (c *Client) ClearPerChatMaxContext(chatID string) {
-	c.callVoid(MethodClearPerChatMaxContext, clearPerChatMaxContextReq{ChatID: chatID})
 }
 
 // ---------------------------------------------------------------------------
