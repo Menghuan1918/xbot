@@ -56,19 +56,23 @@ type FeishuConfig struct {
 // SettingsCallbacks holds the callback functions for settings card interaction.
 // Injected from Agent to decouple channel from agent packages.
 type SettingsCallbacks struct {
-	LLMList      func(senderID string) ([]string, string)                                                                // (models, currentModel)
-	LLMSet       func(senderID, model string) error                                                                      // switch model
+	LLMList      func(senderID string) ([]protocol.ModelEntry, protocol.ModelEntry)                                      // (allEntries, currentEntry)
+	LLMSet       func(senderID, subID, model string) error                                                               // switch model
 	LLMGetConfig func(senderID string) (provider, baseURL, model string, ok bool)                                        // user config (no key)
 	LLMSetConfig func(senderID, provider, baseURL, apiKey, model string, maxOutputTokens int, thinkingMode string) error // create/update config
 	LLMDelete    func(senderID string) error                                                                             // revert to global
-	// LLMGetMaxContext 获取用户当前 max_context 设置（0 = 使用默认值）
-	LLMGetMaxContext func(senderID string) int
-	// LLMSetMaxContext 设置用户 max_context
-	LLMSetMaxContext func(senderID string, maxContext int) error
-	// LLMGetMaxOutputTokens 获取用户当前 max_output_tokens 设置（0 = 使用默认值 8192）
-	LLMGetMaxOutputTokens func(senderID string) int
-	// LLMSetMaxOutputTokens 设置用户 max_output_tokens
-	LLMSetMaxOutputTokens func(senderID string, maxTokens int) error
+	// LLMGetMaxContext 获取 (subID, model) 对应的 max_context 设置（0 = 使用默认值）。
+	// subID/model 为空时回退到会话级解析（兼容无模型选择器的旧 UI）。
+	LLMGetMaxContext func(senderID, subID, model string) int
+	// LLMSetMaxContext 设置 (subID, model) 对应的 max_context。
+	// subID/model 为空时回退到会话级解析。
+	LLMSetMaxContext func(senderID, subID, model string, maxContext int) error
+	// LLMGetMaxOutputTokens 获取 (subID, model) 对应的 max_output_tokens（0 = 使用默认值 8192）。
+	// subID/model 为空时回退到会话级解析。
+	LLMGetMaxOutputTokens func(senderID, subID, model string) int
+	// LLMSetMaxOutputTokens 设置 (subID, model) 对应的 max_output_tokens。
+	// subID/model 为空时回退到会话级解析。
+	LLMSetMaxOutputTokens func(senderID, subID, model string, maxTokens int) error
 	// LLMGetThinkingMode 获取用户当前 thinking_mode（"" = auto）
 	LLMGetThinkingMode func(senderID string) string
 	// LLMSetThinkingMode 设置用户 thinking_mode
@@ -82,6 +86,9 @@ type SettingsCallbacks struct {
 	LLMRemoveSubscription     func(id string) error                             // remove by subscription ID
 	LLMSetDefaultSubscription func(id string) error                             // set as active subscription
 	LLMRenameSubscription     func(id, name string) error                       // rename subscription
+	// LLMSetSubscriptionEnabled toggles a subscription's enabled flag (v40).
+	// Disabled subscriptions are excluded from model lists and resolution.
+	LLMSetSubscriptionEnabled func(id string, enabled bool) error // toggle subscription enabled
 
 	ContextModeGet func() string
 	ContextModeSet func(mode string) error
@@ -106,13 +113,19 @@ type SettingsCallbacks struct {
 	// LLMSetPersonalConcurrency 设置用户个人 LLM 并发上限
 	LLMSetPersonalConcurrency func(senderID string, personal int) error
 
-	// Model tier get/set (global config, not per-user)
-	// LLMGetModelTier returns the current model mapping for a tier ("vanguard"/"balance"/"swift").
-	LLMGetModelTier func(tier string) string
-	// LLMSetModelTier sets the model mapping for a tier and persists to config.
-	LLMSetModelTier func(tier, model string) error
-	// LLMListAllModels returns models from all subscriptions (for tier selectors).
-	LLMListAllModels func() []string
+	// Model tier get/set (per-user config, stored in user_settings DB)
+	// LLMGetModelTier returns the current (subID, model) mapping for a tier
+	// ("vanguard"/"balance"/"swift") for the given user. subID may be empty
+	// for legacy configs that store plain model names.
+	LLMGetModelTier func(senderID, tier string) (subID, model string)
+	// LLMSetModelTier sets the (subID, model) mapping for a tier for the given
+	// user and persists to user_settings DB.
+	LLMSetModelTier func(senderID, tier, subID, model string) error
+	// LLMListAllModels returns all (subscription, model) entries for the
+	// given user's subscriptions (for tier selectors). Same ModelEntry type
+	// used by the model selector — ensures tier options show subID+model,
+	// not bare names.
+	LLMListAllModels func(senderID string) []protocol.ModelEntry
 
 	// RunnerConnectCmdGet 返回远程 Runner 连接命令（空字符串表示未启用）
 	// Deprecated: replaced by per-user token callbacks below.
@@ -886,16 +899,28 @@ func (f *FeishuChannel) onMessage(ctx context.Context, event *larkim.P2MessageRe
 		return nil
 	}
 
-	// 跳过机器人自己的消息
-	if sender.SenderType != nil && *sender.SenderType == "bot" {
-		l.WithField("message_id", messageID).Debug("Feishu: bot message, skipping")
-		return nil
-	}
-
-	// 权限检查
+	// 权限检查（提前计算 senderID，供后续多处使用）
 	senderID := ""
 	if sender.SenderId != nil && sender.SenderId.OpenId != nil {
 		senderID = *sender.SenderId.OpenId
+	}
+
+	// 跳过机器人「自己」发出的消息（避免自回复循环）。
+	// 注意：只跳过自己，不跳过其他机器人——群里其他机器人 @本机器人 的消息
+	// 需要正常处理（交由后续 shouldHandleGroupMessage 的 @mention 检测）。
+	if sender.SenderType != nil && *sender.SenderType == "bot" {
+		f.mu.Lock()
+		selfOpenID := f.botOpenID
+		f.mu.Unlock()
+		if selfOpenID != "" && senderID == selfOpenID {
+			l.WithField("message_id", messageID).Debug("Feishu: own bot message, skipping")
+			return nil
+		}
+		// 其他机器人的消息：放行，群聊会走 @mention 检测
+		l.WithFields(log.Fields{
+			"message_id": messageID,
+			"sender_id":  senderID,
+		}).Info("Feishu: message from another bot, proceeding to mention check")
 	}
 	if !f.isAllowed(senderID) {
 		l.WithField("sender", senderID).Warn("Feishu: access denied")
@@ -939,6 +964,7 @@ func (f *FeishuChannel) onMessage(ctx context.Context, event *larkim.P2MessageRe
 	if content == "" {
 		return nil
 	}
+	l.WithField("content_preview", truncateForLog(content, 100)).Debug("Feishu: parsed message content")
 
 	// 剥离 @mention 占位符（群聊中 @bot 后内容带 @_user_N 前缀）
 	if msg.Mentions != nil {
@@ -965,6 +991,45 @@ func (f *FeishuChannel) onMessage(ctx context.Context, event *larkim.P2MessageRe
 
 	// Admin command: !webadd <username> — create web user
 	if handled := f.handleAdminCommand(content, replyTo, senderID, messageID); handled {
+		return nil
+	}
+
+	// /models — open model management card (model switch + max_context +
+	// max_output + tier settings). Separated from settings card to stay
+	// under Feishu's ~50 element limit.
+	if msgType == "text" && strings.TrimSpace(content) == "/models" {
+		card, err := f.BuildModelsCard(ctx, senderID)
+		if err != nil {
+			l.WithError(err).Warn("Failed to build models card")
+			f.sendTextReply(replyTo, messageID, "打开模型卡片失败: "+err.Error())
+			return nil
+		}
+		cardJSON, err := json.Marshal(card)
+		if err != nil {
+			l.WithError(err).Warn("Failed to marshal models card")
+			f.sendTextReply(replyTo, messageID, "卡片序列化失败")
+			return nil
+		}
+		f.sendReplyMessage(replyTo, messageID, cardJSON)
+		return nil
+	}
+
+	// /llms — open subscription management card (list, add, edit, delete,
+	// enable/disable). Separated from /models to keep each card focused.
+	if msgType == "text" && strings.TrimSpace(content) == "/llms" {
+		card, err := f.BuildLLMsCard(ctx, senderID)
+		if err != nil {
+			l.WithError(err).Warn("Failed to build LLMs card")
+			f.sendTextReply(replyTo, messageID, "打开订阅卡片失败: "+err.Error())
+			return nil
+		}
+		cardJSON, err := json.Marshal(card)
+		if err != nil {
+			l.WithError(err).Warn("Failed to marshal LLMs card")
+			f.sendTextReply(replyTo, messageID, "卡片序列化失败")
+			return nil
+		}
+		f.sendReplyMessage(replyTo, messageID, cardJSON)
 		return nil
 	}
 
@@ -3153,6 +3218,15 @@ func (f *FeishuChannel) isDuplicate(messageID string) bool {
 		f.processedOrder = trimmed
 	}
 	return false
+}
+
+// truncateForLog returns a truncated copy of s with max length n runes.
+func truncateForLog(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 // isAllowed 检查用户是否有权限

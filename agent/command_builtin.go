@@ -10,6 +10,8 @@ import (
 	"xbot/bus"
 	"xbot/channel"
 	"xbot/channel/feishu"
+	log "xbot/logger"
+	"xbot/plugin"
 	"xbot/version"
 )
 
@@ -51,6 +53,34 @@ func (c *versionCmd) Execute(_ context.Context, _ *Agent, msg bus.InboundMessage
 	}, nil
 }
 
+// --- /plugin reload-all (agent-level command for remote CLI) ---
+
+type pluginReloadAllCmd struct{}
+
+func (c *pluginReloadAllCmd) Name() string      { return "/plugin reload-all" }
+func (c *pluginReloadAllCmd) Aliases() []string { return nil }
+func (c *pluginReloadAllCmd) Concurrent() bool  { return true } // doesn't block message queue
+func (c *pluginReloadAllCmd) Match(s string) bool {
+	return strings.TrimSpace(s) == "/plugin reload-all"
+}
+func (c *pluginReloadAllCmd) Execute(ctx context.Context, a *Agent, msg bus.InboundMessage) (*channel.OutboundMsg, error) {
+	if a.pluginMgr == nil {
+		return nil, fmt.Errorf("plugin system not available")
+	}
+	// Run reload in background — ReloadAll can take a while and must not
+	// block the command handler (which blocks message processing).
+	go func() {
+		if err := a.pluginMgr.ReloadAll(context.Background()); err != nil {
+			log.WithError(err).Error("Plugin reload-all failed")
+		}
+	}()
+	return &channel.OutboundMsg{
+		Channel: msg.Channel,
+		ChatID:  msg.ChatID,
+		Content: "🔄 Plugin reload started — widgets will refresh when complete",
+	}, nil
+}
+
 // --- /help ---
 
 type helpCmd struct{}
@@ -69,14 +99,23 @@ func (c *helpCmd) Execute(_ context.Context, _ *Agent, msg bus.InboundMessage) (
 			"/version — 显示版本信息\n" +
 			"/prompt <query> — 预览完整提示词（不调用 LLM）\n" +
 			"/help — 显示帮助\n" +
-			"/set-llm provider=<p> base_url=<url> api_key=<key> [model=<m>] — 设置自定义 LLM API\n" +
-			"/unset-llm — 清除自定义 LLM 配置\n" +
-			"/llm — 查看当前 LLM 配置\n" +
-			"/models — 列出当前 API 可用模型\n" +
-			"/set-model <model> — 设置当前使用的模型\n" +
+			"/set-llm provider=<p> base_url=<url> api_key=<key> [model=<m>] — 创建/更新个人 LLM 订阅\n" +
+			"/unset-llm <订阅名> — 删除指定订阅\n" +
+			"/llm — 查看当前解析到的订阅与模型\n" +
+			"/llms — 列出所有个人 LLM 订阅\n" +
+			"/models — 列出可选模型（带正常/离线/禁用状态）\n" +
+			"/set-model <订阅名> <模型名> — 切换当前会话模型\n" +
 			"/compress — 手动触发上下文压缩\n" +
 			"/context mode [phase1|none|default] — 查看/切换压缩模式\n" +
 			"/usage — 查看 token 用量统计\n" +
+			"/settings — 打开个人设置（仅私聊）\n" +
+			"/menu — 主菜单\n" +
+			"/browse [skill|agent] — 浏览 Skill/Agent 市场\n" +
+			"/install skill|agent <id> — 安装市场条目\n" +
+			"/uninstall skill|agent <name> — 卸载\n" +
+			"/publish skill|agent <name> — 发布到市场\n" +
+			"/unpublish skill|agent <name> — 取消发布\n" +
+			"/my skills|agents — 查看我发布/安装的条目\n" +
 			"/cancel — 取消当前正在处理的请求\n" +
 			"!<command> — 快捷执行命令（跳过 LLM，直接在 sandbox 中运行）",
 	}, nil
@@ -131,14 +170,29 @@ func (c *getLLMCmd) Execute(ctx context.Context, a *Agent, msg bus.InboundMessag
 	return a.handleGetLLM(ctx, msg)
 }
 
+// --- /llms ---
+
+type listLLMsCmd struct{}
+
+func (c *listLLMsCmd) Name() string        { return "/llms" }
+func (c *listLLMsCmd) Aliases() []string   { return nil }
+func (c *listLLMsCmd) Match(s string) bool { return strings.ToLower(s) == "/llms" }
+func (c *listLLMsCmd) Concurrent() bool    { return true } // read-only
+
+func (c *listLLMsCmd) Execute(ctx context.Context, a *Agent, msg bus.InboundMessage) (*channel.OutboundMsg, error) {
+	return a.handleListLLMs(ctx, msg)
+}
+
 // --- /unset-llm ---
 
 type unsetLLMCmd struct{}
 
-func (c *unsetLLMCmd) Name() string        { return "/unset-llm" }
-func (c *unsetLLMCmd) Aliases() []string   { return nil }
-func (c *unsetLLMCmd) Match(s string) bool { return strings.ToLower(s) == "/unset-llm" }
-func (c *unsetLLMCmd) Concurrent() bool    { return false } // mutates LLM config
+func (c *unsetLLMCmd) Name() string      { return "/unset-llm" }
+func (c *unsetLLMCmd) Aliases() []string { return nil }
+func (c *unsetLLMCmd) Match(s string) bool {
+	return strings.HasPrefix(strings.ToLower(s), "/unset-llm")
+}
+func (c *unsetLLMCmd) Concurrent() bool { return false } // mutates LLM config
 
 func (c *unsetLLMCmd) Execute(ctx context.Context, a *Agent, msg bus.InboundMessage) (*channel.OutboundMsg, error) {
 	return a.handleUnsetLLM(ctx, msg)
@@ -620,6 +674,7 @@ func registerBuiltinCommands(r *CommandRegistry) {
 	r.Register(&setLLMCmd{})
 	r.Register(&unsetLLMCmd{})
 	r.Register(&getLLMCmd{})
+	r.Register(&listLLMsCmd{})
 	r.Register(&compressCmd{})
 	r.Register(&usageCmd{})
 	r.Register(&contextModeCmd{}) // 先注册（更精确的匹配优先）
@@ -637,4 +692,45 @@ func registerBuiltinCommands(r *CommandRegistry) {
 	r.Register(&myCmd{})
 	r.Register(&settingsCmd{})
 	r.Register(&menuCmd{})
+	r.Register(&pluginReloadAllCmd{})
+}
+
+// ---------------------------------------------------------------------------
+// Plugin Command Adapter — bridges plugin.PluginCommandHandler → agent.Command
+// ---------------------------------------------------------------------------
+
+// pluginCmdAdapter wraps a plugin command handler as an agent.Command.
+// It avoids circular imports by living in the agent package, receiving the
+// handler and PluginContext from plugin.WirePluginCommands.
+type pluginCmdAdapter struct {
+	name        string
+	description string
+	handler     plugin.PluginCommandHandler
+	pctx        plugin.PluginContext
+}
+
+func (a *pluginCmdAdapter) Name() string      { return a.name }
+func (a *pluginCmdAdapter) Aliases() []string { return nil }
+func (a *pluginCmdAdapter) Concurrent() bool  { return false }
+
+func (a *pluginCmdAdapter) Match(content string) bool {
+	trimmed := strings.TrimSpace(content)
+	return strings.HasPrefix(trimmed, a.name+" ") || trimmed == a.name
+}
+
+func (a *pluginCmdAdapter) Execute(ctx context.Context, ag *Agent, msg bus.InboundMessage) (*channel.OutboundMsg, error) {
+	trimmed := strings.TrimSpace(msg.Content)
+	args := ""
+	if strings.HasPrefix(trimmed, a.name+" ") {
+		args = strings.TrimSpace(strings.TrimPrefix(trimmed, a.name+" "))
+	}
+	result, err := a.handler(ctx, args, a.pctx)
+	if err != nil {
+		return nil, err
+	}
+	return &channel.OutboundMsg{
+		Channel: msg.Channel,
+		ChatID:  msg.ChatID,
+		Content: result,
+	}, nil
 }

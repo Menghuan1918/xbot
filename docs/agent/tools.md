@@ -127,7 +127,7 @@ Core tool (always loaded). AI operates TUI sidebar, layout, and themes.
 
 **Actions**: `switch_session`, `close_session`, `set_layout`, `set_theme`, `send_slash`, `reload_plugins`, `reload_hooks`
 
-**send_slash**: Executes TUI-only slash commands (`/palette`, `/settings`, `/rewind`, `/tasks`, `/clear`, etc.). Do NOT use `send_slash` for agent-level commands like `/set-llm`, `/set-model`, `/models`, `/new`, `/compress`, `/usage`, `/context` — those are handled natively by the agent command registry. `send_slash` goes through BubbleTea's event loop (synchronous RPC); commands that call back into the agent (like `/usage` did via `usageQueryFn` → agent RPC) will deadlock.
+**send_slash**: Executes TUI-only slash commands (`/palette`, `/settings`, `/rewind`, `/tasks`, `/clear`, etc.). Do NOT use `send_slash` for agent-level commands like `/set-llm`, `/unset-llm`, `/set-model`, `/models`, `/new`, `/compress`, `/usage`, `/context` — those are handled natively by the agent command registry. `send_slash` goes through BubbleTea's event loop (synchronous RPC); commands that call back into the agent (like `/usage` did via `usageQueryFn` → agent RPC) will deadlock.
 
 **Flow**: `Execute()` → `ctx.TUIControl(action, params)` → `CLIChannel.SendTUIControl()` → `asyncCh` → `handleAsyncDrain` → `program.Send` → event loop → `handleSessionControlMsg`
 
@@ -139,11 +139,21 @@ Core tool (always loaded). AI operates TUI sidebar, layout, and themes.
 
 Core tool (always loaded). AI reads/modifies xbot configuration.
 
-**Actions**: `list`, `get`, `set`, `subscriptions`
+**Actions**: `list`, `get`, `set`, `subscriptions`, `reload_plugins`, `reload_hooks`, `runner`
+
+**Runner action**: `config action=runner` with sub-actions:
+- `sub=create name=NAME mode=native|docker workspace=PATH [llm_provider=... llm_model=...]` — create a new runner (auto-starts remote sandbox server if needed)
+- `sub=list` — list all runners for current user (with online status)
+- `sub=delete name=NAME` — delete a runner
+- `sub=switch name=NAME` — switch active runner for current session (session-level, not user-level; all tools immediately route to new runner)
+- `sub=rename name=OLD new_name=NEW` — rename a runner
+- `sub=` (empty) — show current active runner
+
+**Runner routing**: Session-level binding via `SandboxRouter.sessionRunners` sync.Map. `config switch` writes `"channel:chatID" → runnerName`. Per-tool-call sandbox re-resolution in `buildToolExecutor` (engine_wire.go) and `defaultToolExecutor` (engine.go) ensures all tools (Shell, Read, Grep, Glob, FileReplace...) immediately use the new runner after switch. CWD auto-resets to runner's live workspace from `GetConnectionInfo`.
 
 **LLM model operations**: To switch model → tell user to run `/set-model <model>`. To configure custom LLM → tell user to run `/set-llm`. To view usage → tell user to run `/usage`. All these are agent-level commands handled natively. Do NOT use `send_slash` or `config set` for these — they have dedicated paths.
 
-**Injection**: `buildToolContext` auto-injects `ConfigGet`/`ConfigSet` from `cfg.SettingsSvc`. Works in ALL modes (local + remote via RPC). Does NOT rely on Agent `SetTUICallbacks`.
+**Injection**: `buildToolContext` auto-injects `ConfigGet`/`ConfigSet` from `cfg.SettingsSvc`, and `RunnerCreate`/`RunnerList`/`RunnerDelete`/`RunnerGetActive`/`RunnerSetActive` from `tools.RunnerTokenStore` via `tools.GetRunnerTokenDB()`. Works in ALL modes (local + remote via RPC). Does NOT rely on Agent `SetTUICallbacks`.
 
 **Masking**: Sensitive keys (`api_key`, `runner_token`) show `sk-a***` on read. Writes are NOT blocked — users can type API keys anyway.
 

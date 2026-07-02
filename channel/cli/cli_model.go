@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"time"
 	ch "xbot/channel"
 	"xbot/internal/textarea"
+	log "xbot/logger"
 	"xbot/plugin"
 	"xbot/protocol"
 	"xbot/tools"
@@ -160,8 +163,9 @@ type cliModel struct {
 	lastThinking       string                  // 最后一次迭代的 thinking_content，在 progress 清除前捕获
 
 	// --- §8 Tab 补全 ---
-	completions []string // 当前补全候选项
-	compIdx     int      // 当前选中的补全索引
+	completions    []string // 当前补全候选项
+	compIdx        int      // 当前选中的补全索引
+	pluginCmdNames []string // 插件注册的命令名（/xxx 格式），合并到 Tab 补全
 
 	// --- §8b @ 文件引用补全 ---
 	fileCompletions []string // @ 文件路径补全候选项
@@ -197,13 +201,25 @@ type cliModel struct {
 	updateNotice   *version.UpdateInfo // nil=nothing, non-nil=show notice
 	checkingUpdate bool                // true while /update is in progress
 
-	// --- §15 ch.Subscription / Model Quick Switch ---
-	quickSwitchMode          string              // ""=off, "subscription"=selecting subscription, "model"=selecting model
-	quickSwitchList          []ch.Subscription   // available subscriptions or models
-	quickSwitchCursor        int                 // selected index
-	quickSwitchReturnToPanel bool                // true = return to settings panel after switch completes
+	// --- §15 Unified LLM panel (Ctrl+N) ---
+	// One panel for both subscriptions and models. quickSwitchMode is "" or
+	// "llm". quickSwitchRows is the flat displayed list (sections + subs +
+	// models + action rows); quickSwitchCursor indexes into it. Filtering is
+	// toggled by "/" (quickSwitchFiltering) so command letters (e/d/n/s) don't
+	// collide with typing.
+	quickSwitchMode          string              // ""=off, "llm"=unified panel open
+	quickSwitchRows          []qsRow             // flat row list the cursor indexes into
+	quickSwitchCursor        int                 // selected row index
+	quickSwitchFilterInput   textinput.Model     // filter input (focused only in filter mode)
+	quickSwitchFiltering     bool                // "/" filter mode active
+	quickSwitchShowAll       bool                // show noise models (image/realtime/…)
+	quickSwitchRefreshing    bool                // /models refresh in flight
+	quickSwitchReturnToPanel bool                // return to settings panel after close
+	quickSwitchScrollY       int                 // vertical scroll offset for the panel
+	quickSwitchCachedData    llmData             // cached source for filter mode (avoids per-keystroke RPC)
 	subscriptionMgr          SubscriptionManager // injected by CLIChannel
 	llmSubscriber            LLMSubscriber       // injected by CLIChannel
+	cachedSubName            string              // owning subscription display name for status bar
 
 	// --- §23 Command Palette (Ctrl+K) ---
 	paletteOpen           bool               // true = command palette overlay is active
@@ -246,6 +262,12 @@ type cliModel struct {
 
 	easterEggState easterEggState
 
+	pluginOverlay struct {
+		active   bool
+		id       string
+		provider plugin.OverlayProvider
+	}
+
 	searchState searchState
 
 	toastState toastState
@@ -262,6 +284,9 @@ type cliModel struct {
 	cachedModelName     string          // cached model name for View() performance
 	modelNameZoneXStart int             // rendered X start of model name in status bar (-1 = not rendered)
 	modelNameZoneXEnd   int             // rendered X end of model name in status bar (exclusive)
+	cachedThinkingMode  string          // global thinking_mode user setting ("" = auto), for status-bar indicator
+	thinkingZoneXStart  int             // rendered X start of thinking indicator in status bar (-1 = not rendered)
+	thinkingZoneXEnd    int             // rendered X end of thinking indicator in status bar (exclusive)
 	activeSubID         string          // active subscription ID for current session
 	hasNoSubCache       bool            // cached result of hasNoSubscription()
 	hasNoSubCacheValid  bool            // true when hasNoSubCache is authoritative
@@ -826,4 +851,152 @@ type progressState struct {
 	rwCjkSkip             bool
 	twCjkSkip             bool
 	streamReasoningByIter map[int]string // per-iteration stream-only reasoning, captured at arrival time
+}
+
+// --- Plugin Overlay ---
+
+// refreshPluginCmdNames lazily populates plugin command names for Tab completion
+// from the palette contributor. Called on every slash-input keypress; syncs from
+// channel.PaletteContributor if needed and caches results.
+func (m *cliModel) refreshPluginCmdNames() {
+	// Sync palette contributor from channel if not yet set
+	if m.paletteContributor == nil && m.channel != nil && m.channel.PaletteContributor != nil {
+		m.paletteContributor = m.channel.PaletteContributor
+	}
+	if m.paletteContributor == nil {
+		return
+	}
+	// Already populated — only refresh if palette was rebuilt
+	if len(m.pluginCmdNames) > 0 {
+		return
+	}
+	for _, ext := range m.paletteContributor() {
+		if strings.HasPrefix(ext.Content, "/") {
+			name := strings.SplitN(ext.Content, " ", 2)[0]
+			found := false
+			for _, existing := range m.pluginCmdNames {
+				if existing == name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.pluginCmdNames = append(m.pluginCmdNames, name)
+			}
+		}
+	}
+}
+
+// showPluginOverlay activates a full-screen overlay provided by a plugin.
+func (m *cliModel) showPluginOverlay(id string, provider plugin.OverlayProvider) {
+	m.pluginOverlay.active = true
+	m.pluginOverlay.id = id
+	m.pluginOverlay.provider = provider
+}
+
+// hidePluginOverlay deactivates the current plugin overlay.
+func (m *cliModel) hidePluginOverlay() {
+	m.pluginOverlay.active = false
+	m.pluginOverlay.provider = nil
+}
+
+// --- Plugin Event Bus Messages ---
+
+// cliPluginOverlayShowMsg triggers display of a plugin overlay.
+type cliPluginOverlayShowMsg struct {
+	pluginID  string
+	overlayID string
+}
+
+// cliPluginOverlayHideMsg triggers hiding of the current plugin overlay.
+type cliPluginOverlayHideMsg struct {
+	pluginID string
+}
+
+// cliPluginNotifyMsg carries a notification from a plugin to be shown as a toast.
+type cliPluginNotifyMsg struct {
+	pluginID string
+	level    string
+	title    string
+	message  string
+}
+
+// cliPluginSoundMsg carries a sound playback request from a plugin.
+type cliPluginSoundMsg struct {
+	pluginID string
+	sound    string
+}
+
+// wirePluginEventBus subscribes to plugin event bus topics and routes events
+// into the Bubble Tea event loop via program.Send(). This is called once
+// during CLI channel startup after the model and program are both available.
+func (m *cliModel) wirePluginEventBus(program *tea.Program) {
+	if m.pluginMgrFn == nil {
+		return
+	}
+	mgr := m.pluginMgrFn()
+	bus := mgr.Bus()
+	if bus == nil {
+		return
+	}
+
+	// Helper that logs subscription failures instead of silently dropping them.
+	sub := func(topic string, handler plugin.PluginEventHandler) {
+		if err := bus.Subscribe(topic, handler); err != nil {
+			log.WithError(err).WithField("topic", topic).Warn("plugin event subscription failed")
+		}
+	}
+
+	// plugin:overlay:show — display a plugin's full-screen overlay
+	sub("plugin:overlay:show", func(ctx context.Context, topic string, data any) error {
+		d, ok := data.(map[string]string)
+		if !ok {
+			return nil
+		}
+		program.Send(cliPluginOverlayShowMsg{
+			pluginID:  d["plugin_id"],
+			overlayID: d["overlay_id"],
+		})
+		return nil
+	})
+
+	// plugin:overlay:hide — dismiss the current plugin overlay
+	sub("plugin:overlay:hide", func(ctx context.Context, topic string, data any) error {
+		d, ok := data.(map[string]string)
+		if !ok {
+			return nil
+		}
+		program.Send(cliPluginOverlayHideMsg{
+			pluginID: d["plugin_id"],
+		})
+		return nil
+	})
+
+	// plugin:notify — show a plugin notification as a toast
+	sub("plugin:notify", func(ctx context.Context, topic string, data any) error {
+		d, ok := data.(map[string]string)
+		if !ok {
+			return nil
+		}
+		program.Send(cliPluginNotifyMsg{
+			pluginID: d["plugin_id"],
+			level:    d["level"],
+			title:    d["title"],
+			message:  d["message"],
+		})
+		return nil
+	})
+
+	// plugin:sound:play — play a sound effect
+	sub("plugin:sound:play", func(ctx context.Context, topic string, data any) error {
+		d, ok := data.(map[string]string)
+		if !ok {
+			return nil
+		}
+		program.Send(cliPluginSoundMsg{
+			pluginID: d["plugin_id"],
+			sound:    d["sound"],
+		})
+		return nil
+	})
 }

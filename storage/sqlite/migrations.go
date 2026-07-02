@@ -183,6 +183,55 @@ func (db *DB) migrateSchema(from int) error {
 		}
 	}
 
+	// v39: model-first subscription redesign foundation.
+	// Adds subscription_models.enabled (model disable), user_default_model table,
+	// backfills concrete model rows for tenants-referenced (sub, model) pairs, and
+	// seeds per-user default model selection.
+	if from < 39 {
+		if err := migrateV38ToV39(db.Conn()); err != nil {
+			return fmt.Errorf("migrate to v39: %w", err)
+		}
+	}
+
+	// v40: subscription-level enabled flag. A disabled subscription stops
+	// contributing models to the picker without deleting its credentials.
+	if from < 40 {
+		if err := migrateV39ToV40(db.Conn()); err != nil {
+			return fmt.Errorf("migrate to v40: %w", err)
+		}
+	}
+
+	// v41: drop the legacy user_llm_configs table (dead since v24).
+	if from < 41 {
+		if err := migrateV40ToV41(db.Conn()); err != nil {
+			return fmt.Errorf("migrate to v41: %w", err)
+		}
+	}
+
+	// v42: drop the redundant per_model_configs JSON column (subscription_models
+	// table is the sole source for per-model config).
+	if from < 42 {
+		if err := migrateV41ToV42(db.Conn()); err != nil {
+			return fmt.Errorf("migrate to v42: %w", err)
+		}
+	}
+
+	// v43: drop the redundant is_default column (default derived from user_default_model).
+	if from < 43 {
+		if err := migrateV42ToV43(db.Conn()); err != nil {
+			return fmt.Errorf("migrate to v43: %w", err)
+		}
+	}
+
+	// v44: add is_system column to user_llm_subscriptions. A system subscription
+	// (sender_id="__system__", is_system=1) is reconciled from config/env at boot
+	// and acts as the shared default/fallback LLM source visible to all users.
+	if from < 44 {
+		if err := migrateV43ToV44(db.Conn()); err != nil {
+			return fmt.Errorf("migrate to v44: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -284,9 +333,8 @@ UPDATE schema_version SET version = 4;
 // migrateV4ToV5 adds last_trigger column to cron_jobs.
 func migrateV4ToV5(conn *sql.DB) error {
 	// Check if column already exists before adding
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('cron_jobs') WHERE name = 'last_trigger'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "cron_jobs", "last_trigger")
+	if err == nil && !exists {
 		// Column doesn't exist, add it
 		_, err = conn.Exec("ALTER TABLE cron_jobs ADD COLUMN last_trigger DATETIME")
 		if err != nil {
@@ -450,9 +498,8 @@ func migrateV8ToV9(conn *sql.DB) error {
 
 // migrateV9ToV10 adds max_context column to user_llm_configs.
 func migrateV9ToV10(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('user_llm_configs') WHERE name = 'max_context'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "user_llm_configs", "max_context")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE user_llm_configs ADD COLUMN max_context INTEGER DEFAULT 0")
 		if err != nil {
 			return fmt.Errorf("migrate v9->v10: %w", err)
@@ -467,9 +514,8 @@ func migrateV9ToV10(conn *sql.DB) error {
 
 // migrateV10ToV11 adds thinking_mode column to user_llm_configs.
 func migrateV10ToV11(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('user_llm_configs') WHERE name = 'thinking_mode'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "user_llm_configs", "thinking_mode")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE user_llm_configs ADD COLUMN thinking_mode TEXT DEFAULT ''")
 		if err != nil {
 			return fmt.Errorf("migrate v10->v11: %w", err)
@@ -714,9 +760,8 @@ CREATE TABLE IF NOT EXISTS runners (
 
 // migrateV17ToV18 adds display_only column to session_messages.
 func migrateV17ToV18(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('session_messages') WHERE name = 'display_only'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "session_messages", "display_only")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE session_messages ADD COLUMN display_only INTEGER DEFAULT 0")
 		if err != nil {
 			return fmt.Errorf("migrate v17->v18: %w", err)
@@ -979,9 +1024,8 @@ func migrateV26ToV27(conn *sql.DB) error {
 		{"thinking_mode", "TEXT DEFAULT ''"},
 	}
 	for _, c := range cols {
-		var count int
-		err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('user_llm_subscriptions') WHERE name = ?", c.name).Scan(&count)
-		if err == nil && count == 0 {
+		exists, err := columnExists(conn, "user_llm_subscriptions", c.name)
+		if err == nil && !exists {
 			_, err = conn.Exec(fmt.Sprintf("ALTER TABLE user_llm_subscriptions ADD COLUMN %s %s", c.name, c.def))
 			if err != nil {
 				return fmt.Errorf("migrate v26->v27 add %s: %w", c.name, err)
@@ -998,9 +1042,8 @@ func migrateV26ToV27(conn *sql.DB) error {
 // migrateV27ToV28 adds reasoning_content column to session_messages
 // so the model's thinking chain persists across restarts.
 func migrateV27ToV28(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('session_messages') WHERE name = 'reasoning_content'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "session_messages", "reasoning_content")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE session_messages ADD COLUMN reasoning_content TEXT DEFAULT ''")
 		if err != nil {
 			return fmt.Errorf("migrate v27->v28 add reasoning_content: %w", err)
@@ -1016,9 +1059,8 @@ func migrateV27ToV28(conn *sql.DB) error {
 // migrateV28ToV29 adds cached_models column to user_llm_subscriptions
 // for per-subscription model list caching.
 func migrateV28ToV29(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('user_llm_subscriptions') WHERE name = 'cached_models'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "user_llm_subscriptions", "cached_models")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE user_llm_subscriptions ADD COLUMN cached_models TEXT NOT NULL DEFAULT ''")
 		if err != nil {
 			return fmt.Errorf("migrate v28->v29 add cached_models: %w", err)
@@ -1077,9 +1119,8 @@ func migrateV30ToV31(conn *sql.DB) error {
 // This stores per-model token overrides as JSON: {"model-name": {"max_output_tokens": N, "max_context": N}}
 // When a model has a per-model config, it takes priority over the subscription-level defaults.
 func migrateV31ToV32(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('user_llm_subscriptions') WHERE name = 'per_model_configs'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "user_llm_subscriptions", "per_model_configs")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE user_llm_subscriptions ADD COLUMN per_model_configs TEXT NOT NULL DEFAULT '{}'")
 		if err != nil {
 			return fmt.Errorf("migrate v31->v32 add per_model_configs: %w", err)
@@ -1220,64 +1261,69 @@ func migrateV34ToV35(db *DB) error {
 		return fmt.Errorf("migrate default models: %w", err)
 	}
 
-	// 3. Migrate per_model_configs JSON into subscription_models rows
-	// IMPORTANT: collect all rows first, then execute inserts. SQLite's
-	// single-connection pool cannot run conn.Exec while rows.Next() is
-	// iterating — that would deadlock and freeze the entire startup.
-	rows, err := conn.Query(`
-		SELECT id, COALESCE(per_model_configs, '{}') FROM user_llm_subscriptions
-		WHERE per_model_configs IS NOT NULL AND per_model_configs != '' AND per_model_configs != '{}'
-	`)
-	if err != nil {
-		return fmt.Errorf("query per_model_configs: %w", err)
-	}
+	// 3. Migrate per_model_configs JSON into subscription_models rows.
+	// Guard: the column was dropped in v42, so skip this step once it's gone
+	// (keeps the migration idempotent when re-run on a post-v42 schema).
+	pmcColExists, _ := columnExists(conn, "user_llm_subscriptions", "per_model_configs")
+	if pmcColExists {
+		// IMPORTANT: collect all rows first, then execute inserts. SQLite's
+		// single-connection pool cannot run conn.Exec while rows.Next() is
+		// iterating — that would deadlock and freeze the entire startup.
+		rows, err := conn.Query(`
+			SELECT id, COALESCE(per_model_configs, '{}') FROM user_llm_subscriptions
+			WHERE per_model_configs IS NOT NULL AND per_model_configs != '' AND per_model_configs != '{}'
+		`)
+		if err != nil {
+			return fmt.Errorf("query per_model_configs: %w", err)
+		}
 
-	type pmcRow struct {
-		subID   string
-		jsonStr string
-	}
-	var pmcRows []pmcRow
-	for rows.Next() {
-		var r pmcRow
-		if err := rows.Scan(&r.subID, &r.jsonStr); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan per_model_configs row: %w", err)
+		type pmcRow struct {
+			subID   string
+			jsonStr string
 		}
-		pmcRows = append(pmcRows, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows iteration: %w", err)
-	}
+		var pmcRows []pmcRow
+		for rows.Next() {
+			var r pmcRow
+			if err := rows.Scan(&r.subID, &r.jsonStr); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan per_model_configs row: %w", err)
+			}
+			pmcRows = append(pmcRows, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("rows iteration: %w", err)
+		}
 
-	// Now process collected rows (no conn.Exec inside a rows loop).
-	for _, r := range pmcRows {
-		if r.jsonStr == "" || r.jsonStr == "{}" {
-			continue
-		}
-		var pmc map[string]struct {
-			MaxContext      int `json:"max_context,omitempty"`
-			MaxOutputTokens int `json:"max_output_tokens,omitempty"`
-		}
-		if err := json.Unmarshal([]byte(r.jsonStr), &pmc); err != nil {
-			log.WithError(err).WithField("sub_id", r.subID).Warn("v35: failed to parse per_model_configs, skipping")
-			continue
-		}
-		for modelName, cfg := range pmc {
-			if modelName == "" {
+		// Now process collected rows (no conn.Exec inside a rows loop).
+		for _, r := range pmcRows {
+			if r.jsonStr == "" || r.jsonStr == "{}" {
 				continue
 			}
-			_, err := conn.Exec(`
+			var pmc map[string]struct {
+				MaxContext      int `json:"max_context,omitempty"`
+				MaxOutputTokens int `json:"max_output_tokens,omitempty"`
+			}
+			if err := json.Unmarshal([]byte(r.jsonStr), &pmc); err != nil {
+				log.WithError(err).WithField("sub_id", r.subID).Warn("v35: failed to parse per_model_configs, skipping")
+				continue
+			}
+			for modelName, cfg := range pmc {
+				if modelName == "" {
+					continue
+				}
+				_, err := conn.Exec(`
 				INSERT INTO subscription_models (id, subscription_id, model, max_context, max_output_tokens)
 				VALUES (lower(hex(randomblob(16))), ?, ?, ?, ?)
 				ON CONFLICT(subscription_id, model) DO UPDATE SET
 					max_context = COALESCE(excluded.max_context, max_context),
 					max_output_tokens = COALESCE(excluded.max_output_tokens, max_output_tokens)
 			`, r.subID, modelName, cfg.MaxContext, cfg.MaxOutputTokens)
-			if err != nil {
-				log.WithError(err).WithFields(log.Fields{
-					"sub_id": r.subID, "model": modelName,
-				}).Warn("v35: failed to upsert per_model_config row")
+				if err != nil {
+					log.WithError(err).WithFields(log.Fields{
+						"sub_id": r.subID, "model": modelName,
+					}).Warn("v35: failed to upsert per_model_config row")
+				}
 			}
 		}
 	}
@@ -1296,9 +1342,8 @@ func migrateV34ToV35(db *DB) error {
 // migrateV35ToV36 adds api_type column to user_llm_subscriptions.
 // This column stores the API endpoint type: "" (default=chat_completions) or "responses".
 func migrateV35ToV36(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('user_llm_subscriptions') WHERE name = 'api_type'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "user_llm_subscriptions", "api_type")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE user_llm_subscriptions ADD COLUMN api_type TEXT DEFAULT ''")
 		if err != nil {
 			return fmt.Errorf("migrate v35->v36 add api_type: %w", err)
@@ -1315,9 +1360,8 @@ func migrateV35ToV36(conn *sql.DB) error {
 // This enables per-model API type overrides (e.g. gpt-4o uses chat_completions
 // while o3 uses responses API within the same subscription).
 func migrateV36ToV37(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('subscription_models') WHERE name = 'api_type'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "subscription_models", "api_type")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE subscription_models ADD COLUMN api_type TEXT NOT NULL DEFAULT ''")
 		if err != nil {
 			return fmt.Errorf("migrate v36->v37 add api_type: %w", err)
@@ -1332,9 +1376,8 @@ func migrateV36ToV37(conn *sql.DB) error {
 
 // migrateV37ToV38 adds runner_id to tenants for session-runner binding.
 func migrateV37ToV38(conn *sql.DB) error {
-	var count int
-	err := conn.QueryRow("SELECT COUNT(*) FROM pragma_table_info('tenants') WHERE name = 'runner_id'").Scan(&count)
-	if err == nil && count == 0 {
+	exists, err := columnExists(conn, "tenants", "runner_id")
+	if err == nil && !exists {
 		_, err = conn.Exec("ALTER TABLE tenants ADD COLUMN runner_id TEXT DEFAULT ''")
 		if err != nil {
 			return fmt.Errorf("migrate v37->v38 add runner_id: %w", err)
@@ -1345,4 +1388,183 @@ func migrateV37ToV38(conn *sql.DB) error {
 	}
 	log.Info("Database migrated to v38: added runner_id to tenants")
 	return nil
+}
+
+// migrateV38ToV39 lays the DB foundation for the model-first subscription redesign:
+//
+//  1. Adds subscription_models.enabled (default 1) so individual models can be
+//     disabled independently of their subscription.
+//  2. Creates user_default_model, storing each user's default (subscription, model)
+//     used to resolve LLM for new sessions (replaces the implicit
+//     user_llm_subscriptions.model "current model" semantics).
+//  3. Backfills subscription_models rows for every (subscription_id, model) pair
+//     referenced in tenants that lacks a row. This makes existing per-session
+//     selections concrete, disable-able model entities. Config defaults to 0
+//     (resolution falls back to subscription defaults). This is safe because the
+//     v35 migration already moved all non-empty per_model_configs JSON entries
+//     into rows, so missing rows have no real config to clobber.
+//  4. Seeds user_default_model from each user's default subscription. When the
+//     default subscription's model is empty, falls back to the most-recently-active
+//     tenant's model for that subscription; if none exists, the user is skipped
+//     (ResolveLLM will fall back to the system default until they pick a model).
+//
+// This migration is purely additive: no existing column is dropped or narrowed,
+// so the pre-redesign code paths keep working unchanged.
+func migrateV38ToV39(conn *sql.DB) error {
+	// 1. enabled column on subscription_models.
+	exists, err := columnExists(conn, "subscription_models", "enabled")
+	if err == nil && !exists {
+		if _, err := conn.Exec("ALTER TABLE subscription_models ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"); err != nil {
+			return fmt.Errorf("migrate v38->v39 add subscription_models.enabled: %w", err)
+		}
+	}
+
+	// 2. user_default_model table.
+	if _, err := conn.Exec(`
+CREATE TABLE IF NOT EXISTS user_default_model (
+    sender_id       TEXT PRIMARY KEY,
+    subscription_id TEXT NOT NULL,
+    model           TEXT NOT NULL DEFAULT '',
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);`); err != nil {
+		return fmt.Errorf("migrate v38->v39 create user_default_model: %w", err)
+	}
+
+	// 3. Backfill concrete model rows for tenants-referenced (sub, model) pairs.
+	if _, err := conn.Exec(`
+INSERT OR IGNORE INTO subscription_models (id, subscription_id, model, max_context, max_output_tokens, thinking_mode, api_type, enabled)
+SELECT lower(hex(randomblob(16))), t.subscription_id, t.model, 0, 0, '', '', 1
+FROM tenants t
+WHERE t.subscription_id != '' AND t.model != ''
+  AND NOT EXISTS (
+      SELECT 1 FROM subscription_models sm
+      WHERE sm.subscription_id = t.subscription_id AND sm.model = t.model
+  )
+GROUP BY t.subscription_id, t.model;`); err != nil {
+		return fmt.Errorf("migrate v38->v39 backfill subscription_models: %w", err)
+	}
+
+	// 4. Seed user_default_model from each user's default subscription.
+	// Guard: the is_default column was dropped in v43, so skip this seed once it's
+	// gone (user_default_model is already authoritative by then). Keeps the
+	// migration idempotent when re-run on a post-v43 schema.
+	exists, err = columnExists(conn, "user_llm_subscriptions", "is_default")
+	if err == nil && exists {
+		if _, err := conn.Exec(`
+INSERT OR REPLACE INTO user_default_model (sender_id, subscription_id, model, updated_at)
+SELECT s.sender_id, s.id,
+    COALESCE(NULLIF(s.model, ''),
+        (SELECT t.model FROM tenants t
+         WHERE t.subscription_id = s.id AND t.model != ''
+         ORDER BY t.last_active_at DESC LIMIT 1)),
+    datetime('now')
+FROM user_llm_subscriptions s
+WHERE s.is_default = 1
+  AND (s.model != '' OR EXISTS (
+      SELECT 1 FROM tenants t WHERE t.subscription_id = s.id AND t.model != ''));`); err != nil {
+			return fmt.Errorf("migrate v38->v39 seed user_default_model: %w", err)
+		}
+	}
+
+	if _, err := conn.Exec("UPDATE schema_version SET version = 39"); err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+	log.Info("Database migrated to v39: subscription_models.enabled + user_default_model + model backfill")
+	return nil
+}
+
+// migrateV39ToV40 adds the subscription-level enabled flag (default 1). A disabled
+// subscription stops contributing models to the picker without losing credentials.
+// Purely additive.
+func migrateV39ToV40(conn *sql.DB) error {
+	exists, err := columnExists(conn, "user_llm_subscriptions", "enabled")
+	if err == nil && !exists {
+		if _, err := conn.Exec("ALTER TABLE user_llm_subscriptions ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1"); err != nil {
+			return fmt.Errorf("migrate v39->v40 add user_llm_subscriptions.enabled: %w", err)
+		}
+	}
+	if _, err := conn.Exec("UPDATE schema_version SET version = 40"); err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+	log.Info("Database migrated to v40: user_llm_subscriptions.enabled")
+	return nil
+}
+
+// migrateV40ToV41 drops the legacy user_llm_configs table. Its data was migrated
+// into user_llm_subscriptions in v24, and no code path reads/writes it anymore.
+func migrateV40ToV41(conn *sql.DB) error {
+	if _, err := conn.Exec("DROP TABLE IF EXISTS user_llm_configs"); err != nil {
+		return fmt.Errorf("migrate v40->v41 drop user_llm_configs: %w", err)
+	}
+	if _, err := conn.Exec("UPDATE schema_version SET version = 41"); err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+	log.Info("Database migrated to v41: dropped legacy user_llm_configs table")
+	return nil
+}
+
+// migrateV41ToV42 drops the redundant per_model_configs JSON column from
+// user_llm_subscriptions. Per-model config now lives solely in the
+// subscription_models table (authoritative since v35). The JSON column was a
+// stale duplicate and incomplete (no ThinkingMode). Uses ALTER TABLE DROP
+// COLUMN (SQLite >= 3.35, provided by modernc.org/sqlite).
+func migrateV41ToV42(conn *sql.DB) error {
+	exists, err := columnExists(conn, "user_llm_subscriptions", "per_model_configs")
+	if err == nil && exists {
+		if _, err := conn.Exec("ALTER TABLE user_llm_subscriptions DROP COLUMN per_model_configs"); err != nil {
+			return fmt.Errorf("migrate v41->v42 drop per_model_configs: %w", err)
+		}
+	}
+	if _, err := conn.Exec("UPDATE schema_version SET version = 42"); err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+	log.Info("Database migrated to v42: dropped redundant per_model_configs JSON column")
+	return nil
+}
+
+// migrateV42ToV43 drops the is_default column from user_llm_subscriptions. The
+// default subscription is now derived from user_default_model (seeded in v39),
+// making the per-row is_default flag redundant. IsDefault stays as an in-memory
+// read-side projection populated by GetDefault/List. Uses ALTER TABLE DROP
+// COLUMN (SQLite >= 3.35, provided by modernc.org/sqlite).
+func migrateV42ToV43(conn *sql.DB) error {
+	exists, err := columnExists(conn, "user_llm_subscriptions", "is_default")
+	if err == nil && exists {
+		if _, err := conn.Exec("ALTER TABLE user_llm_subscriptions DROP COLUMN is_default"); err != nil {
+			return fmt.Errorf("migrate v42->v43 drop is_default: %w", err)
+		}
+	}
+	if _, err := conn.Exec("UPDATE schema_version SET version = 43"); err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+	log.Info("Database migrated to v43: dropped redundant is_default column (derived from user_default_model)")
+	return nil
+}
+
+// migrateV43ToV44 adds the is_system column to user_llm_subscriptions. A system
+// subscription row (is_system=1) is the shared default/fallback LLM reconciled
+// from config/env at boot, visible to all users and read-only in the UI.
+func migrateV43ToV44(conn *sql.DB) error {
+	exists, err := columnExists(conn, "user_llm_subscriptions", "is_system")
+	if err == nil && !exists {
+		if _, err := conn.Exec("ALTER TABLE user_llm_subscriptions ADD COLUMN is_system INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return fmt.Errorf("migrate v43->v44 add is_system: %w", err)
+		}
+	}
+	if _, err := conn.Exec("UPDATE schema_version SET version = 44"); err != nil {
+		return fmt.Errorf("update schema version: %w", err)
+	}
+	log.Info("Database migrated to v44: added is_system column to user_llm_subscriptions")
+	return nil
+}
+
+// columnExists checks whether a column exists in a table using pragma_table_info.
+// Returns (true, nil) if the column exists, (false, nil) if not, or (false, error) on query failure.
+func columnExists(conn *sql.DB, table, column string) (bool, error) {
+	var count int
+	query := fmt.Sprintf("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = ?", table)
+	if err := conn.QueryRow(query, column).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

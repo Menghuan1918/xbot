@@ -81,6 +81,16 @@ func (r *RetryLLM) acquire(ctx context.Context) func() {
 	}
 }
 
+// LoadModelsFromAPI delegates to the inner client if it implements ModelLoader.
+// RetryLLM itself does not retry this call — model list fetching has its own
+// timeout/error handling in the refresh pipeline.
+func (r *RetryLLM) LoadModelsFromAPI(ctx context.Context) error {
+	if loader, ok := r.inner.(ModelLoader); ok {
+		return loader.LoadModelsFromAPI(ctx)
+	}
+	return fmt.Errorf("inner LLM does not implement ModelLoader")
+}
+
 // IsInputTooLongError detects 400-class errors caused by the input exceeding the
 // model's context window. Different providers return this in different formats:
 //   - Dashscope: "Range of input length should be [1, 202752]"
@@ -331,7 +341,7 @@ func (r *RetryLLM) GenerateStream(ctx context.Context, model string, messages []
 // streamContentFn / streamReasoningFn / streamToolCallFn 在每个 attempt 中都会被调用。
 // 重试过程中中间 attempt 的内容可能短暂出现在 UI 中，但最终只有成功 attempt
 // 的完整响应会被返回。
-func (r *RetryLLM) GenerateStreamAndCollect(ctx context.Context, model string, messages []ChatMessage, tools []ToolDefinition, thinkingMode string, streamContentFn func(string), streamReasoningFn func(string), streamToolCallFn func([]ToolCallDelta)) (*LLMResponse, error) {
+func (r *RetryLLM) GenerateStreamAndCollect(ctx context.Context, model string, messages []ChatMessage, tools []ToolDefinition, thinkingMode string, streamContentFn func(string), streamReasoningFn func(string), streamToolCallFn func([]ToolCallDelta), streamUsageFn func(*TokenUsage)) (*LLMResponse, error) {
 	release := r.acquire(ctx)
 	defer release()
 
@@ -379,8 +389,8 @@ func (r *RetryLLM) GenerateStreamAndCollect(ctx context.Context, model string, m
 			eventCh = r.ch
 		}
 
-		if streamContentFn != nil || streamReasoningFn != nil || streamToolCallFn != nil {
-			return CollectStreamWithCallback(ctx, eventCh, streamContentFn, streamReasoningFn, streamToolCallFn)
+		if streamContentFn != nil || streamReasoningFn != nil || streamToolCallFn != nil || streamUsageFn != nil {
+			return CollectStreamWithCallback(ctx, eventCh, streamContentFn, streamReasoningFn, streamToolCallFn, streamUsageFn)
 		}
 		return CollectStream(ctx, eventCh)
 	})

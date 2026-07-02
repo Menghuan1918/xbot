@@ -63,17 +63,6 @@ func (m *cliModel) openSettingsPanel(schema []ch.SettingDefinition, values map[s
 			m.panelState.values[def.Key] = def.DefaultValue
 		}
 		// Inject cross-subscription model list for tier model selectors.
-		if (def.Key == "vanguard_model" || def.Key == "balance_model" || def.Key == "swift_model") && m.channel.modelLister != nil && len(def.Options) == 0 {
-			models := m.channel.modelLister.ListModels()
-			if len(models) > 0 {
-				opts := make([]ch.SettingOption, len(models))
-				for j, mdl := range models {
-					opts[j] = ch.SettingOption{Label: mdl, Value: mdl}
-				}
-				def.Options = opts
-				def.Type = ch.SettingTypeCombo
-			}
-		}
 		// Global-scoped settings require admin access — mark read-only for non-admin users.
 		if !def.ReadOnly && ch.IsGlobalScopedSettingKey(def.Key) && (m.isAdminFn == nil || !m.isAdminFn()) {
 			def.ReadOnly = true
@@ -503,7 +492,7 @@ func (m *cliModel) updateSettingsPanel(msg tea.KeyPressMsg) (bool, tea.Model, te
 				m.panelState.mode = ""
 				m.relayoutViewport()
 				m.quickSwitchReturnToPanel = true
-				m.openQuickSwitch("subscription")
+				m.openQuickSwitch("")
 				return true, m, nil
 			}
 			switch def.Type {
@@ -659,15 +648,8 @@ func (m *cliModel) viewSettingsPanel() string {
 							}
 						}
 					}
-					// Fallback: if no per-session subscription is set, use the global default.
-					if activeName == "" {
-						for _, sub := range subs {
-							if sub.Active {
-								activeName = sub.Name
-								break
-							}
-						}
-					}
+					// Fallback: if no per-session subscription is set, no hint is shown.
+					// (Previously fell back to sub.Active — "default subscription" concept retired.)
 					if activeName != "" {
 						subHint = " " + s.ProgressDone.Render("● "+activeName)
 					}

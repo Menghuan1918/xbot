@@ -276,21 +276,8 @@ func (app *cliApp) refreshRemoteValuesCache(subscriptionID string) {
 		}
 	}
 
-	// Sync tier model mappings via RPC so SubAgent model resolution
-	// works correctly (tier models are user-scoped, persisted in DB).
+	// Sync model contexts via RPC.
 	if app.client != nil {
-		llmCfg := app.cfg.LLM // start from current config
-		if v, ok := vals["vanguard_model"]; ok {
-			llmCfg.VanguardModel = v
-		}
-		if v, ok := vals["balance_model"]; ok {
-			llmCfg.BalanceModel = v
-		}
-		if v, ok := vals["swift_model"]; ok {
-			llmCfg.SwiftModel = v
-		}
-		app.cfg.LLM = llmCfg
-		app.client.SetModelTiers(llmCfg)
 		app.client.SetModelContexts(app.cfg.Agent.ModelContexts)
 	}
 }
@@ -309,25 +296,12 @@ func saveCLIConfig(cfg *config.Config) error {
 	// Agent settings: always write back (max_iterations, max_concurrency, etc.)
 	merged.Agent = cfg.Agent
 
-	// LLM tier model mappings: always write back (vanguard/balance/swift models).
-	// These are global preferences, not subscription credentials.
-	merged.LLM.VanguardModel = cfg.LLM.VanguardModel
-	merged.LLM.BalanceModel = cfg.LLM.BalanceModel
-	merged.LLM.SwiftModel = cfg.LLM.SwiftModel
-
 	// LLM credentials (Provider, BaseURL, APIKey, Model, MaxOutputTokens, ThinkingMode):
-	// Single source of truth is user_llm_subscriptions DB, NOT config.json.
-	// Only write credentials to config.json if there are no DB subscriptions
-	// (first-run path where config.json is the only data source).
-	// Guard: only write if credentials are actually present (avoid zero-value overwrite).
-	if len(merged.Subscriptions) == 0 && cfg.LLM.Provider != "" {
-		merged.LLM.Provider = cfg.LLM.Provider
-		merged.LLM.BaseURL = cfg.LLM.BaseURL
-		merged.LLM.APIKey = cfg.LLM.APIKey
-		merged.LLM.Model = cfg.LLM.Model
-		merged.LLM.MaxOutputTokens = cfg.LLM.MaxOutputTokens
-		merged.LLM.ThinkingMode = cfg.LLM.ThinkingMode
-	}
+	// NOT written back to config.json. The DB system subscription (reconciled at
+	// boot) is the single source of truth, and cfg.LLM.* may hold decrypted values
+	// refreshed from DB — writing them back would leak plaintext keys. config.json
+	// keeps its existing credentials (preserved by SaveToFile's deep merge) only as
+	// a boot seed.
 
 	// CLI remote connection settings: only write if non-empty (e.g. first setup)
 	if cfg.CLI.ServerURL != "" || cfg.CLI.Token != "" {
@@ -507,9 +481,7 @@ func updateActiveSubscription(client *agent.Client, cfg *config.Config, values m
 				newSub.MaxOutputTokens = n
 			}
 		}
-		if v, ok := values["thinking_mode"]; ok {
-			newSub.ThinkingMode = v
-		}
+		// thinking_mode is no longer written onto subscription rows (global user setting).
 		if err := client.AddSubscription(cliSenderID, newSub); err != nil {
 			return fmt.Errorf("create subscription: %w", err)
 		}
@@ -553,9 +525,8 @@ func updateActiveSubscription(client *agent.Client, cfg *config.Config, values m
 			log.Warnf("[Settings] Invalid max_output_tokens value %q: err=%v", v, err)
 		}
 	}
-	if v, ok := values["thinking_mode"]; ok {
-		sub.ThinkingMode = v
-	}
+	// thinking_mode is no longer written onto subscription rows — it is a global
+	// user setting applied via ApplyRuntimeSettings (Ctrl+M / /settings).
 
 	// Preserve PerModelConfigs — never overwrite with nil (would destroy per-model overrides
 	// written by saveSettings or sub panel). Merge existing values on top.
@@ -678,8 +649,45 @@ func (a *cliApp) buildPaletteExternalCommands() []cli.PaletteExternalCommand {
 		}
 	}
 
-	// 2. Plugin commands from loaded plugins
-	// TODO: migrate palette plugin commands to RPC
+	// 2. Plugin commands from local ~/.xbot/plugins/*/plugin.json
+	// NOTE: This reads plugin.json directly to discover commands. In remote mode,
+	// plugin manifests are also synced locally via the plugin system. A future
+	// improvement would be to fetch commands via RPC (list_plugin_commands) for
+	// consistency with the PluginManager, but this approach is correct and simple.
+	if entries, err := os.ReadDir(xbotDir + "/plugins"); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			manifestPath := filepath.Join(xbotDir, "plugins", e.Name(), "plugin.json")
+			data, err := os.ReadFile(manifestPath)
+			if err != nil {
+				continue
+			}
+			var manifest struct {
+				Contributes struct {
+					Commands []struct {
+						Name        string `json:"name"`
+						Description string `json:"description"`
+					} `json:"commands"`
+				} `json:"contributes"`
+			}
+			if err := json.Unmarshal(data, &manifest); err != nil {
+				continue
+			}
+			for _, cmd := range manifest.Contributes.Commands {
+				if cmd.Name == "" {
+					continue
+				}
+				cmds = append(cmds, cli.PaletteExternalCommand{
+					Title:       cmd.Name,
+					Description: cmd.Description,
+					Category:    cli.PaletteCategoryPlugins,
+					Content:     cmd.Name + " ",
+				})
+			}
+		}
+	}
 
 	// 3. User custom commands from ~/.xbot/commands/*.md (crush-style)
 	if entries, err := os.ReadDir(xbotDir + "/commands"); err == nil {
@@ -1159,13 +1167,16 @@ func main() {
 			_, modelChanged := values["llm_model"]
 			_, urlChanged := values["llm_base_url"]
 			_, maxOutputChanged := values["max_output_tokens"]
-			_, thinkingChanged := values["thinking_mode"]
+			// thinking_mode is NOT a subscription field anymore (it's a global user
+			// setting), so it must not trigger updateActiveSubscription nor be written
+			// onto a subscription row. It flows through ApplyRuntimeSettings, whose
+			// thinking_mode handler drops the session memo.
 			// Signal from saveSettings: LLM credentials were saved via subscriptionMgr.
 			// The actual subscription-scoped keys are stripped before reaching here,
 			// so this synthetic key is the only way to know LLM config changed.
 			_, llmCredsSaved := values["__llm_creds_saved"]
 
-			llmFieldChanged := llmChanged || keyChanged || modelChanged || urlChanged || maxOutputChanged || thinkingChanged
+			llmFieldChanged := llmChanged || keyChanged || modelChanged || urlChanged || maxOutputChanged
 
 			// ── Subscription-scoped fields: update via subscription manager ──
 			// Skip the redundant updateActiveSubscription call when saveSettings
@@ -1221,7 +1232,6 @@ func main() {
 
 			// ── LLM config changes applied via RPC (unified local/remote path) ──
 			if llmFieldChanged {
-				app.client.SetModelTiers(app.cfg.LLM)
 				app.client.SetDefaultThinkingMode(app.cfg.LLM.ThinkingMode)
 				app.client.SetModelContexts(app.cfg.Agent.ModelContexts)
 				app.client.SetGlobalMaxTokens(app.cfg.LLM.MaxOutputTokens)
@@ -1261,7 +1271,6 @@ func main() {
 			app.llmClient = client
 			if app.client != nil {
 				_ = app.client.SetChatLLM(absWorkDir, app.cfg.LLM.Provider, app.cfg.LLM)
-				_ = app.client.SetModelTiers(app.cfg.LLM)
 			}
 			return nil
 		},
@@ -1396,6 +1405,26 @@ func main() {
 		IsAdminFn: func() bool {
 			return true // standalone mode: CLI user is always admin
 		},
+		ListAllTenantsFn: func() ([]cli.AllSessionInfo, error) {
+			if app.client == nil {
+				return nil, fmt.Errorf("agent not initialized")
+			}
+			tenants, err := app.client.ListTenants()
+			if err != nil {
+				return nil, err
+			}
+			result := make([]cli.AllSessionInfo, 0, len(tenants))
+			for _, t := range tenants {
+				result = append(result, cli.AllSessionInfo{
+					Channel:      t.Channel,
+					ChatID:       t.ChatID,
+					Label:        t.Label,
+					Model:        t.Model,
+					LastActiveAt: t.LastActiveAt,
+				})
+			}
+			return result, nil
+		},
 		PaletteContributor: func() []cli.PaletteExternalCommand {
 			return app.buildPaletteExternalCommands()
 		},
@@ -1445,6 +1474,9 @@ func main() {
 		}
 		cliCfg.SessionsDeleteFn = func(channelName, chatID string) error {
 			return backend.DeleteChat(channelName, cliSenderID, chatID)
+		}
+		cliCfg.ChatRenameFn = func(channelName, chatID, newName string) error {
+			return backend.RenameChat(channelName, cliSenderID, chatID, newName)
 		}
 		// sessionsListRefresh will be assigned when refreshAgentCache is defined below.
 		// We defer wiring via a pointer so the closure can capture the later-defined func.
@@ -2140,6 +2172,14 @@ func (l *backendModelLister) ListAllModels() []string {
 	return l.client.ListAllModels()
 }
 
+func (l *backendModelLister) ListAllModelEntries() []protocol.ModelEntry {
+	return l.client.ListAllModelEntries()
+}
+
+func (l *backendModelLister) RefreshModelEntries() []protocol.ModelEntry {
+	return l.client.RefreshModelEntries()
+}
+
 // backendSubscriptionManager implements cli.SubscriptionManager via Backend interface.
 // Works identically for both local (localTransport → DB) and remote (WS RPC → server DB) modes.
 type backendSubscriptionManager struct {
@@ -2192,6 +2232,14 @@ func (m *backendSubscriptionManager) UpdatePerModelConfig(id, model string, pmc 
 	return m.client.UpdatePerModelConfig(id, model, protocol.PerModelConfig(pmc))
 }
 
+func (m *backendSubscriptionManager) SetModelEnabled(id, model string, enabled bool) error {
+	return m.client.SetModelEnabled(id, model, enabled)
+}
+
+func (m *backendSubscriptionManager) SetSubscriptionEnabled(id string, enabled bool) error {
+	return m.client.SetSubscriptionEnabled(id, enabled)
+}
+
 func (m *backendSubscriptionManager) GetSessionSubscription(senderID, chatID string) (string, string, error) {
 	return m.client.GetSessionSubscription(senderID, chatID)
 }
@@ -2213,13 +2261,16 @@ func (s *backendLLMSubscriber) SwitchSubscription(senderID string, sub *channel.
 	return s.client.SetDefaultSubscription(sub.ID, chatID)
 }
 
-func (s *backendLLMSubscriber) SwitchModel(senderID, model, chatID string) {
+// SelectModel switches to a specific (subscription, model) pair, used by the
+// model picker when the row carries an owning SubID. Unlike SwitchModel (which
+// resolves the owning subscription server-side by model name), this pins the
+// exact subscription the user picked — necessary now that the picker lists the
+// same model name once per subscription that serves it.
+func (s *backendLLMSubscriber) SelectModel(senderID, subID, model, chatID string) error {
 	if senderID == "" {
 		senderID = cliSenderID
 	}
-	if err := s.client.SwitchModel(senderID, model, chatID); err != nil {
-		log.WithError(err).Warn("backendLLMSubscriber: SwitchModel failed")
-	}
+	return s.client.SelectModel(senderID, subID, model, chatID)
 }
 
 func (s *backendLLMSubscriber) GetDefaultModel() string {

@@ -456,10 +456,8 @@ func (m *cliModel) showSessionCreateDialog() tea.Cmd {
 	// SaveSessionLLMState writes ALL fields (sub, model, maxContext, maxOutput) in one shot.
 	if m.activeSubID != "" {
 		SaveSessionLLMState(m.workDir, chatID, SessionLLMState{
-			SubscriptionID:   m.activeSubID,
-			Model:            m.cachedModelName,
-			MaxContextTokens: m.cachedMaxContextTokens,
-			MaxOutputTokens:  int(m.cachedMaxOutputTokens),
+			SubscriptionID: m.activeSubID,
+			Model:          m.cachedModelName,
 		}, m.remoteMode)
 	}
 	m.chatID = chatID
@@ -576,6 +574,7 @@ func (m *cliModel) switchToSession(entry SessionPanelEntry) (bool, tea.Cmd) {
 			}
 			m.saveCurrentSession()
 			m.chatID = entry.ID
+			m.senderID = "cli_user" // 重置为 CLI 默认身份，防止 /su 跨渠道残留
 			SetLastActiveSession(m.defaultChatID, entry.ID)
 			m.channelName = entry.Channel
 			// Update workdir to match the session's workdir.

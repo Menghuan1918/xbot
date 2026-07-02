@@ -565,7 +565,7 @@ func TestCycleModel_PreservesPerModelMaxContext(t *testing.T) {
 // Per-session model persistence on startup restore (regression for model switch bug)
 // ---------------------------------------------------------------------------
 
-// mockLLMSubscriber tracks SwitchModel calls for assertions.
+// mockLLMSubscriber tracks SelectModel calls for assertions.
 type mockLLMSubscriber struct {
 	switchModelCalls []mockSwitchModelCall
 	switchSubCalls   []mockSwitchSubCall
@@ -588,8 +588,9 @@ func (m *mockLLMSubscriber) SwitchSubscription(senderID string, sub *channel.Sub
 	return nil
 }
 
-func (m *mockLLMSubscriber) SwitchModel(senderID, model, chatID string) {
+func (m *mockLLMSubscriber) SelectModel(senderID, subID, model, chatID string) error {
 	m.switchModelCalls = append(m.switchModelCalls, mockSwitchModelCall{senderID, model, chatID})
+	return nil
 }
 
 func (m *mockLLMSubscriber) GetDefaultModel() string {
@@ -597,7 +598,7 @@ func (m *mockLLMSubscriber) GetDefaultModel() string {
 }
 
 // TestScheduleSessionLLMRestore_UsesPerSessionModel verifies that when a session
-// had a per-session model override (e.g. user switched via Ctrl+L), the restore
+// had a per-session model override (e.g. user switched via Ctrl+N), the restore
 // path uses that model instead of the subscription's default model.
 func TestScheduleSessionLLMRestore_UsesPerSessionModel(t *testing.T) {
 	mgr := &mockSubscriptionManager{
@@ -646,7 +647,7 @@ func TestScheduleSessionLLMRestore_UsesPerSessionModel(t *testing.T) {
 }
 
 // TestHandleSwitchLLMDone_RestoresPerSessionModel verifies that handleSwitchLLMDoneMsg
-// calls SwitchModel to set the per-session model after SetDefault creates the entry
+// calls SelectModel to set the per-session model after SetDefault creates the entry
 // with the subscription's default model.
 func TestHandleSwitchLLMDone_RestoresPerSessionModel(t *testing.T) {
 	mgr := &mockSubscriptionManager{
@@ -681,16 +682,16 @@ func TestHandleSwitchLLMDone_RestoresPerSessionModel(t *testing.T) {
 
 	m.handleSwitchLLMDoneMsg(done)
 
-	// SwitchModel must have been called with the per-session model
+	// SelectModel must have been called with the per-session model
 	if len(mockSub.switchModelCalls) != 1 {
-		t.Fatalf("expected 1 SwitchModel call, got %d", len(mockSub.switchModelCalls))
+		t.Fatalf("expected 1 SelectModel call, got %d", len(mockSub.switchModelCalls))
 	}
 	call := mockSub.switchModelCalls[0]
 	if call.model != "model-b" {
-		t.Errorf("SwitchModel model = %q, want model-b", call.model)
+		t.Errorf("SelectModel model = %q, want model-b", call.model)
 	}
 	if call.chatID != m.chatID {
-		t.Errorf("SwitchModel chatID = %q, want %q", call.chatID, m.chatID)
+		t.Errorf("SelectModel chatID = %q, want %q", call.chatID, m.chatID)
 	}
 
 	// cachedModelName must reflect per-session model, not subscription default

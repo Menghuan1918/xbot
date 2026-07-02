@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -70,6 +69,7 @@ type RemoteSandbox struct {
 	authToken            string
 	addr                 string
 	tokenStore           *RunnerTokenStore
+	sessionRunners       *sync.Map // shared with SandboxRouter: "channel:chatID" → runnerName
 	pendingMu            sync.Mutex
 	pending              map[string]chan *RunnerMessage // request ID → response channel
 	upgrader             websocket.Upgrader             // per-instance upgrader with origin check
@@ -82,6 +82,23 @@ type RemoteSandbox struct {
 	stdioStreams         map[string]*stdioStream // streamID → active stdio stream
 	OnRunnerStatusChange func(userID, runnerName string, online bool)
 	OnSyncProgress       func(userID string, phase string, message string)
+}
+
+// parseSandboxErrorResponse unmarshals a ProtoError body and returns a
+// descriptive error. It maps the "ENOENT" code to os.ErrNotExist so callers
+// can use os.IsNotExist. opName is used as a prefix (e.g. "read file").
+func parseSandboxErrorResponse(raw json.RawMessage, opName string) error {
+	var e ErrorResponse
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return fmt.Errorf("%s error (raw: %s): unmarshal failed: %w", opName, string(raw), err)
+	}
+	if e.Code == "ENOENT" {
+		return os.ErrNotExist
+	}
+	if e.Message == "" {
+		return fmt.Errorf("%s error (raw: %s)", opName, string(raw))
+	}
+	return fmt.Errorf("%s: %s", opName, e.Message)
 }
 
 // NewRemoteSandbox creates and starts a RemoteSandbox server.
@@ -379,8 +396,15 @@ func (rs *RemoteSandbox) handleWebSocket(w http.ResponseWriter, r *http.Request)
 
 }
 
-// getRunner returns the active connection for a user, or an error.
+// getRunner returns the active connection for a user (backward-compat wrapper).
+// For session-aware routing, use getRunnerForSession.
 func (rs *RemoteSandbox) getRunner(userID string) (*runnerConnection, error) {
+	return rs.getRunnerForSession(userID, "")
+}
+
+// getRunnerForSession resolves the runner connection for a session, checking
+// session-level binding (sessionRunners) first, then falling back to entry.active.
+func (rs *RemoteSandbox) getRunnerForSession(userID, sessionKey string) (*runnerConnection, error) {
 	val, ok := rs.connections.Load(userID)
 	if !ok {
 		return nil, fmt.Errorf("no runner connected for user %q", userID)
@@ -391,12 +415,27 @@ func (rs *RemoteSandbox) getRunner(userID string) (*runnerConnection, error) {
 	}
 	entry.mu.RLock()
 	defer entry.mu.RUnlock()
-	if entry.active == "" || len(entry.runners) == 0 {
+
+	// Determine which runner to use.
+	// Priority: sessionRunners (session-level) → tokenStore.active_runner (user-level) → entry.active
+	runnerName := entry.active
+	if rs.sessionRunners != nil && sessionKey != "" {
+		if v, ok := rs.sessionRunners.Load(sessionKey); ok {
+			runnerName = v.(string)
+		}
+	}
+	if runnerName == "" && rs.tokenStore != nil {
+		if name, err := rs.tokenStore.GetActiveRunner(userID); err == nil && name != "" && name != BuiltinDockerRunnerName {
+			runnerName = name
+		}
+	}
+
+	if runnerName == "" || len(entry.runners) == 0 {
 		return nil, fmt.Errorf("no active runner for user %q", userID)
 	}
-	rc, ok := entry.runners[entry.active]
+	rc, ok := entry.runners[runnerName]
 	if !ok {
-		return nil, fmt.Errorf("active runner %q not connected for user %q", entry.active, userID)
+		return nil, fmt.Errorf("active runner %q not connected for user %q", runnerName, userID)
 	}
 	return rc, nil
 }
@@ -654,207 +693,6 @@ func (rs *RemoteSandbox) GetShell(userID string, _ string) (string, error) {
 	return rc.shell, nil
 }
 
-func (rs *RemoteSandbox) Exec(ctx context.Context, spec ExecSpec) (*ExecResult, error) {
-	rc, err := rs.getRunner(spec.UserID)
-	if err != nil {
-		return nil, err
-	}
-
-	timeout := spec.Timeout
-	if timeout == 0 {
-		timeout = 60 * time.Second
-	}
-
-	reqBody, err := json.Marshal(ExecRequest{
-		Command: spec.Command,
-		Args:    spec.Args,
-		Shell:   spec.Shell,
-		Dir:     spec.Dir,
-		Env:     spec.Env,
-		Stdin:   spec.Stdin,
-		Timeout: int(timeout / time.Second),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-
-	msg := &RunnerMessage{
-		ID:     generateID(),
-		Type:   ProtoExec,
-		UserID: spec.UserID,
-		Body:   reqBody,
-	}
-
-	resp, err := rs.sendRequest(ctx, rc, msg, timeout+5*time.Second)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return nil, fmt.Errorf("exec error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return nil, fmt.Errorf("exec error (raw: %s)", string(resp.Body))
-		}
-		return nil, fmt.Errorf("exec error: %s", e.Message)
-	}
-
-	var result ExecResultResponse
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal exec result: %w", err)
-	}
-
-	return &ExecResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-		TimedOut: result.TimedOut,
-	}, nil
-}
-
-// ExecBg starts a background command on the runner.
-// Returns immediately with the task ID — the command runs asynchronously on the runner.
-func (rs *RemoteSandbox) ExecBg(ctx context.Context, spec ExecSpec, taskID string) error {
-	rc, err := rs.getRunner(spec.UserID)
-	if err != nil {
-		return err
-	}
-
-	reqBody, err := json.Marshal(runnerproto.BgExecRequest{
-		TaskID:  taskID,
-		Command: spec.Command,
-		Args:    spec.Args,
-		Shell:   spec.Shell,
-		Dir:     spec.Dir,
-		Env:     spec.Env,
-		Stdin:   spec.Stdin,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-
-	msg := &RunnerMessage{
-		ID:     generateID(),
-		Type:   runnerproto.ProtoBgExec,
-		UserID: spec.UserID,
-		Body:   reqBody,
-	}
-
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-
-	if resp.Type == runnerproto.ProtoError {
-		var e runnerproto.ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return fmt.Errorf("bg_exec error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return fmt.Errorf("bg_exec error (raw: %s)", string(resp.Body))
-		}
-		return fmt.Errorf("bg_exec error: %s", e.Message)
-	}
-
-	return nil
-}
-
-// KillBg kills a background task on the runner.
-func (rs *RemoteSandbox) KillBg(ctx context.Context, userID, taskID string) error {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return err
-	}
-
-	reqBody, err := json.Marshal(runnerproto.BgKillRequest{TaskID: taskID})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{
-		ID:     generateID(),
-		Type:   runnerproto.ProtoBgKill,
-		UserID: userID,
-		Body:   reqBody,
-	}
-
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-
-	if resp.Type == runnerproto.ProtoError {
-		var e runnerproto.ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return fmt.Errorf("bg_kill error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return fmt.Errorf("bg_kill error (raw: %s)", string(resp.Body))
-		}
-		return fmt.Errorf("bg_kill error: %s", e.Message)
-	}
-
-	return nil
-}
-
-// StatusBg queries the current status and output of a background task on the runner.
-func (rs *RemoteSandbox) StatusBg(ctx context.Context, userID, taskID string) (*RemoteBgTaskStatus, error) {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	reqBody, err := json.Marshal(runnerproto.BgStatusRequest{TaskID: taskID})
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{
-		ID:     generateID(),
-		Type:   runnerproto.ProtoBgStatus,
-		UserID: userID,
-		Body:   reqBody,
-	}
-
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.Type == runnerproto.ProtoError {
-		var e runnerproto.ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return nil, fmt.Errorf("bg_status error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return nil, fmt.Errorf("bg_status error (raw: %s)", string(resp.Body))
-		}
-		return nil, fmt.Errorf("bg_status error: %s", e.Message)
-	}
-
-	var result runnerproto.BgOutputResponse
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal bg_status result: %w", err)
-	}
-
-	return &RemoteBgTaskStatus{
-		TaskID:   result.TaskID,
-		Status:   result.Status,
-		ExitCode: result.ExitCode,
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-	}, nil
-}
-
-// RemoteBgTaskStatus holds the status snapshot of a remote background task.
-type RemoteBgTaskStatus struct {
-	TaskID   string
-	Status   string // "running", "completed", "failed", "killed"
-	ExitCode int
-	Stdout   string
-	Stderr   string
-}
-
 // LLMGenerate sends an LLM generation request to the runner and returns the response.
 // This is used by ProxyLLM to forward LLM calls to runners with local LLM configured.
 func (rs *RemoteSandbox) LLMGenerate(ctx context.Context, userID, model string, messages []llm.ChatMessage, tools []llm.ToolDefinition, thinkingMode string) (*llm.LLMResponse, error) {
@@ -885,15 +723,8 @@ func (rs *RemoteSandbox) LLMGenerate(ctx context.Context, userID, model string, 
 		return nil, err
 	}
 
-	if resp.Type == runnerproto.ProtoError {
-		var e runnerproto.ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return nil, fmt.Errorf("llm_generate error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return nil, fmt.Errorf("llm_generate error (raw: %s)", string(resp.Body))
-		}
-		return nil, fmt.Errorf("llm_generate error: %s", e.Message)
+	if resp.Type == ProtoError {
+		return nil, parseSandboxErrorResponse(resp.Body, "llm_generate")
 	}
 
 	var result llm.LLMResponse
@@ -922,15 +753,8 @@ func (rs *RemoteSandbox) LLMModels(ctx context.Context, userID string) ([]string
 		return nil, err
 	}
 
-	if resp.Type == runnerproto.ProtoError {
-		var e runnerproto.ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return nil, fmt.Errorf("llm_models error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return nil, fmt.Errorf("llm_models error (raw: %s)", string(resp.Body))
-		}
-		return nil, fmt.Errorf("llm_models error: %s", e.Message)
+	if resp.Type == ProtoError {
+		return nil, parseSandboxErrorResponse(resp.Body, "llm_models")
 	}
 
 	var result llm.LLMListModelsResponse
@@ -939,261 +763,6 @@ func (rs *RemoteSandbox) LLMModels(ctx context.Context, userID string) ([]string
 	}
 
 	return result.Models, nil
-}
-
-func (rs *RemoteSandbox) ReadFile(ctx context.Context, path, userID string) ([]byte, error) {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return nil, err
-	}
-
-	reqBody, err := json.Marshal(ReadFileRequest{Path: path})
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoReadFile, UserID: userID, Body: reqBody}
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return nil, fmt.Errorf("read file error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Code == "ENOENT" {
-			return nil, os.ErrNotExist
-		}
-		if e.Message == "" {
-			return nil, fmt.Errorf("read file error (raw: %s)", string(resp.Body))
-		}
-		return nil, fmt.Errorf("read file: %s", e.Message)
-	}
-	var fc FileContentResponse
-	if err := json.Unmarshal(resp.Body, &fc); err != nil {
-		return nil, fmt.Errorf("unmarshal file content: %w", err)
-	}
-	return base64.StdEncoding.DecodeString(fc.Data)
-}
-
-func (rs *RemoteSandbox) WriteFile(ctx context.Context, path string, data []byte, perm os.FileMode, userID string) error {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return err
-	}
-
-	reqBody, err := json.Marshal(WriteFileRequest{
-		Path: path,
-		Data: base64.StdEncoding.EncodeToString(data),
-		Perm: int(perm),
-	})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoWriteFile, UserID: userID, Body: reqBody}
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return fmt.Errorf("write file error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return fmt.Errorf("write file error (raw: %s)", string(resp.Body))
-		}
-		return fmt.Errorf("write file: %s", e.Message)
-	}
-	return nil
-}
-
-func (rs *RemoteSandbox) Stat(ctx context.Context, path, userID string) (*SandboxFileInfo, error) {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return nil, err
-	}
-	reqBody, err := json.Marshal(StatRequest{Path: path})
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoStat, UserID: userID, Body: reqBody}
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return nil, fmt.Errorf("stat error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Code == "ENOENT" {
-			return nil, os.ErrNotExist
-		}
-		if e.Message == "" {
-			return nil, fmt.Errorf("stat error (raw: %s)", string(resp.Body))
-		}
-		return nil, fmt.Errorf("stat: %s", e.Message)
-	}
-	var sr StatResponse
-	if err := json.Unmarshal(resp.Body, &sr); err != nil {
-		return nil, fmt.Errorf("unmarshal stat: %w", err)
-	}
-	modTime, _ := time.Parse(time.RFC3339, sr.ModTime)
-	return &SandboxFileInfo{
-		Name:    sr.Name,
-		Size:    sr.Size,
-		Mode:    os.FileMode(sr.Mode),
-		ModTime: modTime,
-		IsDir:   sr.IsDir,
-	}, nil
-}
-
-func (rs *RemoteSandbox) ReadDir(ctx context.Context, path, userID string) ([]DirEntry, error) {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return nil, err
-	}
-	reqBody, err := json.Marshal(ReadDirRequest{Path: path})
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoReadDir, UserID: userID, Body: reqBody}
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return nil, fmt.Errorf("read_dir error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return nil, fmt.Errorf("read_dir error (raw: %s)", string(resp.Body))
-		}
-		return nil, fmt.Errorf("read_dir: %s", e.Message)
-	}
-	var de DirEntriesResponse
-	if err := json.Unmarshal(resp.Body, &de); err != nil {
-		return nil, fmt.Errorf("unmarshal dir entries: %w", err)
-	}
-	entries := make([]DirEntry, len(de.Entries))
-	for i, e := range de.Entries {
-		entries[i] = DirEntry{Name: e.Name, IsDir: e.IsDir, Size: e.Size} //nolint:staticcheck
-	}
-	return entries, nil
-}
-
-func (rs *RemoteSandbox) MkdirAll(ctx context.Context, path string, perm os.FileMode, userID string) error {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return err
-	}
-	reqBody, err := json.Marshal(PathRequest{Path: path, Perm: int(perm)})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoMkdirAll, UserID: userID, Body: reqBody}
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return fmt.Errorf("mkdir_all error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return fmt.Errorf("mkdir_all error (raw: %s)", string(resp.Body))
-		}
-		return fmt.Errorf("mkdir_all: %s", e.Message)
-	}
-	return nil
-}
-
-func (rs *RemoteSandbox) Remove(ctx context.Context, path, userID string) error {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return err
-	}
-	reqBody, err := json.Marshal(PathRequest{Path: path})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoRemove, UserID: userID, Body: reqBody}
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return fmt.Errorf("remove error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return fmt.Errorf("remove error (raw: %s)", string(resp.Body))
-		}
-		return fmt.Errorf("remove: %s", e.Message)
-	}
-	return nil
-}
-
-func (rs *RemoteSandbox) RemoveAll(ctx context.Context, path, userID string) error {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return err
-	}
-	reqBody, err := json.Marshal(PathRequest{Path: path})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoRemoveAll, UserID: userID, Body: reqBody}
-	resp, err := rs.sendRequest(ctx, rc, msg, defaultRequestTimeout)
-	if err != nil {
-		return err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return fmt.Errorf("remove_all error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return fmt.Errorf("remove_all error (raw: %s)", string(resp.Body))
-		}
-		return fmt.Errorf("remove_all: %s", e.Message)
-	}
-	return nil
-}
-
-func (rs *RemoteSandbox) DownloadFile(ctx context.Context, url, outputPath, userID string) error {
-	rc, err := rs.getRunner(userID)
-	if err != nil {
-		return err
-	}
-	reqBody, err := json.Marshal(DownloadFileRequest{
-		URL:        url,
-		OutputPath: outputPath,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
-	}
-	msg := &RunnerMessage{ID: generateID(), Type: ProtoDownloadFile, UserID: userID, Body: reqBody}
-	// 5-minute timeout for downloads
-	resp, err := rs.sendRequest(ctx, rc, msg, 5*time.Minute)
-	if err != nil {
-		return err
-	}
-	if resp.Type == ProtoError {
-		var e ErrorResponse
-		if err := json.Unmarshal(resp.Body, &e); err != nil {
-			return fmt.Errorf("download_file error (raw: %s): unmarshal failed: %w", string(resp.Body), err)
-		}
-		if e.Message == "" {
-			return fmt.Errorf("download_file error (raw: %s)", string(resp.Body))
-		}
-		return fmt.Errorf("download_file: %s", e.Message)
-	}
-	return nil
 }
 
 // === Runner sync (server → runner file sync on registration) ===

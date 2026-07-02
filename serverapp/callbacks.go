@@ -140,27 +140,44 @@ func registryCallbacks(ag *agent.Agent) channel.RegistryCallbacks {
 // llmCallbacks builds the shared LLM callback closures.
 func llmCallbacks(ag *agent.Agent) channel.LLMCallbacks {
 	return channel.LLMCallbacks{
-		LLMList: func(senderID string) ([]string, string) {
-			llmClient, currentModel, _, _, _ := ag.LLMFactory().GetLLM(senderID)
-			if llmClient == nil {
-				return nil, currentModel
+		LLMList: func(senderID string) ([]protocol.ModelEntry, protocol.ModelEntry) {
+			entries := ag.LLMFactory().ListAllModelEntriesForUser(senderID)
+			sub, model, err := ag.LLMFactory().ResolveActiveSubModel(senderID, "", "")
+			if err != nil || sub == nil {
+				return entries, protocol.ModelEntry{Model: model}
 			}
-			return llmClient.ListModels(), currentModel
+			return entries, protocol.ModelEntry{SubID: sub.ID, SubName: sub.Name, Model: model}
 		},
-		LLMSet: func(senderID, model string) error {
-			return ag.SetUserModel(senderID, model)
+		LLMSet: func(senderID, subID, model string) error {
+			return ag.SetUserModel(senderID, subID, model)
 		},
-		LLMGetMaxContext: func(senderID string) int {
-			return ag.GetUserMaxContext(senderID)
+		// MaxContext / MaxOutputTokens: when (subID, model) are provided
+		// (feishu model tab passes them from the model selector), write
+		// per-(subID, model) config directly. Empty pair (web, legacy)
+		// falls back to session-level resolution.
+		LLMGetMaxContext: func(senderID, subID, model string) int {
+			if subID != "" && model != "" {
+				return ag.GetUserMaxContextForSubModel(senderID, subID, model)
+			}
+			return ag.GetUserMaxContext(senderID, "", "")
 		},
-		LLMSetMaxContext: func(senderID string, maxContext int) error {
-			return ag.SetUserMaxContext(senderID, maxContext)
+		LLMSetMaxContext: func(senderID, subID, model string, maxContext int) error {
+			if subID != "" && model != "" {
+				return ag.SetUserMaxContextForSubModel(senderID, subID, model, maxContext)
+			}
+			return ag.SetUserMaxContext(senderID, "", "", maxContext)
 		},
-		LLMGetMaxOutputTokens: func(senderID string) int {
-			return ag.GetUserMaxOutputTokens(senderID)
+		LLMGetMaxOutputTokens: func(senderID, subID, model string) int {
+			if subID != "" && model != "" {
+				return ag.GetUserMaxOutputTokensForSubModel(senderID, subID, model)
+			}
+			return ag.GetUserMaxOutputTokens(senderID, "", "")
 		},
-		LLMSetMaxOutputTokens: func(senderID string, maxTokens int) error {
-			return ag.SetUserMaxOutputTokens(senderID, maxTokens)
+		LLMSetMaxOutputTokens: func(senderID, subID, model string, maxTokens int) error {
+			if subID != "" && model != "" {
+				return ag.SetUserMaxOutputTokensForSubModel(senderID, subID, model, maxTokens)
+			}
+			return ag.SetUserMaxOutputTokens(senderID, "", "", maxTokens)
 		},
 		LLMGetThinkingMode: func(senderID string) string {
 			return ag.GetUserThinkingMode(senderID)
@@ -224,7 +241,7 @@ func buildRunnerConnectCmdFromToken(cfg *config.Config, senderID, token, mode, d
 }
 
 // buildWebCallbacks creates WebCallbacks using shared callback builders.
-func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sql.DB) web.WebCallbacks {
+func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) web.WebCallbacks {
 	rc := runnerCallbacks(cfg)
 	regc := registryCallbacks(ag)
 	llmc := llmCallbacks(ag)
@@ -348,7 +365,7 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sql.DB) web.W
 			return result, nil
 		}
 		// For non-web channels (admin only): list all tenants in that channel.
-		return listTenantsByChannel(webDB, channel, currentChatID)
+		return listTenantsByChannel(webDB.Conn(), channel, currentChatID)
 	}
 	callbacks.ChatCreate = func(senderID, label string) (string, error) {
 		if webDB == nil {
@@ -484,7 +501,7 @@ func buildFeishuSettingsCallbacks(cfg *config.Config, ag *agent.Agent) feishu.Se
 			ch := channel.Subscription{
 				ID: sub.ID, Name: sub.Name, Provider: sub.Provider,
 				BaseURL: sub.BaseURL, APIKey: sub.APIKey,
-				Model: sub.Model, Active: sub.IsDefault,
+				Model: sub.Model, Active: sub.IsDefault, Enabled: sub.Enabled,
 				MaxOutputTokens: sub.MaxOutputTokens, ThinkingMode: sub.ThinkingMode,
 			}
 			return &ch, nil
@@ -508,6 +525,7 @@ func buildFeishuSettingsCallbacks(cfg *config.Config, ag *agent.Agent) feishu.Se
 				return err
 			}
 			ag.LLMFactory().InvalidateSender(senderID)
+			ag.LLMFactory().InvalidateSubscription(newSub.ID)
 			return nil
 		},
 		LLMRemoveSubscription: func(id string) error {
@@ -516,10 +534,21 @@ func buildFeishuSettingsCallbacks(cfg *config.Config, ag *agent.Agent) feishu.Se
 			if err != nil {
 				return err
 			}
+			// Remove cascades: deletes subscription_models + user_default_model
+			// (if pointing to this sub) in a single transaction.
 			if err := svc.Remove(id); err != nil {
 				return err
 			}
+			// Clear stale tenant entries pointing to the deleted subscription.
+			// Without this, every ResolveLLM call wastes cycles looking up a
+			// non-existent subscription before falling back to system default.
+			if ts := ag.LLMFactory().GetTenantSvc(); ts != nil {
+				if err := ts.ClearSubscriptionFromTenants(id); err != nil {
+					log.WithError(err).WithField("sub_id", id).Warn("Failed to clear tenant subscription references")
+				}
+			}
 			ag.LLMFactory().InvalidateSender(sub.SenderID)
+			ag.LLMFactory().InvalidateSubscription(sub.ID)
 			return nil
 		},
 		LLMSetDefaultSubscription: func(id string) error {
@@ -532,12 +561,26 @@ func buildFeishuSettingsCallbacks(cfg *config.Config, ag *agent.Agent) feishu.Se
 				// Use InvalidateSender to preserve per-session entries.
 				// Invalidate() would wipe every session's LLM override.
 				ag.LLMFactory().InvalidateSender(sub.SenderID)
+				ag.LLMFactory().InvalidateSubscription(sub.ID)
 				_ = ag.LLMFactory().SwitchSubscription(sub.SenderID, sub, "")
 			}
 			return nil
 		},
 		LLMRenameSubscription: func(id, name string) error {
 			return ag.LLMFactory().GetSubscriptionSvc().Rename(id, name)
+		},
+		LLMSetSubscriptionEnabled: func(id string, enabled bool) error {
+			svc := ag.LLMFactory().GetSubscriptionSvc()
+			if err := svc.SetSubscriptionEnabled(id, enabled); err != nil {
+				return err
+			}
+			// Invalidate cache so the change takes effect immediately.
+			sub, err := svc.Get(id)
+			if err == nil && sub != nil {
+				ag.LLMFactory().InvalidateSender(sub.SenderID)
+				ag.LLMFactory().InvalidateSubscription(sub.ID)
+			}
+			return nil
 		},
 
 		LLMUpdateSubscription: func(id string, sub *channel.Subscription) error {
@@ -565,38 +608,20 @@ func buildFeishuSettingsCallbacks(cfg *config.Config, ag *agent.Agent) feishu.Se
 				return err
 			}
 			ag.LLMFactory().InvalidateSender(existing.SenderID)
+			ag.LLMFactory().InvalidateSubscription(existing.ID)
 			return nil
 		},
 
-		// Model tier
-		LLMGetModelTier: func(tier string) string {
-			switch tier {
-			case "vanguard":
-				return cfg.LLM.VanguardModel
-			case "balance":
-				return cfg.LLM.BalanceModel
-			case "swift":
-				return cfg.LLM.SwiftModel
-			default:
-				return ""
-			}
+		// Model tier — per-user, stored in user_settings DB (same pattern as
+		// thinking_mode). No global config fallback — tier is purely per-user.
+		LLMGetModelTier: func(senderID, tier string) (subID, model string) {
+			return ag.GetUserTierModel(senderID, tier)
 		},
-		LLMSetModelTier: func(tier, model string) error {
-			switch tier {
-			case "vanguard":
-				cfg.LLM.VanguardModel = model
-			case "balance":
-				cfg.LLM.BalanceModel = model
-			case "swift":
-				cfg.LLM.SwiftModel = model
-			default:
-				return fmt.Errorf("unknown tier: %s", tier)
-			}
-			ag.LLMFactory().SetModelTiers(cfg.LLM)
-			return saveServerConfig(cfg)
+		LLMSetModelTier: func(senderID, tier, subID, model string) error {
+			return ag.SetUserTierModel(senderID, tier, subID, model)
 		},
-		LLMListAllModels: func() []string {
-			return ag.LLMFactory().ListAllModelsForUser("")
+		LLMListAllModels: func(senderID string) []protocol.ModelEntry {
+			return ag.LLMFactory().ListAllModelEntriesForUser(senderID)
 		},
 
 		// Context mode

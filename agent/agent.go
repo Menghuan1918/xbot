@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -263,9 +264,9 @@ type Agent struct {
 	// Event trigger router
 	eventRouter *event.Router
 
-	// User LLM config service and factory
-	llmConfigSvc *sqlite.UserLLMConfigService
-	llmFactory   *LLMFactory
+	// LLM factory (per-user/per-chat LLM resolution). User LLM config lives in
+	// user_llm_subscriptions; the legacy UserLLMConfigService shim was removed.
+	llmFactory *LLMFactory
 
 	// 用户级别的信号量：设置了自己的 LLM 配置的用户使用独立信号量
 	// key: senderID, value: 用户独立的信号量（容量为1）
@@ -464,6 +465,121 @@ func (a *Agent) listLLMSubsFn(channel string) func(ch, senderID string) []tools.
 	}
 }
 
+// getActiveSubFieldFn returns a function that reads a single field from the
+// active subscription. Used by config tool's get action for subscription-scoped keys.
+func (a *Agent) getActiveSubFieldFn(channel string) func(key string) (string, error) {
+	if a.llmFactory == nil {
+		return nil
+	}
+	svc := a.llmFactory.GetSubscriptionSvc()
+	if svc == nil {
+		return nil
+	}
+	return func(key string) (string, error) {
+		// Use cliSenderID for CLI channel
+		senderID := a.cliSenderID
+		if senderID == "" {
+			senderID = "cli_user"
+		}
+		sub, err := svc.GetDefault(senderID)
+		if err != nil {
+			return "", fmt.Errorf("get default subscription: %w", err)
+		}
+		if sub == nil {
+			return "", nil
+		}
+		return subFieldValue(sub, key), nil
+	}
+}
+
+// updateActiveSubFn returns a function that updates a single field in the active
+// subscription. Used by config tool's set action for subscription-scoped keys.
+func (a *Agent) updateActiveSubFn(channel string) func(key, value string) (string, error) {
+	if a.llmFactory == nil {
+		return nil
+	}
+	svc := a.llmFactory.GetSubscriptionSvc()
+	if svc == nil {
+		return nil
+	}
+	return func(key, value string) (string, error) {
+		senderID := a.cliSenderID
+		if senderID == "" {
+			senderID = "cli_user"
+		}
+		sub, err := svc.GetDefault(senderID)
+		if err != nil {
+			return "", fmt.Errorf("get default subscription: %w", err)
+		}
+		if sub == nil {
+			return "", fmt.Errorf("no active subscription found")
+		}
+		oldVal := subFieldValue(sub, key)
+		// Update the relevant field
+		if err := setSubFieldValue(sub, key, value); err != nil {
+			return "", err
+		}
+		if err := svc.Update(sub); err != nil {
+			return "", fmt.Errorf("update subscription: %w", err)
+		}
+		// Update per-session model selection if model changed
+		if key == "llm_model" {
+			a.llmFactory.SelectModel(senderID, "", channel, sub.ID, value)
+		}
+		return oldVal, nil
+	}
+}
+
+// subFieldValue reads a single field from an LLMSubscription by config key.
+func subFieldValue(sub *sqlite.LLMSubscription, key string) string {
+	switch key {
+	case "llm_provider":
+		return sub.Provider
+	case "llm_api_key":
+		return sub.APIKey
+	case "llm_base_url":
+		return sub.BaseURL
+	case "llm_model":
+		return sub.Model
+	case "max_output_tokens":
+		if sub.MaxOutputTokens > 0 {
+			return strconv.Itoa(sub.MaxOutputTokens)
+		}
+		return "4096"
+	case "api_type":
+		return sub.APIType
+	}
+	return ""
+}
+
+// setSubFieldValue sets a single field on an LLMSubscription by config key.
+func setSubFieldValue(sub *sqlite.LLMSubscription, key, value string) error {
+	switch key {
+	case "llm_provider":
+		sub.Provider = strings.TrimSpace(value)
+	case "llm_api_key":
+		sub.APIKey = strings.TrimSpace(value)
+	case "llm_base_url":
+		sub.BaseURL = strings.TrimSpace(value)
+	case "llm_model":
+		sub.Model = strings.TrimSpace(value)
+	case "max_output_tokens":
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("max_output_tokens must be an integer: %w", err)
+		}
+		if n < 1 || n > 131072 {
+			return fmt.Errorf("max_output_tokens must be between 1 and 131072, got %d", n)
+		}
+		sub.MaxOutputTokens = n
+	case "api_type":
+		sub.APIType = strings.TrimSpace(value)
+	default:
+		return fmt.Errorf("unknown subscription key: %s", key)
+	}
+	return nil
+}
+
 // LLMFactory returns the Agent's LLMFactory (for external injection of callbacks).
 func (a *Agent) LLMFactory() *LLMFactory { return a.llmFactory }
 
@@ -491,18 +607,23 @@ func (a *Agent) SettingsService() *SettingsService { return a.settingsSvc }
 // MultiSession returns the Agent's MultiTenantSession (for external injection of callbacks).
 func (a *Agent) MultiSession() *session.MultiTenantSession { return a.multiSession }
 
-// SetUserModel sets the model for a user's LLM configuration (used by settings card callback).
-func (a *Agent) SetUserModel(senderID, model string) error {
-	cfg, err := a.llmConfigSvc.GetConfig(senderID)
-	if err != nil {
-		return fmt.Errorf("get LLM config: %w", err)
+// SetUserModel sets the user's default model via an explicit (subID, model) pair.
+// Used by the settings card callback (feishu/web) and the set_user_model RPC.
+// When subID is empty, falls back to ResolveSubscriptionForModel (legacy UIs
+// that only know the model name). Persists the choice to user_default_model.
+func (a *Agent) SetUserModel(senderID, subID, model string) error {
+	if model == "" {
+		return fmt.Errorf("model is required")
 	}
-	if cfg == nil {
-		return fmt.Errorf("user has no custom LLM config; use /set-llm first")
+	if subID == "" {
+		sub, err := a.llmFactory.ResolveSubscriptionForModel(senderID, model)
+		if err != nil {
+			return fmt.Errorf("resolve subscription for model %q: %w", model, err)
+		}
+		subID = sub.ID
 	}
-	cfg.Model = model
-	if err := a.llmConfigSvc.SetConfig(cfg); err != nil {
-		return fmt.Errorf("save model: %w", err)
+	if err := a.llmFactory.SetUserDefaultModel(senderID, subID, model); err != nil {
+		return fmt.Errorf("save default model: %w", err)
 	}
 	a.llmFactory.Invalidate(senderID)
 	return nil
@@ -557,7 +678,9 @@ func (a *Agent) renameSession(chatID, newName string) (oldName string, err error
 
 	// Get old name
 	row = conn.QueryRow(`SELECT label FROM user_chats WHERE channel = ? AND sender_id = ? AND chat_id = ?`, ch, senderID, chatID)
-	_ = row.Scan(&oldName)
+	if err := row.Scan(&oldName); err != nil {
+		log.Warn("Failed to scan old name: ", err)
+	}
 	if oldName == "" {
 		_, oldName = cli.ParseChatID(chatID)
 	}
@@ -863,9 +986,8 @@ func initServices(a *Agent, cfg Config, multiSession *session.MultiTenantSession
 	a.cronSvc = cronSvc
 	a.cronSch = cronSch
 
-	// Initialize UserLLMConfigService
-	a.llmConfigSvc = sqlite.NewUserLLMConfigService(multiSession.DB())
-	a.llmFactory = NewLLMFactory(a.llmConfigSvc, cfg.LLM, cfg.Model)
+	// LLM factory: per-user subscriptions are the single source for custom LLM.
+	a.llmFactory = NewLLMFactory(cfg.LLM, cfg.Model)
 	a.llmFactory.SetSubscriptionSvc(sqlite.NewLLMSubscriptionService(multiSession.DB()))
 	a.llmFactory.SetTenantSvc(sqlite.NewTenantService(multiSession.DB()))
 
@@ -1145,6 +1267,54 @@ func New(cfg Config) (*Agent, error) {
 		}
 		// Wire channel providers registered by plugins to ChannelProviderRegistry.
 		plugin.WireChannelProviders(agent.pluginMgr)
+		// Wire plugin commands into the agent command registry.
+		plugin.WirePluginCommands(agent.pluginMgr, func(name, description string, handler plugin.PluginCommandHandler, pctx plugin.PluginContext) {
+			agent.commands.Register(&pluginCmdAdapter{
+				name:        name,
+				description: description,
+				handler:     handler,
+				pctx:        pctx,
+			})
+		})
+		// Re-wire commands after every plugin reload
+		agent.pluginMgr.OnReload(func() {
+			// Remove old plugin commands before re-registering to avoid duplicates
+			agent.commands.mu.Lock()
+			filtered := agent.commands.commands[:0]
+			for _, cmd := range agent.commands.commands {
+				if _, ok := cmd.(*pluginCmdAdapter); !ok {
+					filtered = append(filtered, cmd)
+				}
+			}
+			agent.commands.commands = filtered
+			agent.commands.mu.Unlock()
+
+			plugin.WirePluginCommands(agent.pluginMgr, func(name, description string, handler plugin.PluginCommandHandler, pctx plugin.PluginContext) {
+				agent.commands.Register(&pluginCmdAdapter{
+					name:        name,
+					description: description,
+					handler:     handler,
+					pctx:        pctx,
+				})
+			})
+			plugin.WirePluginCrons(agent.pluginMgr, agent.cronSvc)
+			plugin.WirePluginThemes(agent.pluginMgr, func(id string, data []byte) error {
+				themesDir := filepath.Join(agent.xbotHome, "themes")
+				os.MkdirAll(themesDir, 0755)
+				return os.WriteFile(filepath.Join(themesDir, id+".json"), data, 0644)
+			})
+		})
+		// Wire plugin crons into the cron service.
+		plugin.WirePluginCrons(agent.pluginMgr, agent.cronSvc)
+		// Wire plugin themes into the local themes directory.
+		plugin.WirePluginThemes(agent.pluginMgr, func(id string, data []byte) error {
+			themesDir := filepath.Join(agent.xbotHome, "themes")
+			if err := os.MkdirAll(themesDir, 0755); err != nil {
+				return err
+			}
+			themePath := filepath.Join(themesDir, id+".json")
+			return os.WriteFile(themePath, data, 0644)
+		})
 		// Register the hook bridge as a builtin hook handler
 		agent.hookManager.RegisterBuiltin(hooks.PluginBridgeCallback(hookBridge))
 		// Wire enricher registry into the message pipeline
@@ -1299,21 +1469,6 @@ func (a *Agent) SetMaxConcurrency(n int) {
 	a.userSemaphores.Clear()
 }
 
-// SetMaxContextTokens sets the max context token limit.
-// When chatID is non-empty, only the per-chat override is updated (session-scoped).
-// When chatID is empty, the global agent-level config is updated (backward compatible).
-func (a *Agent) SetMaxContextTokens(n int, chatID ...string) {
-	if len(chatID) > 0 && chatID[0] != "" {
-		// Per-session: store in LLMFactory's per-chat cache
-		a.llmFactory.SetPerChatMaxContext(chatID[0], n)
-	} else {
-		// Global: update agent-level config (backward compatible)
-		a.contextManagerMu.Lock()
-		a.contextManagerConfig.MaxContextTokens = n
-		a.contextManagerMu.Unlock()
-	}
-}
-
 func (a *Agent) SetCompressionThreshold(f float64) {
 	a.contextManagerMu.Lock()
 	a.contextManagerConfig.CompressionThreshold = f
@@ -1352,45 +1507,6 @@ func (a *Agent) SetSandbox(sb tools.Sandbox, mode string) {
 	if a.offloadStore != nil {
 		a.offloadStore.SetSandbox(sb)
 	}
-}
-
-// GetUserLLMConfig returns the user's LLM config summary (no API key), or nil if none.
-func (a *Agent) GetUserLLMConfig(senderID string) (provider, baseURL, model string, ok bool) {
-	cfg, err := a.llmConfigSvc.GetConfig(senderID)
-	if err != nil || cfg == nil || (cfg.BaseURL == "" && cfg.APIKey == "") {
-		return "", "", "", false
-	}
-	return cfg.Provider, cfg.BaseURL, cfg.Model, true
-}
-
-// SetUserLLM creates or replaces a user's full LLM config.
-func (a *Agent) SetUserLLM(senderID, provider, baseURL, apiKey, model string) error {
-	if provider == "" || baseURL == "" || apiKey == "" {
-		return fmt.Errorf("provider, base_url, api_key 必填")
-	}
-	cfg := &sqlite.UserLLMConfig{
-		SenderID: senderID,
-		Provider: provider,
-		BaseURL:  baseURL,
-		APIKey:   apiKey,
-		Model:    model,
-	}
-	if err := a.llmConfigSvc.SetConfig(cfg); err != nil {
-		return err
-	}
-	a.llmFactory.Invalidate(senderID)
-	a.llmFactory.InvalidateCustomLLMCache(senderID)
-	return nil
-}
-
-// DeleteUserLLM removes a user's LLM config and reverts to global.
-func (a *Agent) DeleteUserLLM(senderID string) error {
-	if err := a.llmConfigSvc.DeleteConfig(senderID); err != nil {
-		return err
-	}
-	a.llmFactory.Invalidate(senderID)
-	a.llmFactory.InvalidateCustomLLMCache(senderID)
-	return nil
 }
 
 // GetLLMConcurrency 获取用户个人 LLM 并发上限配置。
@@ -1714,7 +1830,9 @@ func (a *Agent) Run(ctx context.Context) error {
 								a.addReactionToMessage(msg.Channel, msg.ChatID, id, "CrossMark")
 							}
 						}
-						_ = a.sendMessage(msg.Channel, msg.ChatID, "⚠️ 已取消请求", cancelMeta)
+						if err := a.sendMessage(msg.Channel, msg.ChatID, "⚠️ 已取消请求", cancelMeta); err != nil {
+							log.Warn("Failed to send cancel message: ", err)
+						}
 					default:
 						// cancel 信号已发过
 						log.WithField("cancel_key", cancelKey).Warn("Cancel signal already sent (buffer full)")
@@ -1723,7 +1841,9 @@ func (a *Agent) Run(ctx context.Context) error {
 					// cancelCh 尚未注册（消息还在排队或等信号量），记录 pending
 					a.pendingCancel.Store(cancelKey, true)
 					log.WithField("cancel_key", cancelKey).Info("Cancel pending: request not yet active, will cancel when it starts")
-					_ = a.sendMessage(msg.Channel, msg.ChatID, "⏳ 请求已排队等待取消", cancelMeta)
+					if err := a.sendMessage(msg.Channel, msg.ChatID, "⏳ 请求已排队等待取消", cancelMeta); err != nil {
+						log.Warn("Failed to send queue message: ", err)
+					}
 				}
 				continue
 			}
@@ -1893,6 +2013,12 @@ func (a *Agent) chatWorker(ctx context.Context, chatKey string, ch <-chan bus.In
 
 			// 指令消息分发：根据 Concurrent() 决定执行方式
 			if cmd := a.commands.Match(msg.Content); cmd != nil {
+				log.Ctx(ctx).WithFields(log.Fields{
+					"channel":     msg.Channel,
+					"command":     cmd.Name(),
+					"concurrent":  cmd.Concurrent(),
+					"content_len": len(msg.Content),
+				}).Info("Command matched in chatWorker")
 				if cmd.Concurrent() {
 					// 无状态命令：独立 goroutine 处理，不占信号量，不阻塞
 					m := msg
@@ -2103,11 +2229,15 @@ func (a *Agent) chatProcessLoop(ctx context.Context, chatKey string, ch <-chan b
 				} else {
 					response.Metadata["cancelled"] = "true"
 				}
-				_ = a.sendMessage(msg.Channel, msg.ChatID, response.Content, response.Metadata)
+				if err := a.sendMessage(msg.Channel, msg.ChatID, response.Content, response.Metadata); err != nil {
+					log.Warn("Failed to send response: ", err)
+				}
 			} else {
 				// No response generated yet (cancelled mid-tool-call) — send empty
 				// message to signal turn end so CLI can clean up typing/progress state.
-				_ = a.sendMessage(msg.Channel, msg.ChatID, "", cancelMeta)
+				if err := a.sendMessage(msg.Channel, msg.ChatID, "", cancelMeta); err != nil {
+					log.Warn("Failed to send cancel ack: ", err)
+				}
 			}
 			// Turn done — response sent, safe to drain bg notifications
 			ss.busy.Store(false)

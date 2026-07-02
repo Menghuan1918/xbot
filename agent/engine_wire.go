@@ -85,14 +85,12 @@ func (a *Agent) buildBaseRunConfig(
 ) (RunConfig, int) {
 	sessionKey := qualifyChatID(channel, chatID)
 
-	// Force-refresh the per-session LLM entry from DB before every Run.
-	// A cached entry from a previous Run (especially one aborted by LLM error)
-	// may carry stale PerModelConfigs. The Ctrl+C path clears the entry,
-	// but LLM error aborts don't — this caused sessions to keep using old
-	// max_context values after subscription switches.
-	a.llmFactory.RefreshSessionEntry(senderID, chatID, channel)
-
-	llmClient, model, userMaxCtx, thinkingMode, maxOutputTokens := a.llmFactory.GetLLMForChat(senderID, chatID)
+	// Resolve the per-session LLM from the authoritative DB state (tenants +
+	// user_default_model) via the single ResolveLLM path. This replaces the old
+	// RefreshSessionEntry + GetLLMForChat pair: ResolveLLM reads DB fresh and
+	// memoizes, so stale cached entries from a previous Run cannot survive, and
+	// per-session model switches are always honored (the 404 bug).
+	llmClient, model, userMaxCtx, thinkingMode, maxOutputTokens := a.llmFactory.ResolveLLM(senderID, chatID, channel)
 
 	// LLM 并发限流回调（per-tenant）
 	llmSemAcquire := a.llmFactory.LLMSemAcquireForUser(senderID, channel)
@@ -198,6 +196,10 @@ func (a *Agent) buildBaseRunConfig(
 		// Subscription listing — from LLMFactory
 		ListLLMSubs: a.listLLMSubsFn(channel),
 
+		// Subscription read/write — from LLMFactory (for config tool)
+		GetActiveSubFieldFn: a.getActiveSubFieldFn(channel),
+		UpdateActiveSubFn:   a.updateActiveSubFn(channel),
+
 		// LLM 并发限流回调（per-tenant）
 		LLMSemAcquire:             llmSemAcquire,
 		EnableConcurrentSubAgents: true,
@@ -288,7 +290,9 @@ func (a *Agent) buildMainRunConfig(
 		// Legacy fallback: send progress text as messages (no patch support)
 		cfg.ProgressNotifier = func(lines []string, _ string) {
 			if len(lines) > 0 {
-				_ = a.sendMessage(channel, chatID, lines[0])
+				if err := a.sendMessage(channel, chatID, lines[0]); err != nil {
+					log.Warn("Failed to send progress: ", err)
+				}
 			}
 		}
 	}
@@ -375,7 +379,7 @@ func (a *Agent) buildMainRunConfig(
 		if a.channelFinder != nil {
 			var progressSeq atomic.Uint64
 			cfg.ProgressSeq = &progressSeq
-			cfg.StreamContentFunc, cfg.StreamReasoningFunc, cfg.StreamToolCallFunc = a.buildStreamCallbacks(chatID, channel, &progressSeq)
+			cfg.StreamContentFunc, cfg.StreamReasoningFunc, cfg.StreamToolCallFunc, cfg.StreamUsageFunc = a.buildStreamCallbacks(chatID, channel, &progressSeq)
 		}
 	}
 
@@ -416,6 +420,56 @@ func (a *Agent) buildMainRunConfig(
 	return cfg
 }
 
+// filterSubAgentTools 根据白名单过滤子 Agent 工具集。
+// 以下工具永久可用，不受白名单限制：
+//   - SubAgent（如果 caps.SpawnAgent=true）
+//   - offload_recall、recall_masked（SubAgent 需要访问父 Agent 的 offload/mask 数据）
+//   - SendMessage、CreateChat（interactive SubAgent 群聊/agent 间通信必需）
+func filterSubAgentTools(subTools *tools.Registry, allowedTools []string, caps tools.SubAgentCapabilities, interactive bool) {
+	if len(allowedTools) == 0 {
+		return
+	}
+	allowed := make(map[string]bool, len(allowedTools))
+	for _, name := range allowedTools {
+		allowed[name] = true
+	}
+	for _, tool := range subTools.List() {
+		toolName := tool.Name()
+		// SubAgent 工具：如果 SpawnAgent=true，始终保留
+		if toolName == "SubAgent" && caps.SpawnAgent {
+			continue
+		}
+		// offload_recall / recall_masked：SubAgent 始终可用
+		if toolName == "offload_recall" || toolName == "recall_masked" {
+			continue
+		}
+		// SendMessage / CreateChat：interactive SubAgent 始终可用（群聊通信）
+		if interactive && (toolName == "SendMessage" || toolName == "CreateChat") {
+			continue
+		}
+		if !allowed[toolName] {
+			subTools.Unregister(toolName)
+		}
+	}
+}
+
+// resolveSubAgentCWD 解析子 Agent 的当前工作目录。
+// 继承父 Agent 的 CWD，无则默认 workDir。同时检测 worktree 隔离。
+func resolveSubAgentCWD(parentCtx *tools.ToolContext, workDir string) (cwd string, newWorkDir string, isWorktreeIsolated bool) {
+	cwd = parentCtx.CurrentDir
+	if cwd == "" {
+		cwd = workDir
+	}
+	isWorktreeIsolated = parentCtx.IsWorktreeIsolated
+	if strings.Contains(cwd, ".xbot-worktrees") {
+		newWorkDir = cwd
+		isWorktreeIsolated = true
+	} else {
+		newWorkDir = workDir
+	}
+	return
+}
+
 // buildSubAgentRunConfig 为 SubAgent 构建 RunConfig。
 // SubAgent 使用独立工具集、无 session、有压缩（独立 ContextManager）、无进度通知。
 // Phase 2: SubAgent 通过 RunConfig 继承父 Agent 的工作区配置，
@@ -448,36 +502,15 @@ func (a *Agent) buildSubAgentRunConfig(
 	if !caps.SpawnAgent {
 		subTools.Unregister("SubAgent")
 	}
+	// AskUser 依赖 channel adapter 渲染交互 UI（TUI 面板/飞书卡片），
+	// 但 SubAgent 运行在 "agent" channel 上，不在 AskUser.SupportedChannels 中。
+	// 即使工具被执行，WaitingUser 信号也会被 RunSubAgent/SpawnInteractive 丢弃，
+	// 导致 SubAgent 静默挂起（空回复 + idle 状态，用户从未看到问题）。
+	// 无条件移除，避免静默失效。
+	subTools.Unregister("AskUser")
 
 	// 如果指定了工具白名单，只保留白名单中的工具
-	// 以下工具永久可用，不受白名单限制：
-	//   - SubAgent（如果 caps.SpawnAgent=true）
-	//   - offload_recall、recall_masked（SubAgent 需要访问父 Agent 的 offload/mask 数据）
-	//   - SendMessage、CreateChat（interactive SubAgent 群聊/agent 间通信必需）
-	if len(allowedTools) > 0 {
-		allowed := make(map[string]bool, len(allowedTools))
-		for _, name := range allowedTools {
-			allowed[name] = true
-		}
-		for _, tool := range subTools.List() {
-			toolName := tool.Name()
-			// SubAgent 工具：如果 SpawnAgent=true，始终保留
-			if toolName == "SubAgent" && caps.SpawnAgent {
-				continue
-			}
-			// offload_recall / recall_masked：SubAgent 始终可用
-			if toolName == "offload_recall" || toolName == "recall_masked" {
-				continue
-			}
-			// SendMessage / CreateChat：interactive SubAgent 始终可用（群聊通信）
-			if interactive && (toolName == "SendMessage" || toolName == "CreateChat") {
-				continue
-			}
-			if !allowed[toolName] {
-				subTools.Unregister(toolName)
-			}
-		}
-	}
+	filterSubAgentTools(subTools, allowedTools, caps, interactive)
 
 	// 构建 SubAgent 的 system prompt：通用模板 + 角色专有能力描述
 	// parentCtx.WorkspaceRoot 在 remote 模式下为空（buildToolContext 清空了宿主机路径），
@@ -492,21 +525,7 @@ func (a *Agent) buildSubAgentRunConfig(
 	now := time.Now().Format("2006-01-02 15:04:05 MST")
 
 	// CWD 继承父 Agent 的当前目录，无则默认 workDir
-	cwd := parentCtx.CurrentDir
-	if cwd == "" {
-		cwd = workDir
-	}
-
-	// Worktree isolation: if the parent's CWD is inside a worktree directory,
-	// rewrite workDir to the worktree path so the SubAgent's system prompt
-	// shows the correct workspace and all path resolution uses worktree-relative paths.
-	// This must happen before system prompt construction (below) so the prompt
-	// displays the worktree as "工作目录".
-	isWorktreeIsolated := parentCtx.IsWorktreeIsolated
-	if strings.Contains(cwd, ".xbot-worktrees") {
-		workDir = cwd
-		isWorktreeIsolated = true
-	}
+	cwd, workDir, isWorktreeIsolated := resolveSubAgentCWD(parentCtx, workDir)
 	cwdPart := "\n- 当前目录：" + cwd
 
 	// role.SystemPrompt 作为角色专有能力描述（非通用 prompt）
@@ -859,6 +878,7 @@ func (a *Agent) buildToolExecutor(channel, chatID, senderID, senderName, sandbox
 		SandboxEnabled:         a.sandboxMode != "none",
 		PreferredSandbox:       a.sandboxMode,
 		Sandbox:                resolveSandbox(a.sandbox, sandboxUserID),
+		SandboxRouter:          a.sandbox, // raw router for per-tool-call re-resolution
 		SandboxMode:            a.sandboxMode,
 		InjectInbound:          a.injectInbound,
 		Tools:                  a.tools,
@@ -905,6 +925,8 @@ func (a *Agent) buildToolExecutor(channel, chatID, senderID, senderName, sandbox
 	cfg.RemoteTUICtrlFn = a.buildRemoteTUICtrlFn(channel, chatID)
 	cfg.ChatRenameFn = a.renameSession
 	cfg.ListLLMSubs = a.listLLMSubsFn(channel)
+	cfg.GetActiveSubFieldFn = a.getActiveSubFieldFn(channel)
+	cfg.UpdateActiveSubFn = a.updateActiveSubFn(channel)
 
 	var sessionOnce sync.Once
 
@@ -950,6 +972,14 @@ func (a *Agent) buildToolExecutor(channel, chatID, senderID, senderName, sandbox
 			if err := os.MkdirAll(wsRoot, 0o755); err != nil {
 				return nil, fmt.Errorf("create user workspace: %w", err)
 			}
+		}
+
+		// Re-resolve sandbox per tool call — picks up runner switches immediately
+		if router, ok := cfg.SandboxRouter.(*tools.SandboxRouter); ok {
+			cfg.Sandbox = router.SandboxForSession(
+				cfg.Channel+":"+cfg.ChatID,
+				cfg.OriginUserID,
+			)
 		}
 
 		toolExecCtx := withApprovalTarget(ctx, cfg.ChatID, cfg.OriginUserID)
@@ -1313,7 +1343,9 @@ func (a *Agent) spawnSubAgent(ctx context.Context, msg bus.InboundMessage) (*cha
 					last = last[idx+1:]
 				}
 				prefixed := "📋 subagent: [" + rn + "] " + last + "\n"
-				_ = a.sendMessage(originChannel, originChatID, prefixed)
+				if err := a.sendMessage(originChannel, originChatID, prefixed); err != nil {
+					log.Warn("Failed to send prefixed output: ", err)
+				}
 			}
 		}
 	} else if originChannel == "cli" {
@@ -1343,7 +1375,9 @@ func (a *Agent) spawnSubAgent(ctx context.Context, msg bus.InboundMessage) (*cha
 		return nil, fmt.Errorf("create oneshot agent tenant session: %w", err)
 	}
 	cfg.Session = agentTenantSession
-	_ = agentTenantSession.Clear()
+	if err := agentTenantSession.Clear(); err != nil {
+		log.Warn("Failed to clear agent tenant session: ", err)
+	}
 
 	// Eager-save user message so get_history returns it during Run().
 	if err := agentTenantSession.AddMessage(llm.NewUserMessage(task)); err != nil {
@@ -1925,7 +1959,7 @@ func (a *Agent) buildPluginProgressEventHandler(chatID, channel string) func(*Pr
 // and reasoning stream callbacks. Returns nil, nil if streaming is disabled or
 // no channels are available.
 // Plugin channels (e.g. TG) do NOT receive stream — they get structured progress instead.
-func (a *Agent) buildStreamCallbacks(chatID, channel string, progressSeq *atomic.Uint64) (streamContentFunc func(string), streamReasoningFunc func(string), streamToolCallFunc func([]llm.ToolCallDelta)) {
+func (a *Agent) buildStreamCallbacks(chatID, channel string, progressSeq *atomic.Uint64) (streamContentFunc func(string), streamReasoningFunc func(string), streamToolCallFunc func([]llm.ToolCallDelta), streamUsageFunc func(*llm.TokenUsage)) {
 	var cliCh *cli.CLIChannel
 	var remoteCLICh channelpkg.ProgressSender
 	if ch, ok := a.channelFinder("cli"); ok {
@@ -1968,12 +2002,15 @@ func (a *Agent) buildStreamCallbacks(chatID, channel string, progressSeq *atomic
 	}
 	streamToolCallFunc = func(toolCalls []llm.ToolCallDelta) {
 		// Convert tool call deltas to ToolProgress with "generating" status.
+		// GenChars carries the accumulated argument char count for real-time
+		// progress display (e.g. "42 chars" while LLM is still streaming args).
 		tools := make([]protocol.ToolProgress, 0, len(toolCalls))
 		for _, tc := range toolCalls {
 			if tc.Name != "" {
 				tools = append(tools, protocol.ToolProgress{
-					Name:   tc.Name,
-					Status: "generating",
+					Name:     tc.Name,
+					Status:   "generating",
+					GenChars: len(tc.Arguments),
 				})
 			}
 		}
@@ -1996,7 +2033,27 @@ func (a *Agent) buildStreamCallbacks(chatID, channel string, progressSeq *atomic
 			webCh.SendProgress(chatID, payload)
 		}
 	}
-	return streamContentFunc, streamReasoningFunc, streamToolCallFunc
+	streamUsageFunc = func(usage *llm.TokenUsage) {
+		if usage == nil || usage.CompletionTokens == 0 {
+			return
+		}
+		seq := progressSeq.Add(1)
+		payload := &protocol.ProgressEvent{
+			ChatID:       qualifyChatID(channel, chatID),
+			Seq:          seq,
+			StreamTokens: usage.CompletionTokens,
+		}
+		if cliCh != nil {
+			cliCh.SendProgress(chatID, payload)
+		}
+		if remoteCLICh != nil {
+			remoteCLICh.SendProgress(chatID, payload)
+		}
+		if webCh != nil {
+			webCh.SendProgress(chatID, payload)
+		}
+	}
+	return streamContentFunc, streamReasoningFunc, streamToolCallFunc, streamUsageFunc
 }
 
 // interactiveSessionsToStatuses converts InteractiveSessionInfo slice to

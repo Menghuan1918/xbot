@@ -290,8 +290,8 @@ func newGlamourRenderer(wrapWidth int) *glamour.TermRenderer {
 // cliCommands 已知命令列表（用于 Tab 补全，§8）
 var cliCommands = []string{
 	"/cancel", "/channel", "/chat", "/clear", "/commands", "/compress", "/context", "/exit",
-	"/help", "/model", "/models", "/new", "/palette", "/plugin", "/quit", "/rewind", "/search",
-	"/sessions", "/settings", "/setup", "/ss", "/su", "/tasks", "/update",
+	"/help", "/list-sessions", "/llm", "/models", "/new", "/palette", "/plugin", "/quit", "/rename", "/rewind",
+	"/search", "/sessions", "/set-llm", "/set-model", "/settings", "/setup", "/ss", "/su", "/tasks", "/unset-llm", "/update",
 	"/usage", "/user",
 }
 
@@ -354,6 +354,16 @@ func formatElapsed(ms int64) string {
 	return fmt.Sprintf("%dm%ds", mins, secs)
 }
 
+// formatCharCount formats a character count for streaming progress display.
+// < 1000: "123 chars"
+// >= 1000: "1.2k chars"
+func formatCharCount(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d chars", n)
+	}
+	return fmt.Sprintf("%.1fk chars", float64(n)/1000)
+}
+
 // ---------------------------------------------------------------------------
 // CLI ch.Channel Config
 // ---------------------------------------------------------------------------
@@ -386,6 +396,7 @@ type CLIChannelConfig struct {
 	AgentMessages          func(roleName, instance string) []ch.SessionChatMessage                                                                                      // 获取 interactive agent 的对话消息
 	ChatCreateFn           func(channelName, senderID, label string) (string, error)                                                                                    // 创建新 ChatRoom（返回 chatID）
 	SessionsDeleteFn       func(channelName, chatID string) error                                                                                                       // 删除 session（本地 JSON + 服务端 DB 级联）
+	ChatRenameFn           func(channelName, chatID, newName string) error                                                                                              // 重命名 session（DB label）
 	SessionsListRefresh    func()                                                                                                                                       // 侧边栏刷新：session 创建/删除后立即调用，确保 sidebar 不显示过期数据
 	SessionsList           func() []SessionPanelEntry                                                                                                                   // 列出所有 session（main + subagent）
 	GetActiveProgressFn    func(channelName, chatID string) *protocol.ProgressEvent                                                                                     // 获取目标 session 的活跃进度（session switch 恢复用）
@@ -398,6 +409,7 @@ type CLIChannelConfig struct {
 	ListWebUsersFn         func() ([]map[string]any, error)                                                                                                             // 列出所有 Web 用户
 	DeleteWebUserFn        func(username string) error                                                                                                                  // 删除 Web 用户（admin only）
 	IsAdminFn              func() bool                                                                                                                                  // 检查当前用户是否 admin
+	ListAllTenantsFn       func() ([]AllSessionInfo, error)                                                                                                             // 列出后端所有 session（所有渠道，用于 /list-sessions）
 	PaletteContributor     PaletteContributor                                                                                                                           // supplies external commands for command palette
 	SidebarWidthOverride   int                                                                                                                                          // --sidebar-width N (0 = use setting/default)
 	NoSidebar              bool                                                                                                                                         // --no-sidebar
@@ -430,6 +442,16 @@ type SessionPanelEntry struct {
 	Active      bool   // true = currently selected (main session only)
 	Busy        bool   // true = session is processing (agent thinking/tool_exec, etc.)
 	MessageHint string // preview of last message
+}
+
+// AllSessionInfo holds display info for a backend session across all channels.
+// Used by /list-sessions to show every tenant (cli, web, feishu, etc.).
+type AllSessionInfo struct {
+	Channel      string // channel name: cli, web, feishu, ...
+	ChatID       string // session identifier (chatID)
+	Label        string // human-readable name (may be empty)
+	Model        string // LLM model in use (may be empty)
+	LastActiveAt string // last activity timestamp (raw DB string)
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +553,14 @@ type ModelLister interface {
 	ListModels() []string
 	// ListAllModels returns models across all subscriptions (for global tier settings).
 	ListAllModels() []string
+	// ListAllModelEntries returns selectable models paired with their owning
+	// subscription (SubID/SubName empty for system-default models), for the model
+	// picker UI ("订阅名 · 模型名"). Skips disabled subscriptions and disabled models.
+	ListAllModelEntries() []protocol.ModelEntry
+	// RefreshModelEntries live-fetches /models for every enabled subscription,
+	// persists to CachedModels, and returns the fresh entry list. Use before
+	// opening the model picker so it reflects providers' true available models.
+	RefreshModelEntries() []protocol.ModelEntry
 	// EnsureModelsLoaded triggers a synchronous model list fetch if not yet loaded.
 	// After this call returns, ListModels() should return the full model list.
 	EnsureModelsLoaded()
@@ -547,6 +577,12 @@ type SubscriptionManager interface {
 	Rename(id, name string) error
 	Update(id string, sub *ch.Subscription) error
 	UpdatePerModelConfig(id, model string, pmc ch.PerModelConfig) error
+	// SetModelEnabled toggles a model's enabled flag (model-disable feature).
+	// Disabled models are excluded from cycling/model pickers and rejected by SelectModel.
+	SetModelEnabled(id, model string, enabled bool) error
+	// SetSubscriptionEnabled toggles a subscription's enabled flag (v40). A disabled
+	// subscription stops contributing models to the picker; credentials are preserved.
+	SetSubscriptionEnabled(id string, enabled bool) error
 	// GetSessionSubscription queries the backend for the session→subscription mapping.
 	// Returns empty strings if no mapping exists (server restart, first-time session, etc.).
 	GetSessionSubscription(senderID, chatID string) (subscriptionID, model string, err error)
@@ -555,7 +591,11 @@ type SubscriptionManager interface {
 // LLMSubscriber switches the active LLM for a user (called when subscription changes).
 type LLMSubscriber interface {
 	SwitchSubscription(senderID string, sub *ch.Subscription, chatID string) error
-	SwitchModel(senderID, model, chatID string)
+	// SelectModel switches to a specific (subscription, model) pair. Used by the
+	// model picker when the row carries an owning SubID, so the user picks the
+	// exact subscription that serves a model even when the same model name is
+	// served by multiple subscriptions.
+	SelectModel(senderID, subID, model, chatID string) error
 	GetDefaultModel() string
 }
 

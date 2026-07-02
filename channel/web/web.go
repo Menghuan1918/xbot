@@ -97,10 +97,10 @@ type WebCallbacks struct {
 	RegistryUnpublish func(entryType, name, senderID string) error
 	// RegistryUninstall removes a user-installed entry.
 	RegistryUninstall func(entryType, name, senderID string) error
-	// LLMList returns available models and current model.
-	LLMList func(senderID string) ([]string, string)
-	// LLMSet switches the user's model.
-	LLMSet func(senderID, model string) error
+	// LLMList returns available model entries and current entry.
+	LLMList func(senderID string) ([]protocol.ModelEntry, protocol.ModelEntry)
+	// LLMSet switches the user's model via explicit (subID, model).
+	LLMSet func(senderID, subID, model string) error
 	// LLMGetConfig returns user's LLM config (provider, baseURL, model, ok).
 	LLMGetConfig func(senderID string) (provider, baseURL, model string, ok bool)
 	// IsProcessing returns true if the backend is actively processing a request for the user.
@@ -112,10 +112,12 @@ type WebCallbacks struct {
 	LLMSetConfig func(senderID, provider, baseURL, apiKey, model string, maxOutputTokens int, thinkingMode string) error
 	// LLMDelete reverts user to global LLM config.
 	LLMDelete func(senderID string) error
-	// LLMGetMaxContext returns the user's max context tokens setting.
-	LLMGetMaxContext func(senderID string) int
-	// LLMSetMaxContext sets the user's max context tokens setting.
-	LLMSetMaxContext func(senderID string, maxContext int) error
+	// LLMGetMaxContext returns the per-(subID, model) max context tokens
+	// setting. When subID/model are empty, falls back to session resolution.
+	LLMGetMaxContext func(senderID, subID, model string) int
+	// LLMSetMaxContext sets the per-(subID, model) max context tokens setting.
+	// When subID/model are empty, falls back to session resolution.
+	LLMSetMaxContext func(senderID, subID, model string, maxContext int) error
 
 	// RegistryPublish publishes a user's agent/skill to the marketplace.
 	RegistryPublish func(entryType, name, senderID string) error
@@ -993,15 +995,11 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 			} else if result != nil {
 				rpcMsg.Result = result
 			}
-			// RPC responses MUST NOT be dropped — a dropped response causes the
-			// client to block until its 30s RPC timeout. During plugin reload-all,
-			// multiple widget pushes can fill sendCh (64 buffer) simultaneously,
-			// so we block with a timeout instead of silently dropping.
 			select {
 			case c.sendCh <- rpcMsg:
 			case <-time.After(10 * time.Second):
 				log.WithField("rpc_id", rpcReq.ID).WithField("method", rpcReq.Method).
-					Error("RPC response send timeout (10s), sendCh full — writePump may be stuck")
+					Error("RPC response send timeout (10s)")
 			}
 			continue
 		case protocol.MsgTypeSubscribe:
