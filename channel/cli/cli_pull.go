@@ -147,6 +147,15 @@ func (m *cliModel) applyProgressSnapshot(snapshot *protocol.ProgressEvent) {
 		}
 	}
 
+	// Merge SubAgent trees: structured events don't always carry SubAgents
+	// (engine only includes them when resolveSubAgents returns non-empty).
+	// Without merging, the tree flickers — appears when SubAgents are present,
+	// vanishes when the next structured event omits them. mergeSubAgentTrees
+	// preserves prev's running agents and marks dropped ones as done.
+	if prev != nil {
+		snapshot.SubAgents = mergeSubAgentTrees(prev.SubAgents, snapshot.SubAgents)
+	}
+
 	m.progressState.current = snapshot
 	if snapshot.Iteration > m.progressState.lastIter {
 		m.progressState.lastIter = snapshot.Iteration
@@ -247,11 +256,13 @@ func (m *cliModel) restoreIterationsFromSnapshot(snapshot *protocol.ProgressEven
 }
 
 // finalizeTurnFromSnapshot handles Phase=done from the snapshot.
-// For main sessions: handleAgentMessage is the authoritative end-of-turn
+// For CLI sessions: handleAgentMessage is the authoritative end-of-turn
 // signal (creates the final assistant message). PhaseDone from snapshot
 // just snapshots the final iteration and marks turn state.
-// For agent sessions (SubAgent viewer): no outbound message arrives,
-// so we create the assistant message here from the snapshot's Content.
+// For non-CLI sessions (agent viewer, feishu, web, etc.): the outbound
+// message goes to the originating channel, not the CLI channel — no
+// cliOutboundMsg ever arrives. We create the assistant message here from
+// the snapshot's Content (carried via structured progress events).
 func (m *cliModel) finalizeTurnFromSnapshot(snapshot *protocol.ProgressEvent) {
 	turnID := m.agentTurnID
 	cur := m.progressState.current
@@ -351,10 +362,14 @@ func (m *cliModel) finalizeTurnFromSnapshot(snapshot *protocol.ProgressEvent) {
 		}
 	}
 
-	// Agent session (SubAgent viewer): no outbound message arrives.
-	// Create assistant message from snapshot content.
-	if m.channelName == "agent" && !m.typing {
+	// Non-CLI sessions (agent viewer, feishu, web, etc.): the outbound
+	// message goes to the originating channel, not the CLI channel.
+	// Create assistant message from snapshot/progress content.
+	if m.channelName != "cli" && !m.typing {
 		assistantContent := snapshot.Content
+		if assistantContent == "" && cur != nil {
+			assistantContent = cur.Content
+		}
 		if assistantContent == "" {
 			assistantContent = snapshot.StreamContent
 		}
@@ -372,6 +387,8 @@ func (m *cliModel) finalizeTurnFromSnapshot(snapshot *protocol.ProgressEvent) {
 			}
 			if snapshot.Reasoning != "" {
 				asstMsg.reasoning = snapshot.Reasoning
+			} else if cur != nil && cur.Reasoning != "" {
+				asstMsg.reasoning = cur.Reasoning
 			}
 			// Find existing or append new — single creation point for agent sessions.
 			existingIdx := m.findMessageByTurn(turnID, "assistant")
