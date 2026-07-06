@@ -601,9 +601,6 @@ func buildFeishuSettingsCallbacks(cfg *config.Config, ag *agent.Agent) feishu.Se
 			if sub.APIKey != "" && !strings.HasSuffix(sub.APIKey, "****") {
 				existing.APIKey = sub.APIKey
 			}
-			if sub.Model != "" {
-				existing.Model = sub.Model
-			}
 			if err := svc.Update(existing); err != nil {
 				return err
 			}

@@ -382,7 +382,8 @@ func (m *cliModel) resetToIdleState() {
 	m.quickSwitchCursor = 0
 	m.quickSwitchFiltering = false
 	m.quickSwitchScrollY = 0
-	m.quickSwitchCachedData = llmData{}
+	m.llmCache.Invalidate()
+	m.expandedSubs = make(map[string]bool)
 
 	// --- Command Palette ---
 	m.paletteOpen = false

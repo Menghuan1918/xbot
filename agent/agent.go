@@ -621,6 +621,9 @@ func setSubFieldValue(sub *sqlite.LLMSubscription, key, value string) error {
 	case "llm_base_url":
 		sub.BaseURL = strings.TrimSpace(value)
 	case "llm_model":
+		// Model is user-level — stored in sub.Model temporarily for the caller
+		// to upsert to subscription_models. The DB column is preserved but
+		// no longer read by any code path.
 		sub.Model = strings.TrimSpace(value)
 	case "max_output_tokens":
 		n, err := strconv.Atoi(strings.TrimSpace(value))

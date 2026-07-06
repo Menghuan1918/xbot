@@ -590,6 +590,10 @@ type SubscriptionManager interface {
 	// SetModelEnabled toggles a model's enabled flag (model-disable feature).
 	// Disabled models are excluded from cycling/model pickers and rejected by SelectModel.
 	SetModelEnabled(id, model string, enabled bool) error
+	// RemoveModel permanently deletes a model from subscription_models.
+	RemoveModel(id, model string) error
+	// UpsertModel inserts or updates a model in subscription_models.
+	UpsertModel(id, model string, maxContext, maxOutput int, apiType, thinkingMode string) error
 	// SetSubscriptionEnabled toggles a subscription's enabled flag (v40). A disabled
 	// subscription stops contributing models to the picker; credentials are preserved.
 	SetSubscriptionEnabled(id string, enabled bool) error

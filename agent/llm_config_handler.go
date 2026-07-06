@@ -164,8 +164,6 @@ func (a *Agent) handleSetLLM(ctx context.Context, msg bus.InboundMessage) (*chan
 			cfg.BaseURL = value
 		case "api_key":
 			cfg.APIKey = value
-		case "model":
-			cfg.Model = value
 		case "max_context":
 			var maxCtx int
 			if _, err := fmt.Sscanf(value, "%d", &maxCtx); err == nil {
@@ -248,9 +246,6 @@ func (a *Agent) handleSetLLM(ctx context.Context, msg bus.InboundMessage) (*chan
 		}
 		if seenKeys["api_key"] {
 			existing.APIKey = cfg.APIKey
-		}
-		if seenKeys["model"] {
-			existing.Model = cfg.Model
 		}
 		if seenKeys["max_context"] {
 			existing.MaxContext = cfg.MaxContext
