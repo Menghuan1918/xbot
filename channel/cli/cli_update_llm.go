@@ -9,8 +9,6 @@ import (
 // handleSwitchLLMDoneMsg processes async subscription switch completion.
 // Returns (model, cmd, handled).
 func (m *cliModel) handleSwitchLLMDoneMsg(done cliSwitchLLMDoneMsg) (tea.Model, tea.Cmd, bool) {
-	returnToSettings := m.quickSwitchReturnToPanel
-	m.quickSwitchReturnToPanel = false
 	if done.err != nil {
 		m.showTempStatus(fmt.Sprintf("Failed to switch LLM: %v", done.err))
 		return m, nil, true
@@ -29,7 +27,7 @@ func (m *cliModel) handleSwitchLLMDoneMsg(done cliSwitchLLMDoneMsg) (tea.Model, 
 		// session had a different model choice (e.g. user switched via Ctrl+N),
 		// SelectModel pins the exact (subID, model) pair for this session.
 		if done.subModel != "" && done.subID != "" && m.llmSubscriber != nil {
-			m.llmSubscriber.SelectModel(m.senderID, done.subID, done.subModel, m.chatID)
+			m.llmSubscriber.SelectModel(m.senderID, "cli", done.subID, done.subModel, m.chatID)
 		}
 		// Update per-session LLM state.
 		state := SessionLLMState{
@@ -44,9 +42,7 @@ func (m *cliModel) handleSwitchLLMDoneMsg(done cliSwitchLLMDoneMsg) (tea.Model, 
 		}
 	}
 	// If we came from the settings panel, re-open it so the user can continue editing
-	if returnToSettings {
-		m.openSettingsFromQuickSwitch()
-	}
+	m.openSettingsFromQuickSwitch()
 	// Drain pendingCmds (e.g. showTempStatus timer) — must not return nil cmds
 	var cmd tea.Cmd
 	if len(m.pendingCmds) > 0 {

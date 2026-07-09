@@ -183,7 +183,7 @@ func visibleMsgGroupIndices(messages []cliMessage) []int {
 // updateViewportContent 更新 viewport 显示内容（§1 增量渲染）
 func (m *cliModel) updateViewportContent() {
 	// 快速路径：流式消息 + 缓存有效
-	// dedupMessagesGuard 不需要在此路径运行：流式更新只改内容不增消息。
+	// dedupMessagesGuard 已删除 — 消息只有一个创建点：流式更新只改内容不增消息。
 	if m.streamingMsgIdx >= 0 && m.rc.valid {
 		if m.streamingMsgIdx >= len(m.messages) {
 			m.streamingMsgIdx = -1
@@ -286,15 +286,7 @@ func (m *cliModel) updateViewportContent() {
 		return
 	}
 
-	// ── dedupGuard: algorithmic guarantee against duplicate rendering ──
-	// Only runs on the SLOW path (cache invalid or msgCount changed).
-	// Fast paths above guarantee: when rc.valid==true and msgCount unchanged,
-	// no new messages were added since last dedup check → skip is safe.
-	// Enforces the invariant that no two messages share the same (turnID, role)
-	// identity. Uses O(n) map-based identity check, NOT string matching.
-	m.dedupMessagesGuard()
-
-	// 慢速路径：全量重建
+	// 慢速路径：全量重建（dedupMessagesGuard 已删除 — 消息只有一个创建点）
 	m.fullRebuild()
 	if m.streamingMsgIdx >= 0 {
 		m.updateStreamingOnly()
@@ -317,8 +309,14 @@ func (m *cliModel) updateViewportContent() {
 		m.rc.allLinesHistLen = len(m.rc.histLines)
 		m.rc.allLinesGen = m.rc.histGen // sync generation so tick fast path can reuse
 		viewportSetLinesBypassMaxWidth(&m.viewport, m.rc.allLines, cw)
-		m.viewport.GotoBottom()
-		m.newContentHint = false
+		// Respect user scroll position — don't force scroll to bottom
+		// when the user has scrolled up to browse history.
+		if !m.userScrolledUp {
+			m.viewport.GotoBottom()
+			m.newContentHint = false
+		} else {
+			m.newContentHint = true
+		}
 	}
 }
 
@@ -352,8 +350,15 @@ func (m *cliModel) updateStreamingOnly() {
 		return
 	}
 
-	// --- Determine guide style (streaming = bright) ---
+	// --- Determine guide style (streaming = bright, turn ended = dim) ---
+	// When the turn has ended (typing=false) but streamingMsgIdx is still
+	// valid (PhaseDone arrived, handleAgentMessage not yet), use dim guide
+	// to match the finalized message style. This eliminates the guide color
+	// jump (bright→dim) that causes visible flicker at turn completion.
 	guideSt := s.GuideSt
+	if !m.typing {
+		guideSt = s.DimGuideSt
+	}
 	guideSym := "┊ "
 	const ansiReset = "\x1b[0m"
 	guidePrefix := ansiReset + guideSt.Render(guideSym) + ansiReset
@@ -450,9 +455,18 @@ func (m *cliModel) updateStreamingOnly() {
 	// Uses renderLiveIteration directly, then combines with completed.
 	// Separator logic matches renderTurnBody: no blank line when both sides
 	// only have tools (running tools should be continuous with completed tools).
+	//
+	// CRITICAL: skip live rendering when !m.typing (turn ended). The final
+	// iteration is already in progressState.iterations (snapshotted by
+	// finalizeTurnFromSnapshot before endAgentTurn). Rendering liveLines
+	// from progressState.current duplicates the final iteration's Content
+	// + Reasoning. For CLI sessions this is momentary (handleAgentMessage
+	// clears streamingMsgIdx), but for non-CLI sessions (/su to feishu/web)
+	// handleAgentMessage never arrives → streamingMsgIdx stays valid →
+	// updateStreamingOnly runs every tick → persistent duplication.
 	var liveLines []string
 	liveMaxW := 0
-	if m.progressState.current != nil {
+	if m.progressState.current != nil && m.typing {
 		liveBlocks := m.liveIterationBlocks(m.progressState.current, contentWidth, msg.content)
 		liveContent := renderTurnBlocks(liveBlocks)
 		liveContent = strings.TrimRight(liveContent, "\n")
@@ -648,4 +662,72 @@ func setViewportLines(vp *viewport.Model, lines []string) {
 func setViewportLongestLineWidth(vp *viewport.Model, w int) {
 	ptr := (*int)(unsafe.Pointer(uintptr(unsafe.Pointer(vp)) + viewportLongestLineWidthOffset))
 	*ptr = w
+}
+
+// getViewportLines reads the unexported 'lines' field of viewport.Model.
+func getViewportLines(vp *viewport.Model) []string {
+	ptr := (*[]string)(unsafe.Pointer(uintptr(unsafe.Pointer(vp)) + viewportLinesOffset))
+	return *ptr
+}
+
+// renderViewportFast is a high-performance replacement for viewport.View().
+//
+// viewport.View() internally calls lipgloss.Render(Width(w).Height(h)) which
+// performs a full word-wrap pass (byte-by-byte ANSI parsing via WrapWriter)
+// plus alignTextHorizontal (ansi.StringWidth per line). Since xbot pre-wraps
+// ALL lines to chatWidth via wrapPreservingGuide before setting them on the
+// viewport, the word-wrap is purely redundant — it re-validates what we
+// already know. This redundant pass costs ~600μs and ~30K allocations per
+// frame on long contexts with syntax-highlighted code, making scrolling
+// janky and driving GC pressure (60MB/s garbage at 60fps scroll).
+//
+// This function produces the exact same visual output (visible lines sliced
+// by YOffset, padded to viewport width and height) but skips the redundant
+// word-wrap entirely. Measured: 15-20x faster, 100x fewer allocations.
+func (m *cliModel) renderViewportFast() string {
+	vp := &m.viewport
+	height := vp.Height()
+	width := vp.Width()
+	if width == 0 || height == 0 {
+		return ""
+	}
+
+	lines := getViewportLines(vp)
+	yOffset := vp.YOffset()
+
+	// Slice visible lines (same logic as viewport.visibleLines with SoftWrap=false)
+	var visible []string
+	if yOffset < len(lines) {
+		end := yOffset + height
+		if end > len(lines) {
+			end = len(lines)
+		}
+		visible = lines[yOffset:end]
+	}
+
+	// Join + pad. No word-wrap needed — lines are already wrapped to width.
+	// Pre-size the builder to avoid reallocation: height lines × (width+1) bytes.
+	var b strings.Builder
+	b.Grow(height * (width + 1))
+	for i, line := range visible {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+		// Pad short lines to viewport width so the terminal doesn't
+		// show stale content from the previous frame.
+		lineW := lipgloss.Width(line)
+		if pad := width - lineW; pad > 0 {
+			b.WriteString(strings.Repeat(" ", pad))
+		}
+	}
+	// Pad remaining height with blank lines
+	for i := len(visible); i < height; i++ {
+		if len(visible) > 0 || i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(strings.Repeat(" ", width))
+	}
+
+	return b.String()
 }

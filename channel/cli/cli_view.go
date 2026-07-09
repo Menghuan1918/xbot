@@ -31,7 +31,7 @@ func (m *cliModel) computeInputCursorScreenPos() (x, y int, ok bool) {
 		return 0, 0, false
 	}
 	// Textarea is not rendered when settings are being saved
-	if m.panelState.settingsSaving {
+	if m.panelState.settings.settingsSaving {
 		return 0, 0, false
 	}
 
@@ -219,7 +219,7 @@ func (m *cliModel) renderTitleBar() string {
 // which triggers CJK rendering bugs on Windows Terminal).
 func (m *cliModel) renderInputArea(borderColor color.Color) string {
 	// Show saving overlay instead of textarea while settings are being saved
-	if m.panelState.settingsSaving {
+	if m.panelState.settings.settingsSaving {
 		w := m.chatWidth()
 		inputBoxStyle := m.styles.InputBox.BorderForeground(borderColor).Width(w - 4)
 		return inputBoxStyle.Render(lipgloss.NewStyle().Faint(true).Render("  ⏳ Saving settings..."))
@@ -359,7 +359,7 @@ func (m *cliModel) layoutSearch(titleBar, input string) string {
 			fmt.Sprintf(m.locale.SearchNavFormat, m.searchState.query, m.searchState.idx+1, len(m.searchState.results)))
 	}
 	return fmt.Sprintf("%s\n%s\n%s\n%s",
-		titleBar, m.viewport.View(), searchBar, input)
+		titleBar, m.renderViewportFast(), searchBar, input)
 }
 
 // layoutAskUser renders the askuser panel layout: title bar, viewport,
@@ -376,14 +376,14 @@ func (m *cliModel) layoutAskUser(titleBar string) string {
 		askVisibleH = 3
 	}
 	totalAskLines := len(askLines)
-	if m.panelState.askScrollY+askVisibleH > totalAskLines {
-		m.panelState.askScrollY = max(0, totalAskLines-askVisibleH)
+	if m.panelState.askUser.askScrollY+askVisibleH > totalAskLines {
+		m.panelState.askUser.askScrollY = max(0, totalAskLines-askVisibleH)
 	}
-	end := m.panelState.askScrollY + askVisibleH
+	end := m.panelState.askUser.askScrollY + askVisibleH
 	if end > totalAskLines {
 		end = totalAskLines
 	}
-	visibleAsk := askLines[m.panelState.askScrollY:end]
+	visibleAsk := askLines[m.panelState.askUser.askScrollY:end]
 	askContent := strings.Join(visibleAsk, "\n")
 	// Append scrollbar when content overflows
 	cw := m.chatWidth()
@@ -397,7 +397,7 @@ func (m *cliModel) layoutAskUser(titleBar string) string {
 		if contentWidth < 10 {
 			contentWidth = 10
 		}
-		askContent = m.applyScrollbar(askContent, contentWidth, totalAskLines, m.panelState.askScrollY)
+		askContent = m.applyScrollbar(askContent, contentWidth, totalAskLines, m.panelState.askUser.askScrollY)
 	}
 	// Width(cw-2): text_area = cw-6. Without scrollbar, lines ≤ qWrapWidth(cw-7)
 	// fit (cw-7 < cw-6). With scrollbar, total = contentWidth(cw-7)+1 = cw-6 = text_area.
@@ -405,7 +405,7 @@ func (m *cliModel) layoutAskUser(titleBar string) string {
 	// Scroll indicator — mouse wheel or ↑↓ at edges scrolls content
 	scrollHint := ""
 	if totalAskLines > askVisibleH {
-		pct := (m.panelState.askScrollY + askVisibleH) * 100 / totalAskLines
+		pct := (m.panelState.askUser.askScrollY + askVisibleH) * 100 / totalAskLines
 		scrollHint = m.styles.PanelDesc.Render(fmt.Sprintf(" [%d%%] ↕ scroll", pct))
 	}
 
@@ -415,9 +415,9 @@ func (m *cliModel) layoutAskUser(titleBar string) string {
 	// with the bottom border line (which would overflow terminal width).
 	var middleBlock string
 	if scrollHint != "" {
-		middleBlock = fmt.Sprintf("%s\n%s\n%s", m.viewport.View(), boxedAsk, scrollHint)
+		middleBlock = fmt.Sprintf("%s\n%s\n%s", m.renderViewportFast(), boxedAsk, scrollHint)
 	} else {
-		middleBlock = fmt.Sprintf("%s\n%s", m.viewport.View(), boxedAsk)
+		middleBlock = fmt.Sprintf("%s\n%s", m.renderViewportFast(), boxedAsk)
 	}
 
 	// Sidebar support — askuser is a split layout (viewport + panel), sidebar
@@ -530,7 +530,7 @@ func (m *cliModel) layoutMain(titleBar, input, completionsHint string) string {
 	// When sidebar is visible, this whole section is squeezed to chatWidth
 	// and the todo bar moves to the sidebar instead.
 	var middleLines []string
-	middleLines = append(middleLines, m.viewport.View())
+	middleLines = append(middleLines, m.renderViewportFast())
 	if status != "" {
 		middleLines = append(middleLines, status)
 	}
@@ -1497,7 +1497,7 @@ func (m *cliModel) titleText() string {
 // Keep it short — header width is limited and line wrap looks terrible.
 func (m *cliModel) askUserTitleHints() string {
 	hints := []string{"↑↓ select", "Space check", "Enter submit", "Esc cancel"}
-	if len(m.panelState.askItems) > 1 {
+	if len(m.panelState.askUser.askItems) > 1 {
 		hints = append([]string{"←→ switch"}, hints...)
 	}
 	return strings.Join(hints, " · ")
@@ -1885,7 +1885,7 @@ func (m *cliModel) renderFooter() string {
 		}
 		switch m.panelState.mode {
 		case "bgtasks":
-			if m.panelState.bgViewing {
+			if m.panelState.misc.bgViewing {
 				hints = append(hints,
 					m.footerHintItem("PgUp/PgDn", m.locale.FooterScroll, "scroll"),
 					m.footerHintItem("Esc", m.locale.FooterBack, "esc"),
@@ -1912,7 +1912,7 @@ func (m *cliModel) renderFooter() string {
 				m.footerHintItem("Esc", escLabel, "esc"),
 			)
 		case "wizard":
-			switch m.panelState.wizardStep {
+			switch m.panelState.settings.wizardStep {
 			case wizardAPIKey:
 				hints = append(hints,
 					m.footerHintItem("Enter/Ctrl+s", m.locale.WizardNextBtn, "enter"),
@@ -2134,7 +2134,7 @@ func newCtxBarStyles() ctxBarStyles {
 // the bar ALWAYS renders — as a filled bar when token data is available,
 // or as an empty bar when lastTokenUsage is nil (e.g. before first LLM call).
 // This prevents the jarring "bar disappears" flash that happened when
-// lastTokenUsage was temporarily nil due to progressCh coalescing.
+// lastTokenUsage was temporarily nil due to progressSlot coalescing.
 func (m *cliModel) renderContextTopBorder(borderColor color.Color, renderedBox string) string {
 	maxTokens := int64(m.cachedMaxContextTokens)
 	if maxTokens <= 0 {

@@ -21,6 +21,18 @@ import (
 // saveSettings:  dispatches each key to its scope's writer.
 // maxContext:    resolves from subscription.PerModelConfigs[model].MaxContext.
 
+// isTierSettingKey returns true if the key is one of the tier_* settings.
+// Tier settings are registered in AllSettingDefs with ScopeUser but are
+// persisted to DB only — no runtime handler needed. They are stripped from
+// runtimeValues in saveSettings to avoid redundant DB writes in ApplySettings.
+func isTierSettingKey(key string) bool {
+	switch key {
+	case "tier_vanguard", "tier_balance", "tier_swift":
+		return true
+	}
+	return false
+}
+
 // ── read ─────────────────────────────────────────────────────────────
 
 // readSettings returns the current settings values for the /settings panel.
@@ -152,12 +164,6 @@ func (m *cliModel) saveSettings(values map[string]string) {
 						changed = true
 					}
 				}
-				if v, ok := values["llm_model"]; ok && strings.TrimSpace(v) != "" {
-					if updated.Model != strings.TrimSpace(v) {
-						updated.Model = strings.TrimSpace(v)
-						changed = true
-					}
-				}
 				if v, ok := values["llm_base_url"]; ok && strings.TrimSpace(v) != "" && !strings.Contains(v, "****") {
 					if updated.BaseURL != strings.TrimSpace(v) {
 						updated.BaseURL = strings.TrimSpace(v)
@@ -191,6 +197,14 @@ func (m *cliModel) saveSettings(values map[string]string) {
 			}
 		} else if hasSubValues {
 			// No active subscription — create one (first-run / wizard setup).
+			existingSubIDs := map[string]bool{}
+			if subs, err := m.subscriptionMgr.List(""); err == nil {
+				for _, sub := range subs {
+					if sub.ID != "" {
+						existingSubIDs[sub.ID] = true
+					}
+				}
+			}
 			newSub := &ch.Subscription{
 				Name:   "default",
 				Active: true,
@@ -201,7 +215,9 @@ func (m *cliModel) saveSettings(values map[string]string) {
 			if v, ok := values["llm_api_key"]; ok {
 				newSub.APIKey = strings.TrimSpace(v)
 			}
-			if v, ok := values["llm_model"]; ok {
+			if v, ok := values["llm_model"]; ok && strings.TrimSpace(v) != "" {
+				// Model is user-level — stored in newSub.Model temporarily,
+				// upserted to subscription_models after Add.
 				newSub.Model = strings.TrimSpace(v)
 			}
 			if v, ok := values["llm_base_url"]; ok {
@@ -211,23 +227,32 @@ func (m *cliModel) saveSettings(values map[string]string) {
 				if err := m.subscriptionMgr.Add(newSub); err != nil {
 					logrus.WithFields(logrus.Fields{"err": err}).Warn("saveSettings: subscription create failed")
 				} else {
+					subID := m.createdSubscriptionID(newSub, existingSubIDs)
+					if subID == "" {
+						logrus.WithFields(logrus.Fields{
+							"provider": newSub.Provider,
+							"base_url": newSub.BaseURL,
+							"model":    newSub.Model,
+						}).Warn("saveSettings: subscription create returned no id")
+						return
+					}
 					// Activate the new subscription as the GLOBAL default.
 					// Must pass chatID="" so the RPC handler takes the global
 					// path (svc.SetDefault + SwitchSubscription), NOT the
 					// per-session path which skips both.
-					_ = m.subscriptionMgr.SetDefault(newSub.ID, "")
+					_ = m.subscriptionMgr.SetDefault(subID, "")
 					// Also bind to the current session so GetSessionSubscription
 					// finds it immediately and the LLM factory has a per-chat entry.
-					_ = m.subscriptionMgr.SetDefault(newSub.ID, m.chatID)
+					_ = m.subscriptionMgr.SetDefault(subID, m.chatID)
 					// Sync TUI caches immediately — applySessionLLMState is the
 					// single source of truth for cachedModelName/activeSubID.
 					// Without this, refreshCachedModelName may fire before
 					// GetDefault reflects the new subscription (RPC timing),
 					// letting auto-discover pick a wrong model from ListModels().
-					m.activeSubID = newSub.ID
+					m.activeSubID = subID
 					m.applySessionLLMState(SessionLLMState{
-						SubscriptionID: newSub.ID,
-						Model:          newSub.Model,
+						SubscriptionID: subID,
+						Model:          "", // model is user-level, resolved from user_default_model
 					})
 				}
 			}
@@ -327,6 +352,11 @@ func (m *cliModel) saveSettings(values map[string]string) {
 			if k == "max_context_tokens" {
 				continue
 			}
+			// Tier settings already persisted above via settingsSvc. Strip them
+			// to avoid redundant DB write in main.go's ApplySettings loop.
+			if isTierSettingKey(k) {
+				continue
+			}
 			runtimeValues[k] = v
 		}
 		if llmCredsSaved {
@@ -340,6 +370,35 @@ func (m *cliModel) saveSettings(values map[string]string) {
 	if m.channel != nil && m.channel.config.RefreshValuesCache != nil && m.activeSubID != "" {
 		m.channel.config.RefreshValuesCache(m.activeSubID)
 	}
+}
+
+func (m *cliModel) createdSubscriptionID(created *ch.Subscription, existingIDs map[string]bool) string {
+	if created == nil {
+		return ""
+	}
+	if created.ID != "" {
+		return created.ID
+	}
+	if m.subscriptionMgr == nil {
+		return ""
+	}
+	subs, err := m.subscriptionMgr.List("")
+	if err != nil {
+		return ""
+	}
+	for i := len(subs) - 1; i >= 0; i-- {
+		sub := subs[i]
+		if sub.ID == "" || existingIDs[sub.ID] {
+			continue
+		}
+		if sub.Name == created.Name &&
+			sub.Provider == created.Provider &&
+			sub.BaseURL == created.BaseURL &&
+			sub.Model == created.Model {
+			return sub.ID
+		}
+	}
+	return ""
 }
 
 // ── resolve helpers ──────────────────────────────────────────────────

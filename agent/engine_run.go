@@ -42,7 +42,6 @@ type runState struct {
 	sessionKey               string
 	offloadSessionKey        string
 	toolExecutor             func(ctx context.Context, tc llm.ToolCall) (*tools.ToolResult, error)
-	toolTimeout              time.Duration
 	autoNotify               bool
 	batchProgressByIteration bool
 	dynamicInjector          *DynamicContextInjector
@@ -108,11 +107,6 @@ func newRunState(cfg RunConfig) *runState {
 		toolExecutor = defaultToolExecutor(&cfg)
 	}
 
-	// toolTimeout is kept for API compat but no longer used to wrap tool contexts.
-	// Individual tools manage their own timeouts; engine only passes through the
-	// parent context (which carries user cancellation via Ctrl+C).
-	toolTimeout := cfg.ToolTimeout
-
 	messages := copyMessages(cfg.Messages)
 	for i := range messages {
 		if messages[i].Role != "system" && strings.Contains(messages[i].Content, "<system-reminder>") {
@@ -134,7 +128,6 @@ func newRunState(cfg RunConfig) *runState {
 		sessionKey:               sessionKey,
 		offloadSessionKey:        offloadSessionKey,
 		toolExecutor:             toolExecutor,
-		toolTimeout:              toolTimeout,
 		autoNotify:               autoNotify,
 		batchProgressByIteration: batchProgressByIteration,
 		messages:                 messages,
@@ -329,7 +322,7 @@ func (s *runState) notifyProgress(extra string) {
 	}
 	thinking := ""
 	if s.structuredProgress != nil {
-		thinking = s.structuredProgress.ThinkingContent
+		thinking = s.structuredProgress.Content
 	}
 	if s.cfg.ProgressNotifier != nil {
 		s.cfg.ProgressNotifier([]string{buf.String()}, thinking)
@@ -392,7 +385,7 @@ func (s *runState) beginIteration(i int) {
 		s.structuredProgress.ActiveTools = nil
 		s.structuredProgress.CompletedTools = nil
 		s.structuredProgress.SubAgents = nil
-		s.structuredProgress.ThinkingContent = ""
+		s.structuredProgress.Content = ""
 		s.structuredProgress.ReasoningContent = ""
 	}
 	if s.structuredProgress != nil && s.cfg.TodoManager != nil && s.sessionKey != "" {
@@ -791,23 +784,23 @@ func (s *runState) handleFinalResponse(ctx context.Context, response *llm.LLMRes
 			}
 		}
 
-		// Update ThinkingContent and ReasoningContent so PhaseDone progress
+		// Update Content and ReasoningContent so PhaseDone progress
 		// carries the final reply and thinking. recordAssistantMsg is not called
 		// for final text responses (handleFinalResponse returns directly), so
 		// both fields must be set here for SubAgent session viewers and CLI
 		// tool_summary rendering.
 		if s.structuredProgress != nil {
 			if cleanContent != "" {
-				s.structuredProgress.ThinkingContent = cleanContent
+				s.structuredProgress.Content = cleanContent
 			} else if response.ReasoningContent != "" {
 				// Model returned only tool calls (no text) but has reasoning.
-				// Use reasoning as ThinkingContent so SubAgent progress tree
+				// Use reasoning as Content so SubAgent progress tree
 				// shows what the model is thinking rather than "💭 思考中...".
 				rc := response.ReasoningContent
 				if r := []rune(rc); len(r) > 200 {
 					rc = string(r[:200]) + "…"
 				}
-				s.structuredProgress.ThinkingContent = rc
+				s.structuredProgress.Content = rc
 			}
 			if response.ReasoningContent != "" {
 				s.structuredProgress.ReasoningContent = response.ReasoningContent
@@ -839,7 +832,7 @@ func (s *runState) recordAssistantMsg(ctx context.Context, response *llm.LLMResp
 		s.progressLines = append(s.progressLines, cleanContent)
 	}
 	if s.structuredProgress != nil && cleanContent != "" {
-		s.structuredProgress.ThinkingContent = cleanContent
+		s.structuredProgress.Content = cleanContent
 	}
 	// Wire the model's reasoning chain (reasoning_content) to progress
 	// so the CLI can display the thinking process to the user.
@@ -1436,7 +1429,12 @@ func (s *runState) postToolProcessing(ctx context.Context, response *llm.LLMResp
 	s.validateInvariantsAt(ctx, "post_persist")
 
 	// --- Background notification draining (bg tasks + bg subagents) ---
-	if s.cfg.DrainBgNotifications != nil {
+	// Cancel-aware: skip draining if ctx is already cancelled. The cancel
+	// signal may have arrived during the LLM call above. Draining now would
+	// inject notifications into a Run that is about to return cancelled.
+	// Skipping leaves them in bgRunPending so handleCancelledRun can discard
+	// this session's pending notifications before the cancel ack reaches the UI.
+	if s.cfg.DrainBgNotifications != nil && ctx.Err() == nil {
 		pending := s.cfg.DrainBgNotifications()
 		for _, notif := range pending {
 			switch n := notif.(type) {
@@ -1493,8 +1491,9 @@ func (s *runState) injectSyntheticToolPair(
 		Role:    "assistant",
 		Content: assistantContent,
 		ToolCalls: []llm.ToolCall{{
-			ID:   toolID,
-			Name: toolName,
+			ID:        toolID,
+			Name:      toolName,
+			Arguments: "{}", // must be valid JSON; empty string "" causes 400 on strict backends (e.g. SGLang)
 		}},
 	}
 

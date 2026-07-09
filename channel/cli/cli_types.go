@@ -335,7 +335,7 @@ const (
 // cliIterationSnapshot captures a completed iteration for the progress panel.
 type cliIterationSnapshot struct {
 	Iteration   int
-	Thinking    string
+	Content     string
 	Reasoning   string // model's reasoning/thinking chain (reasoning_content)
 	Tools       []protocol.ToolProgress
 	ElapsedWall int64 // wall-clock duration of the iteration (ms)
@@ -510,9 +510,19 @@ type CLIChannel struct {
 	// 3+ senders, key events get ~25% scheduling probability. By consolidating
 	// ALL non-critical sends through one channel + one goroutine, we reduce
 	// concurrent senders to 2 (readLoop + drain), giving keys ~50% chance.
-	progressCh chan *protocol.ProgressEvent
-	tickCh     chan tea.Msg // dedicated tick channel (buffer 1, drop on full)
-	asyncCh    chan tea.Msg // unified async send channel (buffered)
+	//
+	// progressSlot + progressSignal replaces the old buffer-1 progressCh.
+	// The slot is a mutex-protected "latest event" holder — SendProgress
+	// merges incoming events into the slot (stream-only merge with structured,
+	// or structured replaces). progressSignal (buffer-1) just wakes the drain
+	// goroutine. This eliminates the eviction race in the old buffer-1 channel
+	// where structured "done" events could be silently lost (tool stuck as
+	// running forever).
+	progressMu     sync.Mutex
+	progressSlot   *protocol.ProgressEvent
+	progressSignal chan struct{}
+	tickCh         chan tea.Msg // dedicated tick channel (buffer 1, drop on full)
+	asyncCh        chan tea.Msg // unified async send channel (buffered)
 
 	// Services (injected by Agent or main)
 	settingsSvc        SettingsService    // interface for GetSettings/SetSetting
@@ -580,12 +590,16 @@ type SubscriptionManager interface {
 	// SetModelEnabled toggles a model's enabled flag (model-disable feature).
 	// Disabled models are excluded from cycling/model pickers and rejected by SelectModel.
 	SetModelEnabled(id, model string, enabled bool) error
+	// RemoveModel permanently deletes a model from subscription_models.
+	RemoveModel(id, model string) error
+	// UpsertModel inserts or updates a model in subscription_models.
+	UpsertModel(id, model string, maxContext, maxOutput int, apiType, thinkingMode string) error
 	// SetSubscriptionEnabled toggles a subscription's enabled flag (v40). A disabled
 	// subscription stops contributing models to the picker; credentials are preserved.
 	SetSubscriptionEnabled(id string, enabled bool) error
 	// GetSessionSubscription queries the backend for the session→subscription mapping.
 	// Returns empty strings if no mapping exists (server restart, first-time session, etc.).
-	GetSessionSubscription(senderID, chatID string) (subscriptionID, model string, err error)
+	GetSessionSubscription(senderID, channelName, chatID string) (subscriptionID, model string, err error)
 }
 
 // LLMSubscriber switches the active LLM for a user (called when subscription changes).
@@ -595,7 +609,7 @@ type LLMSubscriber interface {
 	// model picker when the row carries an owning SubID, so the user picks the
 	// exact subscription that serves a model even when the same model name is
 	// served by multiple subscriptions.
-	SelectModel(senderID, subID, model, chatID string) error
+	SelectModel(senderID, channelName, subID, model, chatID string) error
 	GetDefaultModel() string
 }
 

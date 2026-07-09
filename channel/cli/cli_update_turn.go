@@ -225,22 +225,13 @@ func (m *cliModel) handleInjectedUserMsg(msg cliInjectedUserMsg) []tea.Cmd {
 	// (incrementing agentTurnID), causing the pending reply to be treated as
 	// stale and dropped — losing ALL iterations from the completed turn.
 	//
-	// Two cases to guard:
-	//   1. m.typing == true: turn in progress, PhaseDone hasn't arrived yet
-	//   2. m.typing == false but replyReceived == false: PhaseDone arrived
-	//      (set typing=false via endAgentTurn) but the reply hasn't been
-	//      processed by handleAgentMessage yet.
+	// Three cases to guard:
+	//   1. m.typing == true: turn in progress, reply hasn't arrived yet
+	//   2. !m.replyProcessed && !m.typing: PhaseDone arrived (set typing=false),
+	//      but the reply hasn't been processed by handleAgentMessage yet.
 	//   3. m.turnCancelled == true: Ctrl+C PhaseDone arrived (typing=false)
-	//      but cancel ack hasn't been processed yet. Starting a new turn now
-	//      would orphan the cancelled turn's streaming message (still
-	//      isPartial in m.messages). The cancel ack will clean it up and
-	//      flush the queue via tryFlushMessageQueue.
-	shouldQueue := m.typing || m.turnCancelled
-	if !shouldQueue && m.agentTurnID > 0 {
-		if flag := m.getTurnFlag(m.agentTurnID); flag != nil && flag.doneProcessed && !flag.replyReceived {
-			shouldQueue = true
-		}
-	}
+	//      but cancel ack hasn't been processed yet.
+	shouldQueue := m.typing || m.turnCancelled || !m.replyProcessed
 
 	// Race fix: if typing=true was set by progress auto-start (not by a real
 	// user message), the injected notification IS the user message for this
@@ -405,34 +396,16 @@ func (m *cliModel) handleCtrlC() (tea.Model, tea.Cmd, bool) {
 		m.queueEditBuf = ""
 		m.textarea.SetValue("")
 	}
-	// 3. 如果 agent 正在处理：
-	//    - 有排队消息：先删除最后一条（再按清空全部，再按 cancel agent）
-	//    - 无排队消息：发送 cancel
+	// 3. 如果 agent 正在处理：始终立即发送 cancel，同时清空排队消息。
+	//    不再要求用户按多次 Ctrl+C 来逐条删除排队消息 — 那段时间里 agent 继续在跑，
+	//    用户体验是 "Ctrl+C 没反应"。
 	if m.typing {
-		queueLen := len(m.messageQueue)
-		if queueLen > 0 {
-			if m.queueEditing {
-				// 正在编辑排队消息 → 取消编辑并删除该消息
-				removed := m.messageQueue[len(m.messageQueue)-1].content
-				m.messageQueue = m.messageQueue[:len(m.messageQueue)-1]
-				m.queueEditing = false
-				m.queueEditBuf = ""
-				m.textarea.SetValue("")
-				m.showSystemMsg(fmt.Sprintf(m.locale.QueueItemRemoved, removed), feedbackInfo)
-			} else if queueLen > 1 {
-				// 多条排队 → 删除最后一条
-				removed := m.messageQueue[len(m.messageQueue)-1].content
-				m.messageQueue = m.messageQueue[:len(m.messageQueue)-1]
-				m.showSystemMsg(fmt.Sprintf(m.locale.QueueItemRemoved+". "+m.locale.QueueCleared, removed, len(m.messageQueue)), feedbackInfo)
-			} else {
-				// 只剩一条 → 清空全部
-				m.messageQueue = nil
-				m.showSystemMsg(fmt.Sprintf(m.locale.QueueCleared, queueLen), feedbackInfo)
-			}
-		} else {
-			m.sendCancel()
-			m.turnCancelled = true // prevent stale progress from auto-starting after cancel
+		if len(m.messageQueue) > 0 {
+			m.messageQueue = nil
+			m.showSystemMsg("已清空排队消息", feedbackInfo)
 		}
+		m.sendCancel()
+		m.turnCancelled = true // prevent stale progress from auto-starting after cancel
 		return m, nil, true
 	}
 	// 4. 空闲状态：清空输入
@@ -493,6 +466,20 @@ func (m *cliModel) handleTickMsg() []tea.Cmd {
 	}
 	countsChanged := m.bgTaskCount != prevBg || m.agentCount != prevAgent
 
+	// Tick pull: fetch authoritative progress snapshot from the backend.
+	// Push events (from ProgressEventHandler) do NOT carry IterationHistory —
+	// that field is only available from GetActiveProgress, which reads the
+	// agent's iterationHistories map. Without this pull, the CLI would never
+	// receive completed iteration data during a live turn.
+	// The pull is O(1) on the agent side (sync.Map read + slice copy) and
+	// applyProgressSnapshot's Seq check + restoreIterationsFromSnapshot's
+	// count check prevent redundant work.
+	if m.typing && m.channel != nil && m.channel.config.GetActiveProgressFn != nil {
+		if snapshot := m.channel.config.GetActiveProgressFn(m.channelName, m.chatID); snapshot != nil {
+			m.applyProgressSnapshot(snapshot)
+		}
+	}
+
 	if (m.bgTaskCount > 0) || (m.agentCount > 0) || needsSpinnerTick {
 		m.ticker.tick()
 		hasStreamContent := m.progressState.current != nil && m.progressState.current.StreamContent != "" && m.progressState.twVisible < len([]rune(m.progressState.current.StreamContent))
@@ -511,26 +498,16 @@ func (m *cliModel) handleTickMsg() []tea.Cmd {
 		}
 	}
 
-	// Queue flush
-	if m.needFlushQueue && !m.typing && !m.splashState.suLoading && len(m.messageQueue) > 0 {
-		prevTurnID := m.agentTurnID
-		canFlush := m.isTurnReplyReceived(prevTurnID)
-		if !canFlush && m.isTurnDoneProcessed(prevTurnID) && m.turnCancelled {
-			canFlush = true
-		}
-		if !canFlush && m.isTurnDoneProcessed(prevTurnID) {
-			prevFlag := m.getTurnFlag(prevTurnID)
-			if prevFlag != nil && !prevFlag.doneTime.IsZero() && time.Since(prevFlag.doneTime) > 2*time.Second {
-				log.WithField("turnID", prevTurnID).Warn("Queue flush timeout: forcing flush after 2s without reply")
-				canFlush = true
-			}
-		}
-
-		if canFlush {
-			m.needFlushQueue = false
-			m.flushMessageQueue()
-			return cmds
-		}
+	// Queue flush — only flush when reply has been fully processed.
+	// applyProgressSnapshot may set needFlushQueue before the reply arrives;
+	// the tick handler must wait until replyProcessed is true (set by
+	// handleAgentMessage or handleCancelAck) to prevent premature flush
+	// that would start a new turn before the current turn's reply is
+	// attached to the assistant message.
+	if m.needFlushQueue && !m.typing && m.replyProcessed && !m.splashState.suLoading && len(m.messageQueue) > 0 {
+		m.needFlushQueue = false
+		m.flushMessageQueue()
+		return cmds
 	}
 
 	// Idle: placeholder rotation (every 30 ticks = ~3s)
@@ -584,14 +561,14 @@ func (m *cliModel) handleSplashDone() []tea.Cmd {
 // handleApprovalRequest shows the approval dialog for a permission request.
 func (m *cliModel) handleApprovalRequest(msg approvalRequestMsg) (tea.Model, tea.Cmd) {
 	// Permission control: show approval dialog
-	m.panelState.approvalReq = &msg.request
-	m.panelState.approvalCh = msg.resultCh
-	m.panelState.approvalCursor = 0 // default to Approve
-	m.panelState.approvalDenyMode = false
-	m.panelState.approvalDenyTA = textinput.New()
-	m.panelState.approvalDenyTA.Placeholder = "Optional deny reason for LLM"
-	m.panelState.approvalDenyTA.CharLimit = 200
-	m.panelState.approvalDenyTA.SetWidth(60)
+	m.panelState.misc.approvalReq = &msg.request
+	m.panelState.misc.approvalCh = msg.resultCh
+	m.panelState.misc.approvalCursor = 0 // default to Approve
+	m.panelState.misc.approvalDenyMode = false
+	m.panelState.misc.approvalDenyTA = textinput.New()
+	m.panelState.misc.approvalDenyTA.Placeholder = "Optional deny reason for LLM"
+	m.panelState.misc.approvalDenyTA.CharLimit = 200
+	m.panelState.misc.approvalDenyTA.SetWidth(60)
 	m.panelState.mode = "approval"
 	m.rc.valid = false
 	return m, nil

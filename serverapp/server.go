@@ -581,10 +581,10 @@ func Run(args []string) error {
 			cfg.LLM.Provider = defSub.Provider
 			cfg.LLM.BaseURL = defSub.BaseURL
 			cfg.LLM.APIKey = defSub.APIKey
-			cfg.LLM.Model = defSub.Model
+			cfg.LLM.Model = ""
 			cfg.LLM.MaxOutputTokens = defSub.MaxOutputTokens
 			if newClient, err := createAdminLLM(cfg); err == nil {
-				ag.LLMFactory().SetSystemLLM(newClient, defSub.Model)
+				ag.LLMFactory().SetSystemLLM(newClient, "")
 				// max_output_tokens is per-model in DB now — no cache to seed.
 				// thinking_mode is no longer carried on the factory user cache
 				// from the subscription; it is a global user setting seeded below.
@@ -707,14 +707,6 @@ func Run(args []string) error {
 	ag.RegisterTool(tools.NewDownloadFileTool(cfg.Feishu.AppID, cfg.Feishu.AppSecret))
 	ag.RegisterCoreTool(tools.NewWebSearchTool(cfg.TavilyAPIKey))
 
-	// 注册 Logs 工具（仅管理员可用）
-	adminChatID := cfg.Admin.ChatID
-	if adminChatID != "" {
-		logsTool := tools.NewLogsTool(adminChatID)
-		ag.RegisterCoreTool(logsTool)
-		log.WithField("admin_chat_id", adminChatID).Info("Logs tool registered (admin only)")
-	}
-
 	// 初始化事件触发系统（Event Trigger System）
 	triggerSvc := sqlite.NewTriggerService(ag.MultiSession().DB())
 	eventRouter := event.NewRouter(triggerSvc)
@@ -790,6 +782,7 @@ func Run(args []string) error {
 		}
 
 		// 传递 admin chatID 和 web DB（用于 admin 命令如 !webadd）
+		adminChatID := cfg.Admin.ChatID
 		if adminChatID != "" {
 			feishuCh.SetAdminChatID(adminChatID)
 		}

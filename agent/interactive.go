@@ -186,6 +186,26 @@ func (a *Agent) cleanupExpiredSessions() {
 	})
 }
 
+func progressSnapshotWithoutHistory(src *protocol.ProgressEvent) *protocol.ProgressEvent {
+	if src == nil {
+		return nil
+	}
+	clone := *src
+	clone.IterationHistory = nil
+	return &clone
+}
+
+func progressHistoryWithoutNested(hist []protocol.ProgressEvent) []protocol.ProgressEvent {
+	if len(hist) == 0 {
+		return nil
+	}
+	result := make([]protocol.ProgressEvent, len(hist))
+	for i := range hist {
+		result[i] = *progressSnapshotWithoutHistory(&hist[i])
+	}
+	return result
+}
+
 // recordIterationSnapshot appends the previous snapshot to iteration history if the
 // shouldAppend predicate returns true. Uses CAS loop to avoid TOCTOU races on sync.Map.
 func (a *Agent) recordIterationSnapshot(key string, shouldAppend func(prev *protocol.ProgressEvent) bool) {
@@ -193,13 +213,13 @@ func (a *Agent) recordIterationSnapshot(key string, shouldAppend func(prev *prot
 	if !loaded {
 		return
 	}
-	prev := prevSnap.(*protocol.ProgressEvent)
+	prev := progressSnapshotWithoutHistory(prevSnap.(*protocol.ProgressEvent))
 	if !shouldAppend(prev) {
 		return
 	}
 	for {
 		histPtr, _ := a.iterationHistories.LoadOrStore(key, &[]protocol.ProgressEvent{})
-		hist := *histPtr.(*[]protocol.ProgressEvent)
+		hist := progressHistoryWithoutNested(*histPtr.(*[]protocol.ProgressEvent))
 		already := false
 		for _, h := range hist {
 			if h.Iteration == prev.Iteration {
@@ -208,12 +228,33 @@ func (a *Agent) recordIterationSnapshot(key string, shouldAppend func(prev *prot
 			}
 		}
 		if already {
-			return
+			if a.iterationHistories.CompareAndSwap(key, histPtr, &hist) {
+				return
+			}
+			continue
 		}
 		updated := append(hist, *prev)
 		if a.iterationHistories.CompareAndSwap(key, histPtr, &updated) {
 			return
 		}
+	}
+}
+
+// recordIterationAdvanceAndAttachHistory records the previous iteration before
+// sending a newer structured progress event, then attaches the authoritative
+// completed-iteration history to the outgoing payload. This keeps TUI state
+// linear: if current advances from C to D, C is already present in
+// IterationHistory on the same event.
+func (a *Agent) recordIterationAdvanceAndAttachHistory(key string, nextIteration int, payload *protocol.ProgressEvent) {
+	if payload == nil {
+		return
+	}
+	a.recordIterationSnapshot(key, func(prev *protocol.ProgressEvent) bool {
+		return nextIteration > prev.Iteration && prev.Iteration >= 0
+	})
+	if histPtr, ok := a.iterationHistories.Load(key); ok {
+		hist := *histPtr.(*[]protocol.ProgressEvent)
+		payload.IterationHistory = progressHistoryWithoutNested(hist)
 	}
 }
 
@@ -229,15 +270,19 @@ func (a *Agent) wireSubAgentCLIProgress(key, originChatID string, cfg *RunConfig
 	if !ok {
 		return
 	}
+	sender, ok := ch.(channelpkg.ProgressSender)
+	if !ok {
+		return
+	}
+
+	// Keep localCh/remoteCh for structured progress (different payload format).
+	// Stream callbacks use unified sender.
 	var localCh *cli.CLIChannel
 	var remoteCh channelpkg.ProgressSender
 	if cc, ok := ch.(*cli.CLIChannel); ok {
 		localCh = cc
 	} else if rc, ok := ch.(channelpkg.ProgressSender); ok {
 		remoteCh = rc
-	}
-	if localCh == nil && remoteCh == nil {
-		return
 	}
 
 	agentProgressKey := "agent:" + key
@@ -249,7 +294,7 @@ func (a *Agent) wireSubAgentCLIProgress(key, originChatID string, cfg *RunConfig
 
 		cliPayload := &protocol.ProgressEvent{
 			ChatID: agentProgressKey, Seq: s.Seq, Phase: string(s.Phase),
-			Iteration: s.Iteration, Thinking: s.ThinkingContent,
+			Iteration: s.Iteration, Content: s.Content,
 			Reasoning: s.ReasoningContent, HistoryCompacted: s.HistoryCompacted,
 		}
 		for _, t := range s.ActiveTools {
@@ -278,12 +323,14 @@ func (a *Agent) wireSubAgentCLIProgress(key, originChatID string, cfg *RunConfig
 			}
 		}
 
+		a.recordIterationAdvanceAndAttachHistory(agentProgressKey, s.Iteration, cliPayload)
+
 		if localCh != nil {
 			localCh.SendProgress(key, cliPayload)
 		} else if remoteCh != nil {
 			wsPayload := &protocol.ProgressEvent{
 				ChatID: agentProgressKey, Seq: s.Seq, Phase: string(s.Phase),
-				Iteration: s.Iteration, Thinking: s.ThinkingContent,
+				Iteration: s.Iteration, Content: s.Content,
 				Reasoning: s.ReasoningContent, HistoryCompacted: s.HistoryCompacted,
 			}
 			for _, t := range s.ActiveTools {
@@ -311,84 +358,52 @@ func (a *Agent) wireSubAgentCLIProgress(key, originChatID string, cfg *RunConfig
 					MaxOutputTokens: s.TokenUsage.MaxOutputTokens,
 				}
 			}
+			if len(cliPayload.IterationHistory) > 0 {
+				wsPayload.IterationHistory = make([]protocol.ProgressEvent, len(cliPayload.IterationHistory))
+				copy(wsPayload.IterationHistory, cliPayload.IterationHistory)
+			}
 			// Route progress to the agent session's hub key (interactiveKey format)
 			// so the remote CLI client subscribed to this agent session receives it.
 			remoteCh.SendProgress(key, wsPayload)
 		}
 
-		// Save snapshot + track iteration history for mid-session reconnect.
-		a.recordIterationSnapshot(agentProgressKey, func(prev *protocol.ProgressEvent) bool {
-			return s.Iteration > prev.Iteration && prev.Iteration >= 0
-		})
-		a.lastProgressSnapshot.Store(agentProgressKey, cliPayload)
+		a.lastProgressSnapshot.Store(agentProgressKey, progressSnapshotWithoutHistory(cliPayload))
 	}
 
-	// Wire stream callbacks for real-time rendering
+	// Wire stream callbacks — unified SendProgress path with qualified ChatID.
+	// No SendStreamContent: all stream events go through SendProgress with
+	// payload.ChatID = agentProgressKey (qualified). This ensures consistent
+	// ChatID semantics across all ProgressSender implementations.
 	cfg.Stream = true
 	var subAgentProgressSeq atomic.Uint64
 	cfg.ProgressSeq = &subAgentProgressSeq
-	if localCh != nil {
-		cfg.StreamContentFunc = func(content string) {
-			seq := subAgentProgressSeq.Add(1)
-			localCh.SendProgress(key, &protocol.ProgressEvent{ChatID: agentProgressKey, Seq: seq, StreamContent: content})
-			if snap, ok := a.lastProgressSnapshot.Load(agentProgressKey); ok {
-				cp := *snap.(*protocol.ProgressEvent)
-				cp.StreamContent = content
-				a.lastProgressSnapshot.Store(agentProgressKey, &cp)
-			}
+	cfg.StreamContentFunc = func(content string) {
+		a.updateStreamState(agentProgressKey, func(s *protocol.ProgressEvent) {
+			s.StreamContent = content
+		})
+		sender.SendProgress(key, &protocol.ProgressEvent{
+			ChatID:        agentProgressKey,
+			StreamContent: content,
+		})
+	}
+	cfg.StreamReasoningFunc = func(content string) {
+		a.updateStreamState(agentProgressKey, func(s *protocol.ProgressEvent) {
+			s.ReasoningStreamContent = content
+		})
+		sender.SendProgress(key, &protocol.ProgressEvent{
+			ChatID:                 agentProgressKey,
+			ReasoningStreamContent: content,
+		})
+	}
+	cfg.StreamUsageFunc = func(usage *llm.TokenUsage) {
+		if usage == nil || usage.CompletionTokens == 0 {
+			return
 		}
-		cfg.StreamReasoningFunc = func(content string) {
-			seq := subAgentProgressSeq.Add(1)
-			localCh.SendProgress(key, &protocol.ProgressEvent{ChatID: agentProgressKey, Seq: seq, ReasoningStreamContent: content})
-			if snap, ok := a.lastProgressSnapshot.Load(agentProgressKey); ok {
-				cp := *snap.(*protocol.ProgressEvent)
-				cp.ReasoningStreamContent = content
-				a.lastProgressSnapshot.Store(agentProgressKey, &cp)
-			}
-		}
-		cfg.StreamUsageFunc = func(usage *llm.TokenUsage) {
-			if usage == nil || usage.CompletionTokens == 0 {
-				return
-			}
-			seq := subAgentProgressSeq.Add(1)
-			localCh.SendProgress(key, &protocol.ProgressEvent{ChatID: agentProgressKey, Seq: seq, StreamTokens: usage.CompletionTokens})
-			if snap, ok := a.lastProgressSnapshot.Load(agentProgressKey); ok {
-				cp := *snap.(*protocol.ProgressEvent)
-				cp.StreamTokens = usage.CompletionTokens
-				a.lastProgressSnapshot.Store(agentProgressKey, &cp)
-			}
-		}
-	} else if remoteCh != nil {
-		cfg.StreamContentFunc = func(content string) {
-			seq := subAgentProgressSeq.Add(1)
-			remoteCh.SendProgress(key, &protocol.ProgressEvent{ChatID: agentProgressKey, Seq: seq, StreamContent: content})
-			if snap, ok := a.lastProgressSnapshot.Load(agentProgressKey); ok {
-				cp := *snap.(*protocol.ProgressEvent)
-				cp.StreamContent = content
-				a.lastProgressSnapshot.Store(agentProgressKey, &cp)
-			}
-		}
-		cfg.StreamReasoningFunc = func(content string) {
-			seq := subAgentProgressSeq.Add(1)
-			remoteCh.SendProgress(key, &protocol.ProgressEvent{ChatID: agentProgressKey, Seq: seq, ReasoningStreamContent: content})
-			if snap, ok := a.lastProgressSnapshot.Load(agentProgressKey); ok {
-				cp := *snap.(*protocol.ProgressEvent)
-				cp.ReasoningStreamContent = content
-				a.lastProgressSnapshot.Store(agentProgressKey, &cp)
-			}
-		}
-		cfg.StreamUsageFunc = func(usage *llm.TokenUsage) {
-			if usage == nil || usage.CompletionTokens == 0 {
-				return
-			}
-			seq := subAgentProgressSeq.Add(1)
-			remoteCh.SendProgress(key, &protocol.ProgressEvent{ChatID: agentProgressKey, Seq: seq, StreamTokens: usage.CompletionTokens})
-			if snap, ok := a.lastProgressSnapshot.Load(agentProgressKey); ok {
-				cp := *snap.(*protocol.ProgressEvent)
-				cp.StreamTokens = usage.CompletionTokens
-				a.lastProgressSnapshot.Store(agentProgressKey, &cp)
-			}
-		}
+		a.updateStreamState(agentProgressKey, func(s *protocol.ProgressEvent) {
+			s.StreamTokens = usage.CompletionTokens
+		})
+		seq := subAgentProgressSeq.Add(1)
+		sender.SendProgress(key, &protocol.ProgressEvent{ChatID: agentProgressKey, Seq: seq, StreamTokens: usage.CompletionTokens})
 	}
 }
 
@@ -494,7 +509,7 @@ func wireSubAgentProgress(ctx context.Context, subCtx context.Context, cfg *RunC
 					Lines:    lines,
 					Depth:    myDepth,
 					Instance: instance,
-					Thinking: thinking,
+					Content:  thinking,
 				})
 			}
 		}
@@ -718,12 +733,12 @@ func (a *Agent) SpawnInteractiveSession(
 			if notifyMgr != nil {
 				var sb strings.Builder
 				fmt.Fprintf(&sb, "Iteration %d completed.\n", snap.Iteration)
-				if snap.Thinking != "" {
-					thinking := snap.Thinking
+				if snap.Content != "" {
+					thinking := snap.Content
 					if len(thinking) > 200 {
 						thinking = thinking[len(thinking)-200:]
 					}
-					fmt.Fprintf(&sb, "Thinking: %s\n", thinking)
+					fmt.Fprintf(&sb, "Content: %s\n", thinking)
 				}
 				for _, t := range snap.Tools {
 					fmt.Fprintf(&sb, "- %s [%s, %dms]", t.Name, t.Status, t.ElapsedMS)
@@ -1273,7 +1288,7 @@ func (a *Agent) SendToInteractiveSession(
 						Lines:    lines,
 						Depth:    myDepth,
 						Instance: inst,
-						Thinking: thinking,
+						Content:  thinking,
 					})
 				}
 			}
@@ -1747,13 +1762,13 @@ func (a *Agent) InspectInteractiveSession(
 		fmt.Fprintf(&sb, "\n### Recent Iterations (last %d):\n", len(snapshots))
 		for _, snap := range snapshots {
 			fmt.Fprintf(&sb, "\n**Iteration %d**\n", snap.Iteration)
-			if snap.Thinking != "" {
-				thinking := snap.Thinking
+			if snap.Content != "" {
+				thinking := snap.Content
 				if len(thinking) > 300 {
 					thinking = thinking[len(thinking)-300:]
 					thinking = "..." + thinking
 				}
-				fmt.Fprintf(&sb, "Thinking: %s\n", thinking)
+				fmt.Fprintf(&sb, "Content: %s\n", thinking)
 			}
 			if snap.Reasoning != "" {
 				reasoning := snap.Reasoning
@@ -2093,8 +2108,8 @@ func summarizeInteractivePreviewLocked(ia *interactiveAgent) string {
 	}
 	if n := len(ia.iterationHistory); n > 0 {
 		snap := ia.iterationHistory[n-1]
-		if snap.Thinking != "" {
-			return snap.Thinking
+		if snap.Content != "" {
+			return snap.Content
 		}
 		if snap.Reasoning != "" {
 			return snap.Reasoning

@@ -99,10 +99,10 @@ func (m *cliModel) renderTurnBody(
 			})
 		}
 
-		if iter.Thinking != "" {
+		if iter.Content != "" {
 			appendTurnBlock(&sb, &lastKind, &hasBlock, turnBlock{
 				kind: turnBlockContent,
-				text: m.renderTurnContent(iter.Thinking, contentWidth),
+				text: m.renderTurnContent(iter.Content, contentWidth),
 			})
 		}
 
@@ -121,15 +121,15 @@ func (m *cliModel) renderTurnBody(
 	} else if fallbackContent != "" {
 		// Idle state: render the final assistant content after iterations.
 		// Dedup: if any iteration already rendered the same text (via
-		// ThinkingContent → iter.Thinking), skip the fallback to avoid
-		// duplication. iter.Thinking carries the assistant's reply text
-		// (StructuredProgress.ThinkingContent, which is the actual response
+		// Content → iter.Content), skip the fallback to avoid
+		// duplication. iter.Content carries the assistant's reply text
+		// (StructuredProgress.Content, which is the actual response
 		// text, NOT reasoning — the field name is historical).
-		// Exact match only: fallbackContent (msg.content) and iter.Thinking
+		// Exact match only: fallbackContent (msg.content) and iter.Content
 		// originate from the same LLM response, so they should be identical.
 		alreadyRendered := false
 		for i := range iterations {
-			if strings.TrimSpace(iterations[i].Thinking) == strings.TrimSpace(fallbackContent) {
+			if strings.TrimSpace(iterations[i].Content) == strings.TrimSpace(fallbackContent) {
 				alreadyRendered = true
 				break
 			}
@@ -308,7 +308,7 @@ func lastIterationBlockKind(iterations []cliIterationSnapshot) (turnBlockKind, b
 		if len(iter.Tools) > 0 {
 			return turnBlockTools, true
 		}
-		if iter.Thinking != "" {
+		if iter.Content != "" {
 			return turnBlockContent, true
 		}
 		if iter.Reasoning != "" {
@@ -329,7 +329,7 @@ func firstIterationBlockKind(iterations []cliIterationSnapshot) (turnBlockKind, 
 		if iter.Reasoning != "" {
 			return turnBlockReasoning, true
 		}
-		if iter.Thinking != "" {
+		if iter.Content != "" {
 			return turnBlockContent, true
 		}
 		if len(iter.Tools) > 0 {
@@ -383,7 +383,7 @@ func (m *cliModel) liveIterationBlocks(p *protocol.ProgressEvent, width int, fal
 	}
 	displayContent := streamContent
 	if displayContent == "" {
-		displayContent = p.Thinking
+		displayContent = p.Content
 	}
 	if displayContent == "" {
 		displayContent = fallbackContent
@@ -449,6 +449,22 @@ func (m *cliModel) liveIterationBlocks(p *protocol.ProgressEvent, width int, fal
 			hasSpinner = true
 			blocks = append(blocks, turnBlock{kind: turnBlockTools, text: tree})
 		}
+	}
+
+	// Suppress pulse when any tools are present. The pulse spinner is an
+	// "idle indicator" for the thinking phase (no tools, no content). When
+	// tools exist in ANY status (pending, running, done, error, completed),
+	// the iteration is actively working — showing the pulse adds a spurious
+	// line that appears/disappears as tools transition between states.
+	//
+	// Without this, sequential tool execution causes height jitter:
+	//   Tool A running, B pending → hasSpinner=true (running) → no pulse → N lines
+	//   Tool A done, B pending    → hasSpinner=false          → pulse    → N+1 lines
+	//   Tool A done, B running   → hasSpinner=true (running) → no pulse → N lines
+	//   Tool A done, B done      → hasSpinner=false          → pulse    → N+1 lines
+	// This H→H+1→H oscillation is the visible jitter.
+	if len(tools) > 0 {
+		hasSpinner = true
 	}
 
 	if !hasSpinner {
@@ -539,9 +555,6 @@ func oneLineToolLabel(label string) string {
 // renderProgressBlock is a no-op: all progress rendering is now handled
 // inline by renderTurnBody / renderLiveIteration in the streaming message.
 func (m *cliModel) renderProgressBlock() string {
-	m.rc.progressBlock.content = ""
-	m.rc.progressBlock.fp = 0
-	m.rc.progressBlock.lines = nil
 	return ""
 }
 

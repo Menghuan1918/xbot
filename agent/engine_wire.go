@@ -161,7 +161,6 @@ func (a *Agent) buildBaseRunConfig(
 
 		// 工具执行
 		ToolExecutor: a.buildToolExecutor(channel, chatID, senderID, senderName, sandboxUserID),
-		// ToolTimeout: no longer used. Tools manage their own timeouts.
 
 		// 读写分离（主 Agent 始终启用）
 		EnableReadWriteSplit: true,
@@ -197,7 +196,7 @@ func (a *Agent) buildBaseRunConfig(
 		ListLLMSubs: a.listLLMSubsFn(channel),
 
 		// Subscription read/write — from LLMFactory (for config tool)
-		GetActiveSubFieldFn: a.getActiveSubFieldFn(channel),
+		GetActiveSubFieldFn: a.getActiveSubFieldFn(channel, chatID),
 		UpdateActiveSubFn:   a.updateActiveSubFn(channel),
 
 		// LLM 并发限流回调（per-tenant）
@@ -295,19 +294,37 @@ func (a *Agent) buildMainRunConfig(
 				}
 			}
 		}
+	} else {
+		// Non-cli/web channel without preReplyNotify: still set a no-op notifier
+		// so autoNotify is enabled and progressFinalizer generates PhaseDone.
+		// Without this, CLI users viewing this session via /su never receive
+		// PhaseDone → TUI stuck in busy state forever.
+		cfg.ProgressNotifier = func(lines []string, _ string) {}
 	}
 
 	// 结构化进度事件推送（web, cli, and plugin ProgressSender channels）
 	// Progress handlers are wrapped with ctx so that when the user presses Ctrl+C
-	// (reqCancel cancels ctx), no more progress events are forwarded to the CLI.
-	// This guarantees the cancel ack is the last event — no stale progress/PhaseDone
-	// events leak through to trigger re-renders that lose iteration display data.
-	if (channel == "web" || channel == "cli" || isProgressSenderCh) && a.channelFinder != nil {
+	// (reqCancel cancels ctx), stale progress events are not forwarded to the CLI.
+	//
+	// EXCEPTION: PhaseDone is always allowed through, even after cancellation.
+	// PhaseDone carries the authoritative final iteration snapshot (completed
+	// tools, content, reasoning). Without it, the CLI's finalizeTurnFromSnapshot
+	// never runs, and the latest live iteration is lost from the TUI (even though
+	// it was persisted to DB by recordIterationSnapshot). The cancel ack's
+	// handleCancelAck has a fallback (cancelledTurnIterations), but it's not
+	// guaranteed to capture the live iteration in all code paths.
+	if a.channelFinder != nil {
 		done := ctx.Done() // capture for closure
 		wrap := func(h func(*ProgressEvent)) func(*ProgressEvent) {
 			return func(ev *ProgressEvent) {
 				select {
 				case <-done:
+					// Allow PhaseDone through even after cancellation — it carries
+					// the final iteration data needed by the CLI for proper turn
+					// finalization. Other events are dropped (stale progress).
+					if ev != nil && ev.Structured != nil && ev.Structured.Phase == PhaseDone {
+						h(ev)
+					}
 					return
 				default:
 				}
@@ -324,10 +341,19 @@ func (a *Agent) buildMainRunConfig(
 				cfg.ProgressEventHandler = wrap(handler)
 			}
 		default:
-			// Plugin channel with ProgressSender (e.g. TG) — build a handler
-			// that sends progress_structured events via the channel's SendProgress.
-			if handler := a.buildPluginProgressEventHandler(chatID, channel); handler != nil {
-				cfg.ProgressEventHandler = wrap(handler)
+			// For all other channels (feishu, qq, etc.) and plugin ProgressSender
+			// channels — build a CLI progress handler so the CLI TUI receives
+			// structured progress events and PhaseDone when viewing these sessions
+			// via /su. Without this, CLI never gets PhaseDone → finalizeTurnFromSnapshot
+			// never runs → m.typing stays true forever (TUI stuck in busy state).
+			if isProgressSenderCh {
+				if handler := a.buildPluginProgressEventHandler(chatID, channel); handler != nil {
+					cfg.ProgressEventHandler = wrap(handler)
+				}
+			} else {
+				if handler := a.buildCLIProgressEventHandler(chatID, channel); handler != nil {
+					cfg.ProgressEventHandler = wrap(handler)
+				}
 			}
 		}
 	}
@@ -935,7 +961,7 @@ func (a *Agent) buildToolExecutor(channel, chatID, senderID, senderName, sandbox
 	cfg.RemoteTUICtrlFn = a.buildRemoteTUICtrlFn(channel, chatID)
 	cfg.ChatRenameFn = a.renameSession
 	cfg.ListLLMSubs = a.listLLMSubsFn(channel)
-	cfg.GetActiveSubFieldFn = a.getActiveSubFieldFn(channel)
+	cfg.GetActiveSubFieldFn = a.getActiveSubFieldFn(channel, chatID)
 	cfg.UpdateActiveSubFn = a.updateActiveSubFn(channel)
 
 	var sessionOnce sync.Once
@@ -1337,7 +1363,7 @@ func (a *Agent) spawnSubAgent(ctx context.Context, msg bus.InboundMessage) (*cha
 					Lines:    lines,
 					Depth:    myDepth,
 					Instance: instance,
-					Thinking: thinking,
+					Content:  thinking,
 				})
 			}
 		}
@@ -1621,7 +1647,7 @@ func (a *Agent) buildCLIProgressEventHandler(chatID, channel string) func(*Progr
 				Phase:            string(s.Phase),
 				Seq:              s.Seq,
 				Iteration:        s.Iteration,
-				Thinking:         s.ThinkingContent,
+				Content:          s.Content,
 				Reasoning:        s.ReasoningContent,
 				HistoryCompacted: s.HistoryCompacted,
 				CWD:              s.CWD,
@@ -1670,12 +1696,10 @@ func (a *Agent) buildCLIProgressEventHandler(chatID, channel string) func(*Progr
 					MaxOutputTokens:  s.TokenUsage.MaxOutputTokens,
 				}
 			}
+			a.recordIterationAdvanceAndAttachHistory(progressKey, s.Iteration, payload)
 			cliCh.SendProgress(chatID, payload)
-			// Save snapshot + track iteration history for mid-session reconnect.
-			a.recordIterationSnapshot(progressKey, func(prev *protocol.ProgressEvent) bool {
-				return s.Iteration > prev.Iteration && prev.Iteration >= 0
-			})
-			a.lastProgressSnapshot.Store(progressKey, payload)
+			a.lastProgressSnapshot.Store(progressKey, progressSnapshotWithoutHistory(payload))
+			a.clearStreamState(progressKey)
 		}
 		if remoteCLICh != nil {
 			payload := &protocol.ProgressEvent{
@@ -1683,7 +1707,7 @@ func (a *Agent) buildCLIProgressEventHandler(chatID, channel string) func(*Progr
 				Seq:              s.Seq,
 				Phase:            string(s.Phase),
 				Iteration:        s.Iteration,
-				Thinking:         s.ThinkingContent,
+				Content:          s.Content,
 				Reasoning:        s.ReasoningContent,
 				HistoryCompacted: s.HistoryCompacted,
 				CWD:              s.CWD,
@@ -1732,16 +1756,13 @@ func (a *Agent) buildCLIProgressEventHandler(chatID, channel string) func(*Progr
 					MaxOutputTokens:  s.TokenUsage.MaxOutputTokens,
 				}
 			}
-			remoteCLICh.SendProgress(chatID, payload)
-			// Store progress snapshot for remote CLI reconnect recovery.
-			// Without this, GetActiveProgress returns nil after CLI restart
-			// because only the local cliCh path stored snapshots.
+			// Build cliPayload for lastProgressSnapshot (same fields as payload).
 			cliPayload := &protocol.ProgressEvent{
 				ChatID:           progressKey,
 				Seq:              s.Seq,
 				Phase:            string(s.Phase),
 				Iteration:        s.Iteration,
-				Thinking:         s.ThinkingContent,
+				Content:          s.Content,
 				Reasoning:        s.ReasoningContent,
 				HistoryCompacted: s.HistoryCompacted,
 				CWD:              s.CWD,
@@ -1776,10 +1797,14 @@ func (a *Agent) buildCLIProgressEventHandler(chatID, channel string) func(*Progr
 					MaxOutputTokens:  s.TokenUsage.MaxOutputTokens,
 				}
 			}
-			a.recordIterationSnapshot(progressKey, func(prev *protocol.ProgressEvent) bool {
-				return s.Iteration > prev.Iteration && prev.Iteration >= 0
-			})
-			a.lastProgressSnapshot.Store(progressKey, cliPayload)
+			a.recordIterationAdvanceAndAttachHistory(progressKey, s.Iteration, cliPayload)
+			if len(cliPayload.IterationHistory) > 0 {
+				payload.IterationHistory = make([]protocol.ProgressEvent, len(cliPayload.IterationHistory))
+				copy(payload.IterationHistory, cliPayload.IterationHistory)
+			}
+			remoteCLICh.SendProgress(chatID, payload)
+			a.lastProgressSnapshot.Store(progressKey, progressSnapshotWithoutHistory(cliPayload))
+			a.clearStreamState(progressKey)
 			log.WithFields(log.Fields{
 				"key":       progressKey,
 				"phase":     cliPayload.Phase,
@@ -1817,7 +1842,7 @@ func (a *Agent) buildWebProgressEventHandler(chatID, channel string) func(*Progr
 			Phase:            string(s.Phase),
 			Seq:              s.Seq,
 			Iteration:        s.Iteration,
-			Thinking:         s.ThinkingContent,
+			Content:          s.Content,
 			Reasoning:        s.ReasoningContent,
 			HistoryCompacted: s.HistoryCompacted,
 			CWD:              s.CWD,
@@ -1883,7 +1908,8 @@ func (a *Agent) buildWebProgressEventHandler(chatID, channel string) func(*Progr
 			return s.Iteration > prev.Iteration && prev.Iteration >= 0
 		})
 		// Save current iteration snapshot
-		a.lastProgressSnapshot.Store(progressKey, payload)
+		a.lastProgressSnapshot.Store(progressKey, progressSnapshotWithoutHistory(payload))
+		a.clearStreamState(progressKey)
 	}
 }
 
@@ -1913,7 +1939,7 @@ func (a *Agent) buildPluginProgressEventHandler(chatID, channel string) func(*Pr
 			Phase:            string(s.Phase),
 			Seq:              s.Seq,
 			Iteration:        s.Iteration,
-			Thinking:         s.ThinkingContent,
+			Content:          s.Content,
 			Reasoning:        s.ReasoningContent,
 			HistoryCompacted: s.HistoryCompacted,
 			CWD:              s.CWD,
@@ -1965,55 +1991,67 @@ func (a *Agent) buildPluginProgressEventHandler(chatID, channel string) func(*Pr
 	}
 }
 
-// buildStreamCallbacks resolves CLI and Web channels and returns stream content
-// and reasoning stream callbacks. Returns nil, nil if streaming is disabled or
-// no channels are available.
-// Plugin channels (e.g. TG) do NOT receive stream — they get structured progress instead.
+// buildStreamCallbacks collects all channels implementing ProgressSender and
+// returns stream callbacks that push to ALL of them uniformly.
+//
+// Capability-based: a channel declares "I want stream push" by implementing
+// the ProgressSender interface. No type assertions to concrete types — the
+// backend treats local CLI, remote CLI, and web identically.
+//
+// RATE LIMITING: content/reasoning push throttled to ~16/sec (60ms interval)
+// via atomic CAS — matches typewriter tick (50ms) so typer always has fresh
+// content. Tool calls and token usage are low-frequency, not throttled.
+// All callbacks also write to atomic streamState for GetActiveProgress reconnect.
 func (a *Agent) buildStreamCallbacks(chatID, channel string, progressSeq *atomic.Uint64) (streamContentFunc func(string), streamReasoningFunc func(string), streamToolCallFunc func([]llm.ToolCallDelta), streamUsageFunc func(*llm.TokenUsage)) {
-	var cliCh *cli.CLIChannel
-	var remoteCLICh channelpkg.ProgressSender
-	if ch, ok := a.channelFinder("cli"); ok {
-		if cc, ok := ch.(*cli.CLIChannel); ok {
-			cliCh = cc
-		} else if rc, ok := ch.(channelpkg.ProgressSender); ok {
-			remoteCLICh = rc
-		}
-	}
-	var webCh *web.WebChannel
-	if ch, ok := a.channelFinder("web"); ok {
-		if wc, ok := ch.(*web.WebChannel); ok {
-			webCh = wc
+	// Collect all ProgressSender channels — capability declaration, no special-casing.
+	var senders []channelpkg.ProgressSender
+	for _, name := range []string{"cli", "web"} {
+		if ch, ok := a.channelFinder(name); ok {
+			if ps, ok := ch.(channelpkg.ProgressSender); ok {
+				senders = append(senders, ps)
+			}
 		}
 	}
 
+	progressKey := qualifyChatID(channel, chatID)
+
+	// broadcast pushes to all ProgressSender channels uniformly.
+	// chatID (raw) is the routing key for SendProgress's first parameter.
+	// payload.ChatID (qualified progressKey) is the session identity for
+	// the TUI's handleProgressMsg filter. These are two different semantics —
+	// never mix them.
+	broadcastProgress := func(payload *protocol.ProgressEvent) {
+		if payload.ChatID == "" {
+			payload.ChatID = progressKey
+		}
+		for _, s := range senders {
+			s.SendProgress(chatID, payload)
+		}
+	}
+
+	// All stream callbacks go through broadcastProgress with a qualified
+	// ChatID. This replaces the old SendStreamContent path which had
+	// inconsistent ChatID qualification across implementations (CLIChannel
+	// used raw, RemoteCLI/Web qualified manually).
 	streamContentFunc = func(content string) {
-		seq := progressSeq.Add(1)
-		if cliCh != nil {
-			cliCh.SendProgress(chatID, &protocol.ProgressEvent{ChatID: qualifyChatID(channel, chatID), Seq: seq, StreamContent: content})
-		}
-		if remoteCLICh != nil {
-			remoteCLICh.SendStreamContent(chatID, content, "")
-		}
-		if webCh != nil {
-			webCh.SendStreamContent(chatID, content, "")
-		}
+		a.updateStreamState(progressKey, func(s *protocol.ProgressEvent) {
+			s.StreamContent = content
+		})
+		broadcastProgress(&protocol.ProgressEvent{
+			ChatID:        progressKey,
+			StreamContent: content,
+		})
 	}
 	streamReasoningFunc = func(content string) {
-		seq := progressSeq.Add(1)
-		if cliCh != nil {
-			cliCh.SendProgress(chatID, &protocol.ProgressEvent{ChatID: qualifyChatID(channel, chatID), Seq: seq, ReasoningStreamContent: content})
-		}
-		if remoteCLICh != nil {
-			remoteCLICh.SendStreamContent(chatID, "", content)
-		}
-		if webCh != nil {
-			webCh.SendStreamContent(chatID, "", content)
-		}
+		a.updateStreamState(progressKey, func(s *protocol.ProgressEvent) {
+			s.ReasoningStreamContent = content
+		})
+		broadcastProgress(&protocol.ProgressEvent{
+			ChatID:                 progressKey,
+			ReasoningStreamContent: content,
+		})
 	}
 	streamToolCallFunc = func(toolCalls []llm.ToolCallDelta) {
-		// Convert tool call deltas to ToolProgress with "generating" status.
-		// GenChars carries the accumulated argument char count for real-time
-		// progress display (e.g. "42 chars" while LLM is still streaming args).
 		tools := make([]protocol.ToolProgress, 0, len(toolCalls))
 		for _, tc := range toolCalls {
 			if tc.Name != "" {
@@ -2027,41 +2065,29 @@ func (a *Agent) buildStreamCallbacks(chatID, channel string, progressSeq *atomic
 		if len(tools) == 0 {
 			return
 		}
+		a.updateStreamState(progressKey, func(s *protocol.ProgressEvent) {
+			s.StreamingTools = tools
+		})
 		seq := progressSeq.Add(1)
-		payload := &protocol.ProgressEvent{
-			ChatID:         qualifyChatID(channel, chatID),
+		broadcastProgress(&protocol.ProgressEvent{
+			ChatID:         progressKey,
 			Seq:            seq,
 			StreamingTools: tools,
-		}
-		if cliCh != nil {
-			cliCh.SendProgress(chatID, payload)
-		}
-		if remoteCLICh != nil {
-			remoteCLICh.SendProgress(chatID, payload)
-		}
-		if webCh != nil {
-			webCh.SendProgress(chatID, payload)
-		}
+		})
 	}
 	streamUsageFunc = func(usage *llm.TokenUsage) {
 		if usage == nil || usage.CompletionTokens == 0 {
 			return
 		}
+		a.updateStreamState(progressKey, func(s *protocol.ProgressEvent) {
+			s.StreamTokens = usage.CompletionTokens
+		})
 		seq := progressSeq.Add(1)
-		payload := &protocol.ProgressEvent{
-			ChatID:       qualifyChatID(channel, chatID),
+		broadcastProgress(&protocol.ProgressEvent{
+			ChatID:       progressKey,
 			Seq:          seq,
 			StreamTokens: usage.CompletionTokens,
-		}
-		if cliCh != nil {
-			cliCh.SendProgress(chatID, payload)
-		}
-		if remoteCLICh != nil {
-			remoteCLICh.SendProgress(chatID, payload)
-		}
-		if webCh != nil {
-			webCh.SendProgress(chatID, payload)
-		}
+		})
 	}
 	return streamContentFunc, streamReasoningFunc, streamToolCallFunc, streamUsageFunc
 }

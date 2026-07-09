@@ -143,11 +143,6 @@ type RunConfig struct {
 	// SubAgent 使用 nil（defaultToolExecutor 从 cfg.Tools 查找并执行）。
 	ToolExecutor func(ctx context.Context, tc llm.ToolCall) (*tools.ToolResult, error)
 
-	// ToolTimeout is deprecated and no longer used for wrapping tool contexts.
-	// Individual tools (e.g. Shell) manage their own timeouts.
-	// Engine only passes through the parent context (user Ctrl+C cancels it).
-	ToolTimeout time.Duration
-
 	// EnableReadWriteSplit 启用读写分离并行执行（默认 false = 全部串行）
 	EnableReadWriteSplit bool
 
@@ -391,7 +386,7 @@ type RunOutput struct {
 // IterationSnapshot captures the tool summary of a completed iteration.
 type IterationSnapshot struct {
 	Iteration int                     `json:"iteration"`
-	Thinking  string                  `json:"thinking,omitempty"`
+	Content   string                  `json:"content,omitempty"`
 	Reasoning string                  `json:"reasoning,omitempty"`
 	Tools     []IterationToolSnapshot `json:"tools"`
 }

@@ -20,14 +20,8 @@ func TestAskUserViewportPreservesIterations(t *testing.T) {
 
 	// Simulate 2 iterations with tools
 	sendProgress(model, &protocol.ProgressEvent{Phase: "thinking", Iteration: 1})
-	sendProgress(model, &protocol.ProgressEvent{
-		Phase:     "tool_exec",
-		Iteration: 1,
-		CompletedTools: []protocol.ToolProgress{
-			{Name: "Read", Label: "Read go.mod", Status: "done", Elapsed: 500, Iteration: 1},
-		},
-	})
-	sendProgress(model, &protocol.ProgressEvent{Phase: "thinking", Iteration: 2})
+	sendProgressWithHistory(model, &protocol.ProgressEvent{Phase: "thinking", Iteration: 2},
+		protocol.ProgressEvent{Iteration: 1, CompletedTools: []protocol.ToolProgress{{Name: "Read", Label: "Read go.mod", Status: "done", Elapsed: 500, Iteration: 1}}})
 	sendProgress(model, &protocol.ProgressEvent{
 		Phase:     "tool_exec",
 		Iteration: 2,
@@ -94,15 +88,8 @@ func TestAskUserAnswerPreservesViewportIterations(t *testing.T) {
 
 	// Simulate iteration with tools
 	sendProgress(model, &protocol.ProgressEvent{Phase: "thinking", Iteration: 1})
-	sendProgress(model, &protocol.ProgressEvent{
-		Phase:     "tool_exec",
-		Iteration: 1,
-		CompletedTools: []protocol.ToolProgress{
-			{Name: "Read", Label: "Read go.mod", Status: "done", Elapsed: 500, Iteration: 1},
-			{Name: "Grep", Label: "Search pattern", Status: "done", Elapsed: 200, Iteration: 1},
-		},
-	})
-	sendProgress(model, &protocol.ProgressEvent{Phase: "thinking", Iteration: 2})
+	sendProgressWithHistory(model, &protocol.ProgressEvent{Phase: "thinking", Iteration: 2},
+		protocol.ProgressEvent{Iteration: 1, CompletedTools: []protocol.ToolProgress{{Name: "Read", Label: "Read go.mod", Status: "done", Elapsed: 500, Iteration: 1}, {Name: "Grep", Label: "Search pattern", Status: "done", Elapsed: 200, Iteration: 1}}})
 	sendProgress(model, &protocol.ProgressEvent{
 		Phase:     "tool_exec",
 		Iteration: 2,
@@ -152,8 +139,8 @@ func TestAskUserAnswerPreservesViewportIterations(t *testing.T) {
 	}
 
 	// Answer the AskUser question
-	if model.panelState.onAnswer != nil {
-		model.panelState.onAnswer(map[string]string{"q0": "yes"})
+	if model.panelState.askUser.onAnswer != nil {
+		model.panelState.askUser.onAnswer(map[string]string{"q0": "yes"})
 	}
 
 	// After answer: find the pre-AskUser assistant message (non-partial, not the new streaming one)

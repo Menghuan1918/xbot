@@ -491,13 +491,14 @@ func (c *Client) SetUserModel(senderID, subID, model string) error {
 
 // SelectModel sets the per-session (subscription, model) for a chat.
 // Model-first replacement for SwitchModel when the subscription is known.
-func (c *Client) SelectModel(senderID, subID, model, chatID string) error {
+func (c *Client) SelectModel(senderID, channelName, subID, model, chatID string) error {
 	return c.call(MethodSelectModel, struct {
 		SenderID string `json:"sender_id"`
+		Channel  string `json:"channel"`
 		SubID    string `json:"sub_id"`
 		Model    string `json:"model"`
 		ChatID   string `json:"chat_id,omitempty"`
-	}{SenderID: senderID, SubID: subID, Model: model, ChatID: chatID}, nil)
+	}{SenderID: senderID, Channel: channelName, SubID: subID, Model: model, ChatID: chatID}, nil)
 }
 
 // SetDefaultModel sets the user-level default (subscription, model) for new sessions.
@@ -516,6 +517,26 @@ func (c *Client) SetModelEnabled(subID, model string, enabled bool) error {
 		Model   string `json:"model"`
 		Enabled bool   `json:"enabled"`
 	}{SubID: subID, Model: model, Enabled: enabled}, nil)
+}
+
+// RemoveModel permanently deletes a model from subscription_models.
+func (c *Client) RemoveModel(subID, model string) error {
+	return c.call(MethodRemoveModel, struct {
+		SubID string `json:"sub_id"`
+		Model string `json:"model"`
+	}{SubID: subID, Model: model}, nil)
+}
+
+// UpsertModel inserts or updates a model in subscription_models.
+func (c *Client) UpsertModel(subID, model string, maxContext, maxOutput int, apiType, thinkingMode string) error {
+	return c.call(MethodUpsertModel, struct {
+		SubID        string `json:"sub_id"`
+		Model        string `json:"model"`
+		MaxContext   int    `json:"max_context"`
+		MaxOutput    int    `json:"max_output"`
+		APIType      string `json:"api_type"`
+		ThinkingMode string `json:"thinking_mode"`
+	}{SubID: subID, Model: model, MaxContext: maxContext, MaxOutput: maxOutput, APIType: apiType, ThinkingMode: thinkingMode}, nil)
 }
 
 // SetSubscriptionEnabled toggles a subscription's enabled flag (v40). A disabled
@@ -661,9 +682,9 @@ func (c *Client) SetDefaultSubscription(id string, chatID string) error {
 
 // GetSessionSubscription returns the session→subscription mapping from the backend.
 // Returns (subscriptionID, model). Empty strings if no mapping exists.
-func (c *Client) GetSessionSubscription(senderID, chatID string) (subscriptionID, model string, err error) {
+func (c *Client) GetSessionSubscription(senderID, channelName, chatID string) (subscriptionID, model string, err error) {
 	var result map[string]string
-	if err := c.call(MethodGetSessionSubscription, map[string]string{"chat_id": chatID}, &result); err != nil {
+	if err := c.call(MethodGetSessionSubscription, map[string]string{"channel": channelName, "chat_id": chatID}, &result); err != nil {
 		return "", "", err
 	}
 	return result["subscription_id"], result["model"], nil

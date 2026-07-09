@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 	"xbot/channel"
+	"xbot/protocol"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -14,11 +16,22 @@ type mockSubscriptionManager struct {
 	subs      []channel.Subscription
 	defaultID string
 	addCalled bool
+	addListID string
 	setDefID  string
+	setDefIDs []string
 	saveErr   error
 
 	// Track UpdatePerModelConfig calls for assertions.
 	pmcUpdates []mockPMCUpdate
+
+	// Per-session LLM state: chatID → (subID, model). Simulates the DB tenants table.
+	// GetSessionSubscription returns from this map; empty string = "no entry in DB".
+	sessionLLM map[string]sessionLLMEntry
+}
+
+type sessionLLMEntry struct {
+	subID string
+	model string
 }
 
 type mockPMCUpdate struct {
@@ -42,7 +55,11 @@ func (m *mockSubscriptionManager) GetDefault(_ string) (*channel.Subscription, e
 
 func (m *mockSubscriptionManager) Add(sub *channel.Subscription) error {
 	m.addCalled = true
-	m.subs = append(m.subs, *sub)
+	stored := *sub
+	if stored.ID == "" && m.addListID != "" {
+		stored.ID = m.addListID
+	}
+	m.subs = append(m.subs, stored)
 	return m.saveErr
 }
 
@@ -50,8 +67,35 @@ func (m *mockSubscriptionManager) Remove(id string) error {
 	return nil
 }
 
+func (m *mockSubscriptionManager) UpsertModel(id, model string, maxContext, maxOutput int, apiType, thinkingMode string) error {
+	for i := range m.subs {
+		if m.subs[i].ID == id {
+			if m.subs[i].PerModelConfigs == nil {
+				m.subs[i].PerModelConfigs = make(map[string]channel.PerModelConfig)
+			}
+			pmc := m.subs[i].PerModelConfigs[model]
+			pmc.MaxContext = maxContext
+			pmc.MaxOutputTokens = maxOutput
+			pmc.APIType = apiType
+			pmc.Enabled = true
+			m.subs[i].PerModelConfigs[model] = pmc
+		}
+	}
+	return nil
+}
+
+func (m *mockSubscriptionManager) RemoveModel(id, model string) error {
+	for i := range m.subs {
+		if m.subs[i].ID == id {
+			delete(m.subs[i].PerModelConfigs, model)
+		}
+	}
+	return nil
+}
+
 func (m *mockSubscriptionManager) SetDefault(id, chatID string) error {
 	m.setDefID = id
+	m.setDefIDs = append(m.setDefIDs, id)
 	for i := range m.subs {
 		m.subs[i].Active = m.subs[i].ID == id
 	}
@@ -84,7 +128,12 @@ func (m *mockSubscriptionManager) UpdatePerModelConfig(id, model string, pmc cha
 	return nil
 }
 
-func (m *mockSubscriptionManager) GetSessionSubscription(senderID, chatID string) (string, string, error) {
+func (m *mockSubscriptionManager) GetSessionSubscription(senderID, channelName, chatID string) (string, string, error) {
+	if m.sessionLLM != nil {
+		if entry, ok := m.sessionLLM[chatID]; ok {
+			return entry.subID, entry.model, nil
+		}
+	}
 	return "", "", nil
 }
 
@@ -109,6 +158,14 @@ func (m *mockSubscriptionManager) SetSubscriptionEnabled(id string, enabled bool
 		}
 	}
 	return nil
+}
+
+// openLLMPanelForTest opens the panel. Now that data is read synchronously
+// from DB via llmCache.Get(), no drain step is needed — rows are populated
+// immediately on open.
+func openLLMPanelForTest(t *testing.T, m *cliModel) {
+	t.Helper()
+	m.openQuickSwitch("")
 }
 
 // findLLMRowBySubID returns the row index of the subscription with the given ID
@@ -145,10 +202,16 @@ func TestApplyQuickSwitch(t *testing.T) {
 				return map[string]string{"theme": "midnight"}
 			},
 		},
+		modelLister: &fakeModelLister{
+			entries: []protocol.ModelEntry{
+				{SubID: "sub1", Model: "glm-4", Status: "normal"},
+				{SubID: "sub2", Model: "gpt-4.1", Status: "normal"},
+			},
+		},
 	}
 
 	// Open the unified LLM panel.
-	model.openQuickSwitch("")
+	openLLMPanelForTest(t, model)
 	if model.quickSwitchMode != "llm" {
 		t.Fatalf("expected quickSwitchMode=llm, got %s", model.quickSwitchMode)
 	}
@@ -163,12 +226,12 @@ func TestApplyQuickSwitch(t *testing.T) {
 		t.Fatalf("expected cursor=%d (active sub), got %d", idx1, model.quickSwitchCursor)
 	}
 
-	// Move cursor to sub2 and apply — this toggles enabled (true → false).
+	// Move cursor to sub2 and press D to toggle enabled (true → false).
 	model.quickSwitchCursor = idx2
-	model.applyQuickSwitch()
+	model.disableCurrentRow()
 
 	if mgr.subs[1].Enabled {
-		t.Errorf("expected sub2 disabled after toggle, got enabled=true")
+		t.Errorf("expected sub2 disabled after D toggle, got enabled=true")
 	}
 	// No async subscription switch should be queued.
 	for _, c := range model.pendingCmds {
@@ -181,13 +244,37 @@ func TestApplyQuickSwitch(t *testing.T) {
 		t.Errorf("expected panel to stay open, got quickSwitchMode=%q", model.quickSwitchMode)
 	}
 
-	// Toggle again (false → true). Re-resolve the row index (rebuild may have
+	// Toggle again (false → true) via D. Re-resolve the row index (rebuild may have
 	// moved it) and apply.
 	idx2 = findLLMRowBySubID(model, "sub2")
 	model.quickSwitchCursor = idx2
-	model.applyQuickSwitch()
+	model.disableCurrentRow()
 	if !mgr.subs[1].Enabled {
-		t.Errorf("expected sub2 re-enabled after second toggle, got enabled=false")
+		t.Errorf("expected sub2 re-enabled after second D toggle, got enabled=false")
+	}
+
+	// Verify: → key expands sub2 (Enter also expands/collapses).
+	idx2 = findLLMRowBySubID(model, "sub2")
+	model.quickSwitchCursor = idx2
+	model.handleQuickSwitchKey(tea.KeyPressMsg{Code: tea.KeyRight}) // → expand sub2
+	if !model.expandedSubs["sub2"] {
+		t.Error("expected sub2 expanded after → key, got collapsed")
+	}
+	// sub2 models should now be visible in rows.
+	hasSub2Model := false
+	for _, r := range model.quickSwitchRows {
+		if r.kind == qsModel && r.subID == "sub2" {
+			hasSub2Model = true
+			break
+		}
+	}
+	if !hasSub2Model {
+		t.Error("expected sub2 model rows visible after expand")
+	}
+	// ← key collapses sub2
+	model.handleQuickSwitchKey(tea.KeyPressMsg{Code: tea.KeyLeft}) // ← collapse sub2
+	if model.expandedSubs["sub2"] {
+		t.Error("expected sub2 collapsed after ← key, got expanded")
 	}
 }
 
@@ -203,8 +290,8 @@ func TestPanelBoxLeftAlign(t *testing.T) {
 		{Key: "name", Label: "Name", Type: channel.SettingTypeText, Category: "Test"},
 		{Key: "provider", Label: "Provider", Type: channel.SettingTypeText, DefaultValue: "openai", Category: "Test"},
 	}
-	m.panelState.schema = schema
-	m.panelState.values = map[string]string{"provider": "openai"}
+	m.panelState.settings.schema = schema
+	m.panelState.settings.values = map[string]string{"provider": "openai"}
 	m.panelState.cursor = 0
 	m.panelState.mode = "settings"
 
@@ -242,13 +329,13 @@ func TestAskUserQuestionWrapPreservesTextWithScrollbar(t *testing.T) {
 	// Text at exactly this width must survive applyScrollbar without truncation.
 	qWrapWidth := m.askUserQuestionWrapWidth()
 	question := strings.Repeat("a", qWrapWidth-lipgloss.Width("❓ ")+5) // slightly more than 1 line
-	m.panelState.askItems = []askItem{{
+	m.panelState.askUser.askItems = []askItem{{
 		Question: question,
 		Options:  []string{"one", "two", "three", "four", "five", "six"},
 	}}
-	m.panelState.askTab = 0
-	m.panelState.askOptCursor = map[int]int{0: 0}
-	m.panelState.askOptSel = map[int]map[int]bool{0: {}}
+	m.panelState.askUser.askTab = 0
+	m.panelState.askUser.askOptCursor = map[int]int{0: 0}
+	m.panelState.askUser.askOptSel = map[int]map[int]bool{0: {}}
 
 	rendered := m.layoutAskUser("")
 	got := strings.Count(stripANSI(rendered), "a")
@@ -268,13 +355,13 @@ func TestAskUserLongOptionWraps(t *testing.T) {
 	prefixW := 4
 	optWrapW := qWrapWidth - prefixW
 	longOpt := strings.Repeat("x", optWrapW+20) // longer than one line
-	m.panelState.askItems = []askItem{{
+	m.panelState.askUser.askItems = []askItem{{
 		Question: "Pick one",
 		Options:  []string{longOpt, "short"},
 	}}
-	m.panelState.askTab = 0
-	m.panelState.askOptCursor = map[int]int{0: 0}
-	m.panelState.askOptSel = map[int]map[int]bool{0: {}}
+	m.panelState.askUser.askTab = 0
+	m.panelState.askUser.askOptCursor = map[int]int{0: 0}
+	m.panelState.askUser.askOptSel = map[int]map[int]bool{0: {}}
 
 	raw := m.viewAskUserPanel()
 	lines := strings.Split(raw, "\n")
@@ -327,7 +414,7 @@ func TestSubscriptionGenerationGuard(t *testing.T) {
 	model.subGeneration = 5
 
 	// Simulate: settings panel opens with generation 5
-	model.panelState.subGeneration = model.subGeneration
+	model.panelState.settings.subGeneration = model.subGeneration
 
 	// Simulate: user edits some values
 	values := map[string]string{
@@ -344,7 +431,7 @@ func TestSubscriptionGenerationGuard(t *testing.T) {
 
 	// Simulate: the onSubmit callback runs (this is what the guard checks)
 	// After switch, stale subscription-scoped fields should be stripped
-	if model.panelState.subGeneration != model.subGeneration {
+	if model.panelState.settings.subGeneration != model.subGeneration {
 		for k := range values {
 			if isSubscriptionScopedSettingKey(k) {
 				delete(values, k)
@@ -370,7 +457,7 @@ func TestSubscriptionGenerationGuard(t *testing.T) {
 func TestSubscriptionGenerationGuardNoSwitch(t *testing.T) {
 	model := newCLIModel()
 	model.subGeneration = 5
-	model.panelState.subGeneration = 5 // same generation = no switch
+	model.panelState.settings.subGeneration = 5 // same generation = no switch
 
 	values := map[string]string{
 		"llm_provider":      "openai",
@@ -382,7 +469,7 @@ func TestSubscriptionGenerationGuardNoSwitch(t *testing.T) {
 	}
 
 	// Guard should NOT strip anything
-	if model.panelState.subGeneration != model.subGeneration {
+	if model.panelState.settings.subGeneration != model.subGeneration {
 		for k := range values {
 			if isSubscriptionScopedSettingKey(k) {
 				delete(values, k)
@@ -411,7 +498,7 @@ func TestApplyQuickSwitchNilChannel(t *testing.T) {
 	model.subscriptionMgr = mgr
 	// channel is nil!
 
-	model.openQuickSwitch("")
+	openLLMPanelForTest(t, model)
 	if idx := findLLMRowBySubID(model, "sub1"); idx >= 0 {
 		model.quickSwitchCursor = idx
 	}
@@ -443,7 +530,7 @@ func TestApplyQuickSwitchNilSwitchLLM(t *testing.T) {
 		},
 	}
 
-	model.openQuickSwitch("")
+	openLLMPanelForTest(t, model)
 	if idx := findLLMRowBySubID(model, "sub1"); idx >= 0 {
 		model.quickSwitchCursor = idx
 	}
@@ -463,7 +550,7 @@ func TestOpenQuickSwitchWithEmptySubs(t *testing.T) {
 	model := newCLIModel()
 	model.subscriptionMgr = mgr
 
-	model.openQuickSwitch("")
+	openLLMPanelForTest(t, model)
 
 	if model.quickSwitchMode != "llm" {
 		t.Fatalf("expected mode=llm, got %s", model.quickSwitchMode)

@@ -311,12 +311,16 @@ func registerLLMHandlers(t RPCTable, h *RPCContext) {
 	// select_model: model-first per-session selection. Sets (subID, model) for a
 	// chat via the ResolveLLM/SelectModel path.
 	t["select_model"] = rpc1void(func(ctx context.Context, p struct {
-		SubID  string `json:"sub_id"`
-		Model  string `json:"model"`
-		ChatID string `json:"chat_id,omitempty"`
+		SubID   string `json:"sub_id"`
+		Model   string `json:"model"`
+		ChatID  string `json:"chat_id,omitempty"`
+		Channel string `json:"channel,omitempty"`
 	}) error {
 		bizID := rpcBizID(ctx)
-		channel := "cli"
+		channel := p.Channel
+		if channel == "" {
+			channel = "cli"
+		}
 		if p.ChatID == "" {
 			return fmt.Errorf("select_model requires a chat_id (use set_default_model for the user-level default)")
 		}
@@ -336,6 +340,38 @@ func registerLLMHandlers(t RPCTable, h *RPCContext) {
 		Enabled bool   `json:"enabled"`
 	}) error {
 		return h.Ag.LLMFactory().SetModelEnabled(p.SubID, p.Model, p.Enabled)
+	})
+	// remove_model: permanently delete a model from subscription_models.
+	t["remove_model"] = rpc1void(func(ctx context.Context, p struct {
+		SubID string `json:"sub_id"`
+		Model string `json:"model"`
+	}) error {
+		if p.SubID == "" || p.Model == "" {
+			return fmt.Errorf("sub_id and model are required")
+		}
+		svc := h.Ag.LLMFactory().GetSubscriptionSvc()
+		if svc == nil {
+			return fmt.Errorf("subscription service not available")
+		}
+		return svc.RemoveModel(p.SubID, p.Model)
+	})
+	// upsert_model: insert or update a model in subscription_models.
+	t["upsert_model"] = rpc1void(func(ctx context.Context, p struct {
+		SubID        string `json:"sub_id"`
+		Model        string `json:"model"`
+		MaxContext   int    `json:"max_context"`
+		MaxOutput    int    `json:"max_output"`
+		APIType      string `json:"api_type"`
+		ThinkingMode string `json:"thinking_mode"`
+	}) error {
+		if p.SubID == "" || p.Model == "" {
+			return fmt.Errorf("sub_id and model are required")
+		}
+		svc := h.Ag.LLMFactory().GetSubscriptionSvc()
+		if svc == nil {
+			return fmt.Errorf("subscription service not available")
+		}
+		return svc.UpsertModel(p.SubID, p.Model, p.MaxContext, p.MaxOutput, p.APIType, p.ThinkingMode)
 	})
 	// set_subscription_enabled: toggle a subscription's enabled flag (v40). A
 	// disabled subscription stops contributing models to the picker.
@@ -457,12 +493,17 @@ func registerSubscriptionHandlers(t RPCTable, h *RPCContext) {
 	t["list_subscriptions"] = rpc0err(h.listSubscriptions)
 	t["get_default_subscription"] = rpc0err(h.getDefaultSubscription)
 	t["get_session_subscription"] = rpc1(func(ctx context.Context, p struct {
-		ChatID string `json:"chat_id"`
+		ChatID  string `json:"chat_id"`
+		Channel string `json:"channel,omitempty"`
 	}) (any, error) {
 		bizID := rpcBizID(ctx)
+		channel := p.Channel
+		if channel == "" {
+			channel = "cli"
+		}
 		// Read from tenants table (persistent backend source of truth).
 		if h.Ag.MultiSession() != nil && h.Ag.MultiSession().DB() != nil {
-			subID, model, _ := sqlite.NewTenantService(h.Ag.MultiSession().DB()).GetTenantSubscription("cli", p.ChatID)
+			subID, model, _ := sqlite.NewTenantService(h.Ag.MultiSession().DB()).GetTenantSubscription(channel, p.ChatID)
 			if subID != "" {
 				return map[string]string{"subscription_id": subID, "model": model}, nil
 			}
@@ -475,14 +516,16 @@ func registerSubscriptionHandlers(t RPCTable, h *RPCContext) {
 	})
 	t["add_subscription"] = rpc1void(func(ctx context.Context, p struct {
 		Sub struct {
-			Name            string `json:"name"`
-			Provider        string `json:"provider"`
-			BaseURL         string `json:"base_url"`
-			APIKey          string `json:"api_key"`
-			Model           string `json:"model"`
-			Active          bool   `json:"active"`
-			MaxOutputTokens int    `json:"max_output_tokens"`
-			ThinkingMode    string `json:"thinking_mode"`
+			ID              string                             `json:"id"`
+			Name            string                             `json:"name"`
+			Provider        string                             `json:"provider"`
+			BaseURL         string                             `json:"base_url"`
+			APIKey          string                             `json:"api_key"`
+			Model           string                             `json:"model"`
+			Active          bool                               `json:"active"`
+			MaxOutputTokens int                                `json:"max_output_tokens"`
+			ThinkingMode    string                             `json:"thinking_mode"`
+			PerModelConfigs map[string]protocol.PerModelConfig `json:"per_model_configs"`
 		} `json:"sub"`
 	}) error {
 		svc, err := h.requireSubscriptionSvc()
@@ -490,6 +533,7 @@ func registerSubscriptionHandlers(t RPCTable, h *RPCContext) {
 			return err
 		}
 		dbSub := &sqlite.LLMSubscription{
+			ID:              p.Sub.ID,
 			Name:            p.Sub.Name,
 			Provider:        p.Sub.Provider,
 			BaseURL:         p.Sub.BaseURL,
@@ -499,8 +543,17 @@ func registerSubscriptionHandlers(t RPCTable, h *RPCContext) {
 			ThinkingMode:    p.Sub.ThinkingMode,
 			IsDefault:       p.Sub.Active,
 		}
+		if len(p.Sub.PerModelConfigs) > 0 {
+			dbSub.PerModelConfigs = make(map[string]sqlite.PerModelConfig, len(p.Sub.PerModelConfigs))
+			for model, cfg := range p.Sub.PerModelConfigs {
+				dbSub.PerModelConfigs[model] = sqlite.PerModelConfig(cfg)
+			}
+		}
 		dbSub.SenderID = rpcBizID(ctx)
-		return svc.Add(dbSub)
+		if err := svc.Add(dbSub); err != nil {
+			return err
+		}
+		return nil
 	})
 	t["update_subscription"] = rpc1void(h.updateSubscription)
 	t["update_per_model_config"] = rpc1void(func(ctx context.Context, p struct {
@@ -1317,10 +1370,6 @@ func (h *RPCContext) updateSubscription(ctx context.Context, p struct {
 	dbSub.APIType = p.Sub.APIType
 	// MaxOutputTokens: always accept
 	dbSub.MaxOutputTokens = p.Sub.MaxOutputTokens
-	// Model: accept if non-empty
-	if strings.TrimSpace(p.Sub.Model) != "" {
-		dbSub.Model = p.Sub.Model
-	}
 	// Provider: accept only if non-empty AND non-masked
 	if strings.TrimSpace(p.Sub.Provider) != "" && !strings.Contains(p.Sub.Provider, "****") {
 		dbSub.Provider = p.Sub.Provider
@@ -1367,9 +1416,15 @@ func (h *RPCContext) setDefaultSubscription(ctx context.Context, p struct {
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(p.ID) == "" {
+		return fmt.Errorf("subscription id is required")
+	}
 	sub, err := svc.Get(p.ID)
 	if err != nil {
 		return err
+	}
+	if sub == nil {
+		return fmt.Errorf("subscription not found")
 	}
 	if !isAdmin(rpcAuthID(ctx)) && sub.SenderID != bizID {
 		return fmt.Errorf("subscription not found")
@@ -1395,13 +1450,9 @@ func (h *RPCContext) setDefaultSubscription(ctx context.Context, p struct {
 	if err := svc.SetDefault(p.ID); err != nil {
 		return err
 	}
-	// Keep user_default_model in sync so ResolveLLM's user-level fallback sees
-	// the new default subscription for fresh sessions.
-	defaultModel := sub.Model
-	if defaultModel == "" {
-		defaultModel = h.Ag.LLMFactory().PickDefaultModelForSub(sub)
-	}
-	if err := h.Ag.LLMFactory().SetUserDefaultModel(bizID, sub.ID, defaultModel); err != nil {
+	// Set user_default_model with empty model — the user picks a model
+	// from the panel, which updates user_default_model via SelectModel.
+	if err := h.Ag.LLMFactory().SetUserDefaultModel(bizID, sub.ID, ""); err != nil {
 		log.WithError(err).Warn("RPC setDefaultSubscription: SetUserDefaultModel failed")
 	}
 	h.Ag.LLMFactory().InvalidateSender(bizID)

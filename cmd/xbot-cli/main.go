@@ -404,7 +404,7 @@ func loadLLMFromDBSubscription(client *agent.Client, cfg *config.Config) bool {
 	cfg.LLM.Provider = sub.Provider
 	cfg.LLM.BaseURL = sub.BaseURL
 	cfg.LLM.APIKey = sub.APIKey
-	cfg.LLM.Model = sub.Model
+	cfg.LLM.Model = ""
 	cfg.LLM.MaxOutputTokens = client.GetUserMaxOutputTokens(cliSenderID)
 	cfg.LLM.ThinkingMode = client.GetUserThinkingMode(cliSenderID)
 	return true
@@ -510,9 +510,6 @@ func updateActiveSubscription(client *agent.Client, cfg *config.Config, values m
 		if !strings.HasSuffix(key, "****") || len(key) > 20 {
 			sub.APIKey = key
 		}
-	}
-	if v, ok := values["llm_model"]; ok && strings.TrimSpace(v) != "" {
-		sub.Model = strings.TrimSpace(v)
 	}
 	if v, ok := values["llm_base_url"]; ok && strings.TrimSpace(v) != "" {
 		sub.BaseURL = strings.TrimSpace(v)
@@ -1524,7 +1521,7 @@ func main() {
 						}
 						iters = append(iters, channel.HistoryIteration{
 							Iteration: snap.Iteration,
-							Thinking:  snap.Thinking,
+							Content:   snap.Content,
 							Reasoning: snap.Reasoning,
 							Tools:     tools,
 						})
@@ -2027,7 +2024,7 @@ func syncLLMFromActiveSub(cfg *config.Config) {
 			cfg.LLM.Provider = sc.Provider
 			cfg.LLM.BaseURL = sc.BaseURL
 			cfg.LLM.APIKey = sc.APIKey
-			cfg.LLM.Model = sc.Model
+			cfg.LLM.Model = ""
 			cfg.LLM.MaxOutputTokens = sc.MaxOutputTokens
 			cfg.LLM.ThinkingMode = sc.ThinkingMode
 			return
@@ -2236,12 +2233,20 @@ func (m *backendSubscriptionManager) SetModelEnabled(id, model string, enabled b
 	return m.client.SetModelEnabled(id, model, enabled)
 }
 
+func (m *backendSubscriptionManager) RemoveModel(id, model string) error {
+	return m.client.RemoveModel(id, model)
+}
+
+func (m *backendSubscriptionManager) UpsertModel(id, model string, maxContext, maxOutput int, apiType, thinkingMode string) error {
+	return m.client.UpsertModel(id, model, maxContext, maxOutput, apiType, thinkingMode)
+}
+
 func (m *backendSubscriptionManager) SetSubscriptionEnabled(id string, enabled bool) error {
 	return m.client.SetSubscriptionEnabled(id, enabled)
 }
 
-func (m *backendSubscriptionManager) GetSessionSubscription(senderID, chatID string) (string, string, error) {
-	return m.client.GetSessionSubscription(senderID, chatID)
+func (m *backendSubscriptionManager) GetSessionSubscription(senderID, channelName, chatID string) (string, string, error) {
+	return m.client.GetSessionSubscription(senderID, channelName, chatID)
 }
 
 // backendLLMSubscriber implements cli.LLMSubscriber via Backend interface.
@@ -2266,11 +2271,11 @@ func (s *backendLLMSubscriber) SwitchSubscription(senderID string, sub *channel.
 // resolves the owning subscription server-side by model name), this pins the
 // exact subscription the user picked — necessary now that the picker lists the
 // same model name once per subscription that serves it.
-func (s *backendLLMSubscriber) SelectModel(senderID, subID, model, chatID string) error {
+func (s *backendLLMSubscriber) SelectModel(senderID, channelName, subID, model, chatID string) error {
 	if senderID == "" {
 		senderID = cliSenderID
 	}
-	return s.client.SelectModel(senderID, subID, model, chatID)
+	return s.client.SelectModel(senderID, channelName, subID, model, chatID)
 }
 
 func (s *backendLLMSubscriber) GetDefaultModel() string {

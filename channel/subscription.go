@@ -39,7 +39,7 @@ type DailyTokenUsage struct {
 // iterSnapshot mirrors agent.IterationSnapshot for JSON unmarshaling Detail field.
 type iterSnapshot struct {
 	Iteration int            `json:"iteration"`
-	Thinking  string         `json:"thinking,omitempty"`
+	Content   string         `json:"content,omitempty"`
 	Reasoning string         `json:"reasoning,omitempty"`
 	Tools     []iterToolSnap `json:"tools"`
 }
@@ -176,7 +176,7 @@ func ConvertMessagesToHistory(msgs []llm.ChatMessage) []HistoryMessage {
 		if len(curIterTools) > 0 || curIterThinking != "" || curIterReasoning != "" {
 			pendingIters = append(pendingIters, HistoryIteration{
 				Iteration: curIterIdx,
-				Thinking:  curIterThinking,
+				Content:   curIterThinking,
 				Reasoning: curIterReasoning,
 				Tools:     curIterTools,
 			})
@@ -260,7 +260,7 @@ func ConvertMessagesToHistory(msgs []llm.ChatMessage) []HistoryMessage {
 						}
 						iters = append(iters, HistoryIteration{
 							Iteration: snap.Iteration,
-							Thinking:  snap.Thinking,
+							Content:   snap.Content,
 							Reasoning: snap.Reasoning,
 							Tools:     toolList,
 						})
@@ -329,11 +329,21 @@ func ConvertMessagesToHistory(msgs []llm.ChatMessage) []HistoryMessage {
 					history[len(history)-1].Content = m.Content
 					history[len(history)-1].Timestamp = m.Timestamp
 				} else {
-					history = append(history, HistoryMessage{
+					hm := HistoryMessage{
 						Role:      "assistant",
 						Content:   m.Content,
 						Timestamp: m.Timestamp,
-					})
+					}
+					// For turns with no tools, Detail is not set (snapshotCompletedIteration
+					// is only called from executeToolCalls). ReasoningContent is on the
+					// ChatMessage but would be lost without wrapping it in an iteration.
+					if m.ReasoningContent != "" {
+						hm.Iterations = []HistoryIteration{{
+							Iteration: 0,
+							Reasoning: m.ReasoningContent,
+						}}
+					}
+					history = append(history, hm)
 				}
 			}
 		default:
