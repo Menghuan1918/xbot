@@ -5,7 +5,7 @@
  * Responsibilities:
  *   - load history via /api/history and normalize rows into ChatMessage[]
  *     (parsing the pre-parsed `iterations` into WebIteration snapshots)
- *   - expose send / cancel / upload so the input area can drive the WS channel
+ *   - expose send / cancel / upload through the REST connection adapter
  *   - append a committed assistant message when useProgressStream finalizes a
  *     run (onAssistantComplete), and echo user messages on send
  *   - dedup messages by (turnID, role) when turnID > 0 — prevents duplicate
@@ -17,6 +17,7 @@
  * finalize), never per token.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { toast } from 'sonner'
 
 import {
   fetchHistory,
@@ -27,6 +28,7 @@ import {
 } from '@/components/agent/api'
 import { normalizeWebIteration } from '@/components/agent/normalize'
 import { dedupMessages } from '@/components/agent/progressStore'
+import { messagesCache } from '@/lib/webCache'
 import type { WSConnection } from '@/types/ws'
 import type { ChatMessage, WebIteration } from '@/types/shared'
 import type { WSMessage } from '@/types/shared'
@@ -38,7 +40,7 @@ interface UseChatMessagesOptions {
   channel?: string
   /** If true, history is (re)loaded whenever chatID changes. */
   enabled?: boolean
-  /** The WS connection (injected from DockviewContext for isolated roots). */
+  /** The REST + SSE connection (injected from DockviewContext for isolated roots). */
   ws: WSConnection
   /** Whether this panel should consume live WS events. History RPC loading remains enabled separately. */
   liveEventsEnabled?: boolean
@@ -157,7 +159,6 @@ interface AgentSessionDump {
   iterations?: unknown[]
 }
 
-const messageCache = new Map<string, ChatMessage[]>()
 const loadedMessageKeys = new Set<string>()
 const messageCacheSeq = new Map<string, number>()
 let globalReloadSeq = 0
@@ -166,7 +167,7 @@ function commitMessageCache(key: string, rows: ChatMessage[], seq = ++globalRelo
   const latest = messageCacheSeq.get(key) ?? 0
   if (seq < latest) return false
   messageCacheSeq.set(key, seq)
-  messageCache.set(key, rows)
+  messagesCache.set(key, rows)
   return true
 }
 
@@ -256,9 +257,11 @@ export function useChatMessages({
   const reload = useCallback(async () => {
     const gen = ++reloadGenRef.current
     const globalSeq = ++globalReloadSeq
-    const reloadKey = `${channel}:${chatID ?? ''}:${subAgentRole ?? ''}:${subAgentInstance ?? ''}:${agentChatID ?? ''}`
+    const reloadKey = subAgentRole || agentChatID
+      ? `${channel}:${chatID ?? ''}:${subAgentRole ?? ''}:${subAgentInstance ?? ''}:${agentChatID ?? ''}`
+      : (chatID ?? `${channel}:current`)
     const sameTarget = lastReloadKeyRef.current === reloadKey
-    const cachedRows = messageCache.get(reloadKey)
+    const cachedRows = messagesCache.get(reloadKey)
     if (!sameTarget) {
       setMessages(cachedRows ?? [])
     }
@@ -329,7 +332,7 @@ export function useChatMessages({
       // waiting for this response (rapid session switch or HistoryCompacted
       // during an in-flight reload).
       if (gen !== reloadGenRef.current) return
-      // Store last_seq for WS reconnect incremental replay.
+      // Store last_seq for SSE deduplication and reconnect replay.
       if (data.last_seq) ws.setLastSeq(data.last_seq)
       const rows = data.messages ?? []
       const parsed = parseHistoryMessages(rows)
@@ -369,7 +372,7 @@ export function useChatMessages({
     if (!chatID) return
     const off = ws.onMessage((msg: WSMessage) => {
       if (msg.chat_id && chatIDRef.current && msg.chat_id !== chatIDRef.current) return
-      if (msg.type !== 'user_echo') return
+      if (msg.type !== 'user_echo' && msg.type !== 'inject_user') return
       const content = msg.content ?? msg.original_content ?? ''
       if (!content) return
       const id = `echo-${msg.ts ?? Date.now()}-${echoSeq++}`
@@ -379,12 +382,12 @@ export function useChatMessages({
         // Replace the most recent optimistic user message (id starts with
         // 'user-') that was created within 5 seconds — prevents replacing an
         // older user message when echoes arrive out of order.
-        const lastUserIdx = prev.findLastIndex((m) => {
+        const lastUserIdx = msg.type === 'user_echo' ? prev.findLastIndex((m) => {
           if (!m.id.startsWith('user-')) return false
           const match = m.id.match(/^user-(\d+)-/)
           if (!match) return false
           return now - parseInt(match[1], 10) < 5000
-        })
+        }) : -1
         const newMsg: ChatMessage = {
           id,
           role: 'user',
@@ -414,8 +417,10 @@ export function useChatMessages({
       const text = content.trim()
       if (!text && !attachments?.uploadKeys.length) return
       const resetCommand = text === '/new' && !attachments?.uploadKeys.length
+      let optimisticID: string | null = null
       if (!resetCommand) {
         const id = `user-${Date.now()}-${echoSeq++}`
+        optimisticID = id
         // Optimistically show normal user messages. /new waits for
         // session_reset so the old history does not flash with a visible
         // slash-command row.
@@ -435,7 +440,8 @@ export function useChatMessages({
           return next
         })
       }
-      ws.send({
+      const sendCacheKey = lastReloadKeyRef.current
+      void ws.send({
         type: 'message',
         channel,
         chat_id: chatIDRef.current ?? undefined,
@@ -444,13 +450,26 @@ export function useChatMessages({
         file_names: attachments?.fileNames,
         file_sizes: attachments?.fileSizes,
         file_mimes: attachments?.fileMimes,
+      }).catch((error: unknown) => {
+        if (optimisticID) {
+          const failedID = optimisticID
+          setMessages((prev) => {
+            const next = prev.filter((message) => message.id !== failedID)
+            if (sendCacheKey) messagesCache.set(sendCacheKey, next)
+            return next
+          })
+        }
+        toast.error(error instanceof Error ? error.message : 'message send failed')
       })
     },
     [ws, channel, cacheCurrentMessages],
   )
 
   const cancel = useCallback(() => {
-    ws.send({ type: 'cancel', channel, chat_id: chatIDRef.current ?? undefined })
+    void ws.send({ type: 'cancel', channel, chat_id: chatIDRef.current ?? undefined })
+      .catch((error: unknown) => {
+        toast.error(error instanceof Error ? error.message : 'cancel failed')
+      })
   }, [ws, channel])
 
   const upload = useCallback(async (file: File) => uploadFile(file), [])

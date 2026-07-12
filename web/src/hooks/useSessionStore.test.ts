@@ -9,6 +9,7 @@ vi.mock('@/hooks/useWSConnection', () => ({
   useWSConnection: () => ({
     connected: true,
     subscribe: vi.fn(),
+    disconnect: vi.fn(),
     rpc: vi.fn(),
     onSession: vi.fn((handler) => {
       sessionHandler = handler
@@ -16,6 +17,36 @@ vi.mock('@/hooks/useWSConnection', () => ({
     }),
     onMessage: vi.fn(() => vi.fn()),
   }),
+}))
+
+vi.mock('@/lib/api', () => ({
+  postAPI: async (endpoint: string, body: Record<string, unknown> = {}) => {
+    let target = endpoint
+    let method = 'POST'
+    if (endpoint === '/api/session-tree') {
+      let response = await fetch('/api/chats', { method: 'POST', body: JSON.stringify(body) })
+      if (!response.ok) response = await fetch('/api/session-tree', { method: 'POST', body: JSON.stringify(body) })
+      const raw = await response.json()
+      const data = raw.data ?? raw
+      return {
+        sessions: data.sessions ?? data.chats ?? [],
+        orphan_subagents: data.orphan_subagents ?? [],
+      }
+    }
+    if (endpoint === '/api/chats/create') target = '/api/chats'
+    if (endpoint.endsWith('/switch')) {
+      const channel = typeof body.channel === 'string' ? body.channel : 'web'
+      target = `${endpoint}?channel=${encodeURIComponent(channel)}`
+    }
+    if (endpoint.endsWith('/delete')) {
+      target = endpoint.slice(0, -'/delete'.length)
+      method = 'DELETE'
+    }
+    const response = await fetch(target, { method, body: JSON.stringify(body) })
+    if (!response.ok) throw new Error(`request failed: ${response.status}`)
+    const raw = await response.json()
+    return raw.data ?? raw
+  },
 }))
 
 beforeEach(() => {
@@ -1366,5 +1397,28 @@ describe('normalizeSessionTree', () => {
 
     expect(result.current.subAgents).toEqual([])
     expect(result.current.sessions[0].children ?? []).toEqual([])
+  })
+
+  it('renders the cached session tree before the background refresh resolves', () => {
+    localStorage.setItem('xbot_session_tree', JSON.stringify({
+      version: 1,
+      sessions: [{
+        chatID: 'cached-chat',
+        channel: 'web',
+        label: 'Cached chat',
+        lastActive: '2026-07-13T00:00:00Z',
+        preview: 'cached preview',
+        status: 'idle',
+        isCurrent: true,
+      }],
+      subAgents: [],
+    }))
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+
+    const { result, unmount } = renderHook(() => useSessionStoreImpl())
+
+    expect(result.current.sessions.map((session) => session.chatID)).toEqual(['cached-chat'])
+    expect(result.current.activeSession).toEqual({ channel: 'web', chatID: 'cached-chat' })
+    unmount()
   })
 })

@@ -202,7 +202,9 @@ func (wc *WebChannel) rpcIdentityFromRequest(r *http.Request) RPCIdentity {
 
 var nonAdminRESTRPCMethods = map[string]struct{}{
 	"get_context_mode":                   {},
+	"set_cwd":                            {},
 	"get_settings":                       {},
+	"list_command_names":                 {},
 	"set_setting":                        {},
 	"get_default_model":                  {},
 	"get_user_max_context":               {},
@@ -226,6 +228,7 @@ var nonAdminRESTRPCMethods = map[string]struct{}{
 	"get_agent_session_dump":             {},
 	"get_agent_session_dump_by_full_key": {},
 	"get_session_messages":               {},
+	"get_active_progress":                {},
 	"kill_bg_task":                       {},
 	"plugin_widgets":                     {},
 }

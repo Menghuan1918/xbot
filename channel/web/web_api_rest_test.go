@@ -141,6 +141,27 @@ func TestRESTRPCDispatchesThroughCallback(t *testing.T) {
 	}
 }
 
+func TestRESTRPCAllowsFrontendRecoveryMethods(t *testing.T) {
+	methods := []string{"get_active_progress", "list_command_names", "set_cwd"}
+	for _, wantMethod := range methods {
+		t.Run(wantMethod, func(t *testing.T) {
+			wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
+			wc.SetRPCHandler(func(method string, _ json.RawMessage, _ RPCIdentity) (json.RawMessage, error) {
+				if method != wantMethod {
+					t.Fatalf("method = %q, want %q", method, wantMethod)
+				}
+				return json.RawMessage(`{}`), nil
+			})
+			body := []byte(`{"method":"` + wantMethod + `","params":{}}`)
+			recorder := httptest.NewRecorder()
+			wc.handleRPC(recorder, authedAPIRequestFor(http.MethodPost, "/api/rpc", body, "web-2", 2))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestRESTRPCRejectsUnsafeNonAdminMethods(t *testing.T) {
 	wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
 	dispatched := false

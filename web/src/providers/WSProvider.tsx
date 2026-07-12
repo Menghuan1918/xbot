@@ -1,11 +1,9 @@
 /**
- * WSProvider — owns one WSConnectionImpl and exposes it via context.
+ * WSProvider — compatibility-named provider for the REST + SSE connection.
  *
- * Wrap the app once (inside ThemeProvider/I18nProvider). The connection
- * auto-connects on mount and auto-reconnects on drop; children read it through
- * `useWSConnection()`. The provider re-renders on `connected` flips so the UI
- * can show live status, but the underlying connection instance is stable
- * across renders.
+ * Wrap the app once (inside ThemeProvider/I18nProvider). The active session
+ * opens the EventSource; native reconnects update `connected` while the
+ * underlying connection instance remains stable across renders.
  */
 import {
   createContext,
@@ -16,22 +14,22 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { WSConnectionImpl } from '@/providers/wsConnection'
+import { SSEConnectionImpl } from '@/providers/sseConnection'
 import type { WSConnection } from '@/types/ws'
 
 export const WSContext = createContext<WSConnection | undefined>(undefined)
 
 export function WSProvider({ children }: { children: ReactNode }) {
   // One connection for the provider's lifetime; never recreated on re-render.
-  const connRef = useRef<WSConnectionImpl | null>(null)
+  const connRef = useRef<SSEConnectionImpl | null>(null)
   if (connRef.current === null) {
-    connRef.current = new WSConnectionImpl()
+    connRef.current = new SSEConnectionImpl()
   }
   const conn = connRef.current
 
   // Re-render on connection-state flips so consumers can read live status.
   const [connected, setConnected] = useState(conn.connected)
-  const [, setChatID] = useState<string | null>(conn.chatID)
+  const [chatID, setChatID] = useState<string | null>(conn.chatID)
 
   useEffect(() => {
     const offConn = conn.onConnectionChange(setConnected)
@@ -56,19 +54,23 @@ export function WSProvider({ children }: { children: ReactNode }) {
     () => ({
       connected,
       send: (msg) => conn.send(msg),
-      subscribe: (id) => {
-        conn.subscribe(id)
+      subscribe: (id, channel) => {
+        conn.subscribe(id, channel)
         setChatID(id)
       },
+      disconnect: () => {
+        conn.disconnect()
+        setChatID(null)
+      },
       rpc: (method, params) => conn.rpc(method, params),
-      chatID: conn.chatID,
+      chatID,
       setLastSeq: (seq: number) => conn.setLastSeq(seq),
       onMessage: conn.onMessage,
       onSession: conn.onSession,
       onProgress: conn.onProgress,
       onConnectionChange: conn.onConnectionChange,
     }),
-    [conn, connected],
+    [chatID, conn, connected],
   )
 
   return <WSContext.Provider value={value}>{children}</WSContext.Provider>

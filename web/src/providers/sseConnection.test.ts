@@ -1,0 +1,215 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { postAPI } from '@/lib/api'
+import { lastSeqCache, progressSnapshotCache } from '@/lib/webCache'
+import { SSEConnectionImpl, SSE_EVENT_TYPES } from './sseConnection'
+import type { WSMessage } from '@/types/shared'
+
+vi.mock('@/lib/api', () => ({
+  postAPI: vi.fn(),
+}))
+
+const postAPIMock = vi.mocked(postAPI)
+
+class MockEventSource {
+  static instances: MockEventSource[] = []
+
+  readonly url: string
+  readyState = 0
+  onopen: ((event: Event) => void) | null = null
+  onerror: ((event: Event) => void) | null = null
+  closed = false
+  listeners = new Map<string, Set<(event: MessageEvent<string>) => void>>()
+
+  constructor(url: string | URL) {
+    this.url = String(url)
+    MockEventSource.instances.push(this)
+  }
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject): void {
+    const handler = listener as (event: MessageEvent<string>) => void
+    const handlers = this.listeners.get(type) ?? new Set()
+    handlers.add(handler)
+    this.listeners.set(type, handlers)
+  }
+
+  close(): void {
+    this.closed = true
+    this.readyState = 2
+  }
+
+  open(): void {
+    this.readyState = 1
+    this.onopen?.(new Event('open'))
+  }
+
+  fail(): void {
+    this.readyState = 0
+    this.onerror?.(new Event('error'))
+  }
+
+  emit(type: string, message: WSMessage, lastEventId = String(message.seq ?? '')): void {
+    const event = new MessageEvent<string>(type, {
+      data: JSON.stringify(message),
+      lastEventId,
+    })
+    this.listeners.get(type)?.forEach((handler) => handler(event))
+  }
+}
+
+beforeEach(() => {
+  MockEventSource.instances = []
+  lastSeqCache.clear()
+  progressSnapshotCache.clear()
+  postAPIMock.mockReset()
+  postAPIMock.mockResolvedValue({})
+  vi.stubGlobal('EventSource', MockEventSource)
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
+
+describe('SSEConnectionImpl', () => {
+  it('registers all contract event types and closes the prior chat stream', () => {
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+    const first = MockEventSource.instances[0]
+
+    expect([...first.listeners.keys()]).toEqual(SSE_EVENT_TYPES)
+    expect(first.url).toBe('/api/sse?chat_id=chat-a')
+
+    connection.subscribe('chat-b', 'cli')
+    expect(first.closed).toBe(true)
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b')
+    connection.dispose()
+  })
+
+  it('deduplicates sequences and records structured progress', () => {
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+
+    source.emit('text', { type: 'text', seq: 3, content: 'first' })
+    source.emit('text', { type: 'text', seq: 3, content: 'duplicate' })
+    source.emit('progress_structured', {
+      type: 'progress_structured',
+      seq: 4,
+      progress: { phase: 'tool' },
+    })
+
+    expect(received.map((message) => message.seq)).toEqual([3, 4])
+    expect(lastSeqCache.get('chat-a')).toBe(4)
+    expect(progressSnapshotCache.get('chat-a')).toMatchObject({ phase: 'tool' })
+    connection.dispose()
+  })
+
+  it('retries message POST with exponential delays at most three attempts', async () => {
+    vi.useFakeTimers()
+    postAPIMock
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({})
+    const connection = new SSEConnectionImpl()
+
+    const sending = connection.send({ type: 'message', chat_id: 'chat-a', content: 'hello' })
+    await vi.runAllTimersAsync()
+    await expect(sending).resolves.toBeUndefined()
+
+    expect(postAPIMock).toHaveBeenCalledTimes(3)
+    expect(postAPIMock).toHaveBeenLastCalledWith('/api/message', expect.objectContaining({
+      chat_id: 'chat-a',
+      content: 'hello',
+    }))
+    connection.dispose()
+  })
+
+  it('polls session status after an SSE error and stops when SSE reopens', async () => {
+    vi.useFakeTimers()
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.fail()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(postAPIMock).toHaveBeenCalledWith('/api/session/status', {
+      channel: 'web',
+      chat_id: 'chat-a',
+    })
+
+    postAPIMock.mockClear()
+    source.open()
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(postAPIMock).not.toHaveBeenCalledWith('/api/session/status', expect.anything())
+    connection.dispose()
+  })
+
+  it('requests active progress when reconnect replay is empty', async () => {
+    vi.useFakeTimers()
+    postAPIMock.mockImplementation(async (endpoint: string) => {
+      if (endpoint === '/api/rpc') return { phase: 'tool', iteration: 2 }
+      return {}
+    })
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    source.fail()
+    source.open()
+
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(postAPIMock).toHaveBeenCalledWith('/api/rpc', {
+      method: 'get_active_progress',
+      params: { channel: 'web', chat_id: 'chat-a' },
+    })
+    expect(received.at(-1)).toMatchObject({
+      type: 'progress_structured',
+      progress: { phase: 'tool', iteration: 2 },
+    })
+    connection.dispose()
+  })
+
+  it('requests active progress when an event sequence gap reveals replay overflow', async () => {
+    postAPIMock.mockImplementation(async (endpoint: string) => {
+      if (endpoint === '/api/rpc') return { phase: 'tool', iteration: 3 }
+      return {}
+    })
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    lastSeqCache.set('chat-a', 1)
+
+    source.emit('text', { type: 'text', seq: 4, content: 'after gap' })
+    await Promise.resolve()
+
+    expect(postAPIMock).toHaveBeenCalledWith('/api/rpc', {
+      method: 'get_active_progress',
+      params: { channel: 'web', chat_id: 'chat-a' },
+    })
+    connection.dispose()
+  })
+
+  it('accepts a lower sequence after the server sequence restarts', () => {
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    lastSeqCache.set('chat-a', 9)
+
+    source.emit('text', { type: 'text', seq: 1, content: 'after restart' })
+
+    expect(received).toHaveLength(1)
+    expect(lastSeqCache.get('chat-a')).toBe(1)
+    connection.dispose()
+  })
+})

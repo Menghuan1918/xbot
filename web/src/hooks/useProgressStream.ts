@@ -1,5 +1,5 @@
 /**
- * useProgressStream — subscribes a ProgressStore to the WS event stream for one
+ * useProgressStream — subscribes a ProgressStore to the SSE event stream for one
  * chatID and exposes the live progress + streaming-preview message (Spec 3/4).
  *
  * Event mapping (see protocol/ws.go, channel/web/web.go):
@@ -34,6 +34,7 @@ import {
 import type { WSConnection } from '@/types/ws'
 import type {
   ProgressSnapshot,
+  ProgressEvent,
   WebIteration,
   ChatMessage,
   TodoItem,
@@ -41,6 +42,7 @@ import type {
 import { EMPTY_PROGRESS_SNAPSHOT } from '@/types/shared'
 import type { HistProgress } from '@/components/agent/api'
 import type { WSMessage } from '@/types/shared'
+import { progressSnapshotCache } from '@/lib/webCache'
 
 interface UseProgressStreamOptions {
   /** Chat ID this stream tracks (events for other chats are ignored). */
@@ -60,7 +62,7 @@ interface UseProgressStreamOptions {
    * Spec 4 §3.8.
    */
   initialProgress?: HistProgress | null
-  /** The WS connection (injected from DockviewContext for isolated roots). */
+  /** The realtime connection (injected from DockviewContext for isolated roots). */
   ws: WSConnection
   /** Disable subscriptions for read-only panes such as SubAgent history tabs. */
   disabled?: boolean
@@ -145,15 +147,16 @@ export function useProgressStream({
     store.getSnapshot,
   )
 
-  // Reset the store immediately when chatID changes — before history loads.
-  // This prevents stale progress from the previous session from leaking into
-  // the new one (Spec 5 §2.1).
+  // Switch immediately to this chat's in-memory snapshot while history refreshes.
   useEffect(() => {
+    store.reset()
     if (disabled) {
-      store.reset()
       return
     }
-    store.reset()
+    const cached = chatID ? progressSnapshotCache.get(chatID) : undefined
+    if (cached?.phase && cached.phase !== 'done') {
+      store.replace(historyProgressToLive(cached))
+    }
   }, [store, chatID, disabled])
 
   // Hydrate from history when initialProgress changes (after reload completes).
@@ -166,9 +169,10 @@ export function useProgressStream({
     const live = historyProgressToLive(initialProgress)
     // Only hydrate if we got something meaningful (non-empty snapshot)
     if (live.phase) {
+      if (chatID) progressSnapshotCache.set(chatID, initialProgress as ProgressEvent)
       store.replace(live)
     }
-  }, [store, initialProgress, disabled])
+  }, [store, initialProgress, disabled, chatID])
 
   // Dispose on unmount.
   useEffect(() => {
@@ -178,7 +182,7 @@ export function useProgressStream({
     }
   }, [store])
 
-  // Subscribe to WS messages.
+  // Subscribe to SSE messages.
   useEffect(() => {
     if (disabled) return
     const offMessage = ws.onMessage((msg: WSMessage) => {
@@ -262,7 +266,8 @@ function handleProgressMessage(
       return
     }
 
-    case 'progress_structured': {
+    case 'progress_structured':
+    case 'sync_progress': {
       const p = msg.progress
       if (!p) return
       if (p.history_compacted) {

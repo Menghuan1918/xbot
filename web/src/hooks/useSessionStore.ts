@@ -2,31 +2,32 @@
  * useSessionStore — session list state + data layer (Spec 3).
  *
  * Responsibilities:
- *   - fetch & refresh the chat tree (GET /api/chats, web + cli + SubAgent children for admin)
- *   - derive session status from WS events:
+ *   - render the cached tree, then refresh it with POST /api/session-tree
+ *   - derive session status from SSE events:
  *       session.action 'busy'   → running
  *       session.action 'idle'   → idle
  *       ask_user message        → waiting_input
  *       (any error msg)         → error  (best-effort; not in scope UI)
  *   - star persistence (localStorage, Spec 3 §3.3)
- *   - create / switch / rename / delete via REST, with WS subscribe
+ *   - create / switch / rename / delete via REST, with EventSource switching
  *   - CWD error handling with toast (Child 5)
  *
  * Backend contracts (channel/web/web_api.go):
- *   GET    /api/chats                        → { ok, chats: UserChatWithPreview[] } with SubAgent children attached
- *   POST   /api/chats {label}                → { ok, chat_id }
- *   POST   /api/chats/{id}/switch[?channel=]  → { ok, chat_id, channel }
+ *   POST   /api/session-tree                 → { ok, data: { sessions } }
+ *   POST   /api/chats/create {label}         → { ok, data: { chat_id } }
+ *   POST   /api/chats/{id}/switch {channel}  → { ok, data: { chat_id, channel } }
  *   POST   /api/chats/{id}/rename {label}    → { ok }
- *   DELETE /api/chats/{id}                    → { ok }
- *   WS RPC set_cwd {channel, chat_id, dir}    → set working directory
- *   PUT    /api/cwd {channel, chat_id, dir}   → set working directory
- *   WS     subscribe { type:'subscribe', chat_id }
+ *   POST   /api/chats/{id}/delete            → { ok, data: {} }
+ *   POST   /api/rpc set_cwd                  → set working directory
+ *   GET    /api/sse?chat_id=...              → server events
  */
 import { createElement, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'
 import { setCwd } from '@/components/agent/api'
 import { useWSConnection } from '@/hooks/useWSConnection'
+import { postAPI } from '@/lib/api'
 import { groupSessions, parseAgentChatID, sameSession, sessionKey, sortSessions } from '@/lib/session-grouping'
+import { loadSessionTreeCache, saveSessionTreeCache } from '@/lib/webCache'
 import type { SessionCategory, SessionEvent, SessionInfo, SessionSelector, SessionStatus } from '@/types/shared'
 import type { AskUserPrompt, AskUserQuestion } from '@/types/agent'
 
@@ -94,14 +95,7 @@ function persistStarred(ids: string[]): void {
 
 /* ── API responses ── */
 
-interface ListChatsResponse {
-  ok: boolean
-  chats?: RawChat[]
-  sessions?: RawTreeNode[]
-  orphan_subagents?: RawChat[]
-}
 interface ListSessionTreeResponse {
-  ok: boolean
   sessions?: RawTreeNode[]
   orphan_subagents?: RawChat[]
 }
@@ -126,11 +120,9 @@ interface RawChat {
 }
 type RawTreeNode = RawChat
 interface CreateChatResponse {
-  ok: boolean
   chat_id?: string
 }
 interface SwitchChatResponse {
-  ok: boolean
   chat_id?: string
   channel?: string
 }
@@ -672,9 +664,14 @@ function removeSubAgentLifecycle(nodes: SessionInfo[], role: string | undefined,
 
 export function useSessionStoreImpl(): SessionStore {
   const ws = useWSConnection()
-  const [sessions, setSessions] = useState<SessionInfo[]>([])
-  const [subAgents, setSubAgents] = useState<SessionInfo[]>([])
-  const [activeSession, setActiveSession] = useState<SessionSelector | null>(null)
+  const [cachedTree] = useState(loadSessionTreeCache)
+  const [sessions, setSessions] = useState<SessionInfo[]>(() => cachedTree?.sessions ?? [])
+  const [subAgents, setSubAgents] = useState<SessionInfo[]>(() => cachedTree?.subAgents ?? [])
+  const [activeSession, setActiveSession] = useState<SessionSelector | null>(() => {
+    const active = cachedTree?.sessions.find((session) => session.isCurrent && !session.synthetic)
+      ?? cachedTree?.sessions.find((session) => !session.synthetic)
+    return active ? { channel: active.channel, chatID: active.chatID } : null
+  })
   const [starredIds, setStarredIds] = useState<string[]>(loadStarred)
   const [category, setCategory] = useState<SessionCategory>('all')
   const [loading, setLoading] = useState(false)
@@ -682,15 +679,12 @@ export function useSessionStoreImpl(): SessionStore {
   // AskUser prompts keyed by "channel:chatID" — survives session switch.
   const [askUserPrompts, setAskUserPrompts] = useState<Map<string, AskUserPrompt>>(new Map())
 
-  // Keep the latest session list available to WS handlers without re-binding.
+  // Keep the latest session list available to SSE handlers without re-binding.
   const sessionsRef = useRef(sessions)
   sessionsRef.current = sessions
   const activeSessionRef = useRef(activeSession)
   activeSessionRef.current = activeSession
-  // Tracks the chatID we last subscribed to, read live by WS handlers. The
-  // WSProvider's context value snapshots `ws.chatID`, which can lag behind a
-  // subscribe() call (its useMemo key doesn't include chatID); this ref is the
-  // source of truth for "which chat are we currently receiving events for".
+  // Tracks the chatID whose EventSource currently owns live events.
   const subscribedChatIDRef = useRef<string | null>(null)
   const refreshSeqRef = useRef(0)
   const subAgentRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -702,43 +696,15 @@ export function useSessionStoreImpl(): SessionStore {
     if (initialLoad) setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/chats')
+      const data = await postAPI<ListSessionTreeResponse>('/api/session-tree')
       if (seq !== refreshSeqRef.current) return
-      if (res.ok) {
-        const data = (await res.json()) as ListChatsResponse
-        if (seq !== refreshSeqRef.current) return
-        if (data.ok && Array.isArray(data.sessions)) {
-          const normalized = normalizeCanonicalSessionTree(data.sessions as RawTreeNode[], data.orphan_subagents || [])
-          const { mainSessions, agents } = mergeTransientSubAgents(normalized.mainSessions, transientSubAgentsRef.current)
-          const { sessions: markedSessions, active } = reconcileActiveSession(mainSessions, activeSessionRef.current)
-          setSessions((prev) => mergeStatus(prev, markedSessions))
-          setSubAgents((prev) => (sameSessionList(prev, agents) ? prev : agents))
-          if (active) setActiveSession(active)
-          return
-        }
-        if (data.ok && Array.isArray(data.chats)) {
-          const normalized = normalizeSessionTree(data.chats as RawTreeNode[], data.orphan_subagents || [])
-          const { mainSessions, agents } = mergeTransientSubAgents(normalized.mainSessions, transientSubAgentsRef.current)
-          const { sessions: markedSessions, active } = reconcileActiveSession(mainSessions, activeSessionRef.current)
-          setSessions((prev) => mergeStatus(prev, markedSessions))
-          setSubAgents((prev) => (sameSessionList(prev, agents) ? prev : agents))
-          if (active) setActiveSession(active)
-          return
-        }
-      }
-
-      const treeRes = await fetch('/api/session-tree')
-      if (seq !== refreshSeqRef.current) return
-      const treeData = (await treeRes.json()) as ListSessionTreeResponse
-      if (seq !== refreshSeqRef.current) return
-      if (!treeRes.ok || !treeData.ok) {
-        setError('failed to load chats')
-        return
-      }
-      const normalized = normalizeCanonicalSessionTree(treeData.sessions || [], treeData.orphan_subagents || [])
+      const normalized = normalizeCanonicalSessionTree(data.sessions || [], data.orphan_subagents || [])
       const { mainSessions, agents } = mergeTransientSubAgents(normalized.mainSessions, transientSubAgentsRef.current)
       const { sessions: markedSessions, active } = reconcileActiveSession(mainSessions, activeSessionRef.current)
-      setSessions((prev) => mergeStatus(prev, markedSessions))
+      const cachedSessions = mergeStatus(sessionsRef.current, markedSessions)
+      sessionsRef.current = cachedSessions
+      saveSessionTreeCache(cachedSessions, agents)
+      setSessions((prev) => (sameSessionList(prev, cachedSessions) ? prev : cachedSessions))
       setSubAgents((prev) => (sameSessionList(prev, agents) ? prev : agents))
       if (active) setActiveSession(active)
     } catch (e) {
@@ -827,13 +793,8 @@ export function useSessionStoreImpl(): SessionStore {
     async (label?: string, workPath?: string): Promise<string | null> => {
       let chatID: string
       try {
-        const res = await fetch('/api/chats', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ label: label ?? '' }),
-        })
-        const data = (await res.json()) as CreateChatResponse
-        if (!res.ok || !data.chat_id) return null
+        const data = await postAPI<CreateChatResponse>('/api/chats/create', { label: label ?? '' })
+        if (!data.chat_id) return null
         chatID = data.chat_id
       } catch {
         return null
@@ -848,7 +809,7 @@ export function useSessionStoreImpl(): SessionStore {
           toast.error(`工作目录设置失败: ${msg}`)
         }
       }
-      ws.subscribe(chatID)
+      ws.subscribe(chatID, DEFAULT_CHANNEL)
       subscribedChatIDRef.current = chatID
       const selector = { channel: DEFAULT_CHANNEL, chatID }
       activeSessionRef.current = selector
@@ -876,16 +837,14 @@ export function useSessionStoreImpl(): SessionStore {
     async (id: string, ch: string): Promise<void> => {
       const useChannel = ch || DEFAULT_CHANNEL
       try {
-        const res = await fetch(
-          `/api/chats/${encodeURIComponent(id)}/switch?channel=${encodeURIComponent(useChannel)}`,
-          { method: 'POST' },
+        await postAPI<SwitchChatResponse>(
+          `/api/chats/${encodeURIComponent(id)}/switch`,
+          { channel: useChannel },
         )
-        const data = (await res.json()) as SwitchChatResponse
-        if (!res.ok || !data.ok) return
       } catch {
         return
       }
-      ws.subscribe(id)
+      ws.subscribe(id, useChannel)
       subscribedChatIDRef.current = id
       const selector = { channel: useChannel, chatID: id }
       activeSessionRef.current = selector
@@ -903,28 +862,19 @@ export function useSessionStoreImpl(): SessionStore {
 
   const renameSession = useCallback(async (id: string, channel: string, label: string): Promise<boolean> => {
     try {
-      const res = await fetch(`/api/chats/${encodeURIComponent(id)}/rename`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label }),
-      })
-      const data = (await res.json()) as { ok: boolean }
-      if (!res.ok || !data.ok) return false
+      await postAPI(`/api/chats/${encodeURIComponent(id)}/rename`, { label })
     } catch {
       return false
     }
     setSessions((prev) => prev.map((s) => (sameSession(s, { channel, chatID: id }) ? { ...s, label } : s)))
+    void refresh()
     return true
-  }, [])
+  }, [refresh])
 
   const deleteSession = useCallback(
     async (id: string, channel: string): Promise<boolean> => {
       try {
-        const res = await fetch(`/api/chats/${encodeURIComponent(id)}`, {
-          method: 'DELETE',
-        })
-        const data = (await res.json()) as { ok: boolean }
-        if (!res.ok || !data.ok) return false
+        await postAPI(`/api/chats/${encodeURIComponent(id)}/delete`)
       } catch {
         return false
       }
@@ -944,12 +894,13 @@ export function useSessionStoreImpl(): SessionStore {
         // mistaken as the target of a later ask_user frame.
         if (subscribedChatIDRef.current === id) subscribedChatIDRef.current = null
       }
+      void refresh()
       return true
     },
-    [activeSession],
+    [activeSession, refresh],
   )
 
-  /* ── WS-driven status inference ── */
+  /* ── SSE-driven status inference ── */
 
   // session events: busy → running, idle → idle, deleted → remove, renamed → label
   useEffect(() => {
@@ -997,6 +948,7 @@ export function useSessionStoreImpl(): SessionStore {
         default:
           break
       }
+      void refresh()
     })
   }, [ws, setStatus, applySubAgentLifecycle, refresh])
 
@@ -1046,6 +998,17 @@ export function useSessionStoreImpl(): SessionStore {
   useEffect(() => {
     void refresh()
   }, [refresh])
+
+  // The active session owns exactly one EventSource. subscribe() closes the old one.
+  useEffect(() => {
+    if (!activeSession) {
+      ws.disconnect()
+      subscribedChatIDRef.current = null
+      return
+    }
+    subscribedChatIDRef.current = activeSession.chatID
+    ws.subscribe(activeSession.chatID, activeSession.channel)
+  }, [activeSession, ws])
 
   const sortedSessions = useMemo(() => sortSessions(sessions, starredIds), [sessions, starredIds])
   const clearAskUserPrompt = useCallback((channel: string, chatID: string) => {

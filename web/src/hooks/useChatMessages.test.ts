@@ -1,21 +1,22 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useChatMessages } from './useChatMessages'
 import type { WSConnection } from '@/types/ws'
+import { messagesCache } from '@/lib/webCache'
 
 function makeWS(responses: unknown[]): WSConnection {
   vi.stubGlobal('fetch', vi.fn(async () => {
     const next = responses.shift() ?? { messages: [] }
     const body = await Promise.resolve(next)
-    return new Response(JSON.stringify(body), {
+    return new Response(JSON.stringify({ ok: true, data: body, error: null }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     })
   }))
   return {
     rpc: vi.fn(async () => responses.shift() ?? { messages: [] }),
-    send: vi.fn(),
+    send: vi.fn(async () => undefined),
     setLastSeq: vi.fn(),
     onMessage: vi.fn(() => vi.fn()),
   } as unknown as WSConnection
@@ -30,6 +31,9 @@ function deferred<T>() {
 }
 
 describe('useChatMessages', () => {
+  beforeEach(() => {
+    messagesCache.clear()
+  })
   it('keeps cached rows visible during same-session background reloads', async () => {
     const ws = makeWS([
       { messages: [{ role: 'user', content: 'hello', timestamp: '2026-07-08T00:00:00Z' }] },
