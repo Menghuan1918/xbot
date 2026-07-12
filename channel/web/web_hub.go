@@ -1,6 +1,7 @@
 package web
 
 import (
+	"net/http"
 	"sync"
 	"sync/atomic"
 
@@ -11,7 +12,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Hub: WebSocket connection hub (routing + lifecycle)
+// Hub: connection hub (routing + lifecycle)
 // ---------------------------------------------------------------------------
 //
 // Routing is by business chatID (e.g. "/home/smith/src/xbot" or feishuUserID).
@@ -34,7 +35,7 @@ func newHub() *Hub {
 	}
 }
 
-// addClient registers a WS connection for lifecycle management.
+// addClient registers a transport connection for lifecycle management.
 // Use subscribe() to register it for message routing.
 func (h *Hub) addClient(clientID string, c *Client) {
 	h.mu.Lock()
@@ -42,7 +43,7 @@ func (h *Hub) addClient(clientID string, c *Client) {
 	h.mu.Unlock()
 }
 
-// removeClient removes a WS connection and all its subscriptions.
+// removeClient removes a transport connection and all its subscriptions.
 func (h *Hub) removeClient(clientID string) {
 	h.mu.Lock()
 	delete(h.conns, clientID)
@@ -263,12 +264,20 @@ func (h *Hub) broadcastToCLI(msg protocol.WSMessage) {
 }
 
 // ---------------------------------------------------------------------------
-// Client: a single WebSocket connection
+// Client: a single WebSocket or SSE connection
 // ---------------------------------------------------------------------------
 
-// Client represents a single WebSocket client
+const (
+	clientConnTypeWS  = "ws"
+	clientConnTypeSSE = "sse"
+)
+
+// Client represents a single connected transport client.
 type Client struct {
-	conn            *websocket.Conn
+	connType        string
+	wsConn          *websocket.Conn
+	w               http.ResponseWriter
+	flusher         http.Flusher
 	sendCh          chan protocol.WSMessage
 	done            chan struct{}
 	closeOnce       sync.Once
