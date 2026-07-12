@@ -17,7 +17,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const sseHeartbeatInterval = 15 * time.Second
+const (
+	sseHeartbeatInterval = 15 * time.Second
+	sseWriteTimeout      = 2 * time.Second
+)
 
 // handleSSE streams server events for one authenticated Web session.
 func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
@@ -56,9 +59,18 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	// SSE responses are intentionally long-lived; keep the server's REST write
-	// timeout while clearing it only for this response.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+
+	streamLastSeq := wc.getEventStream(chatID).lastSeq()
+	resumeSeq := lastSeq
+	if resumeSeq == 0 {
+		// A fresh connection starts at the current high-water mark. Active
+		// progress and AskUser state are restored by the fallback callbacks;
+		// events racing with registration are recovered from eventStream.
+		resumeSeq = streamLastSeq
+	} else if resumeSeq > streamLastSeq {
+		// The server restarted and its in-memory sequence restarted from zero.
+		resumeSeq = 0
+	}
 
 	client := &Client{
 		connType:    clientConnTypeSSE,
@@ -70,10 +82,7 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 		userID:      senderID,
 		chatID:      chatID,
 		id:          strings.ReplaceAll(uuid.New().String(), "-", ""),
-		lastSentSeq: lastSeq,
-	}
-	if streamLastSeq := wc.getEventStream(chatID).lastSeq(); lastSeq > streamLastSeq {
-		client.lastSentSeq = 0
+		lastSentSeq: resumeSeq,
 	}
 
 	wc.hub.addClient(client.id, client)
@@ -95,10 +104,9 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}).Info("SSE client connected")
 
 	// Commit the response headers immediately even when no event is ready yet.
-	flusher.Flush()
-	// eventStream is also the initial-connect source of truth. Replaying from
-	// zero closes the gap between the history request and Hub subscription;
-	// clients already holding history deduplicate by the same sequence IDs.
+	if err := flushSSEResponse(client); err != nil {
+		return
+	}
 	wc.publishSSEFallbacks(sel, client.lastSentSeq)
 	wc.sseWriteLoop(r.Context(), client)
 }
@@ -158,10 +166,21 @@ func (wc *WebChannel) publishSSEFallbacks(sel SessionSelector, lastSeq uint64) {
 
 func (wc *WebChannel) publishSSEFallbackIfMissing(sel SessionSelector, lastSeq uint64, msg protocol.WSMessage, requestID string) {
 	wc.hub.sendSSEEventIf(sel.ChatID, func() (protocol.WSMessage, bool) {
-		if containsSSEEvent(wc.replaySSEEvents(sel, lastSeq), msg.Type, requestID) {
+		events := wc.replaySSEEvents(sel, lastSeq)
+		if containsSSEEvent(events, msg.Type, requestID) {
 			return protocol.WSMessage{}, false
 		}
-		if msg.Type == protocol.MsgTypeAskUser {
+		switch msg.Type {
+		case protocol.MsgTypeProgress:
+			if sseSessionIsIdle(wc.replaySSEEvents(sel, 0)) {
+				return protocol.WSMessage{}, false
+			}
+			progress := wc.callbacks.GetActiveProgress(sel.Channel, sel.ChatID)
+			if progress == nil {
+				return protocol.WSMessage{}, false
+			}
+			msg.Progress = progress
+		case protocol.MsgTypeAskUser:
 			pending := wc.callbacks.GetPendingAskUser(sel.Channel, sel.ChatID)
 			if pending == nil || pending.RequestID != requestID {
 				return protocol.WSMessage{}, false
@@ -170,6 +189,20 @@ func (wc *WebChannel) publishSSEFallbackIfMissing(sel SessionSelector, lastSeq u
 		}
 		return msg, true
 	})
+}
+
+func sseSessionIsIdle(events []protocol.WSMessage) bool {
+	state := ""
+	for _, event := range events {
+		if event.Type != protocol.MsgTypeSession || event.Session == nil {
+			continue
+		}
+		switch event.Session.Action {
+		case "busy", "idle":
+			state = event.Session.Action
+		}
+	}
+	return state == "idle"
 }
 
 func containsSSEEvent(events []protocol.WSMessage, msgType, requestID string) bool {
@@ -196,10 +229,13 @@ func askUserRequestID(msg protocol.WSMessage) string {
 }
 
 func (wc *WebChannel) sseWriteLoop(ctx context.Context, client *Client) {
+	stopWriteWatcher := watchSSEWriteCancellation(ctx, client)
+	defer stopWriteWatcher()
+
 	ticker := time.NewTicker(sseHeartbeatInterval)
 	defer ticker.Stop()
 
-	if closed, err := wc.catchUpSSE(client, nil); err != nil || closed {
+	if closed, err := wc.catchUpSSE(ctx, client, nil); err != nil || closed {
 		return
 	}
 
@@ -209,7 +245,7 @@ func (wc *WebChannel) sseWriteLoop(ctx context.Context, client *Client) {
 			if !ok {
 				return
 			}
-			if closed, err := wc.catchUpSSE(client, []protocol.WSMessage{msg}); err != nil || closed {
+			if closed, err := wc.catchUpSSE(ctx, client, []protocol.WSMessage{msg}); err != nil || closed {
 				return
 			}
 		case <-ticker.C:
@@ -224,22 +260,55 @@ func (wc *WebChannel) sseWriteLoop(ctx context.Context, client *Client) {
 	}
 }
 
-func (wc *WebChannel) catchUpSSE(client *Client, initial []protocol.WSMessage) (bool, error) {
+func watchSSEWriteCancellation(ctx context.Context, client *Client) func() {
+	stopped := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		select {
+		case <-ctx.Done():
+		case <-client.done:
+		case <-stopped:
+			return
+		}
+		_ = http.NewResponseController(client.w).SetWriteDeadline(time.Now())
+	}()
+	return func() {
+		close(stopped)
+		<-finished
+	}
+}
+
+func (wc *WebChannel) catchUpSSE(ctx context.Context, client *Client, initial []protocol.WSMessage) (bool, error) {
 	pending := initial
 	for {
+		if err := sseContextError(ctx, client); err != nil {
+			return false, err
+		}
 		pending = append(pending, wc.getEventStream(client.chatID).eventsAfter(client.lastSentSeq)...)
 		queued, closed := collectSSEBatch(client.sendCh)
 		pending = append(pending, queued...)
 		if len(pending) == 0 {
 			return closed, nil
 		}
-		if err := writeSSEBatch(client, pending); err != nil {
+		if err := writeSSEBatch(ctx, client, pending); err != nil {
 			return closed, err
 		}
 		if closed {
 			return true, nil
 		}
 		pending = nil
+	}
+}
+
+func sseContextError(ctx context.Context, client *Client) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-client.done:
+		return context.Canceled
+	default:
+		return nil
 	}
 }
 
@@ -259,9 +328,12 @@ func collectSSEBatch(ch <-chan protocol.WSMessage) ([]protocol.WSMessage, bool) 
 	return batch, false
 }
 
-func writeSSEBatch(client *Client, batch []protocol.WSMessage) error {
+func writeSSEBatch(ctx context.Context, client *Client, batch []protocol.WSMessage) error {
 	sort.SliceStable(batch, func(i, j int) bool { return batch[i].Seq < batch[j].Seq })
 	for _, msg := range batch {
+		if err := sseContextError(ctx, client); err != nil {
+			return err
+		}
 		if err := writeSSEEvent(client, msg); err != nil {
 			return err
 		}
@@ -280,18 +352,44 @@ func writeSSEEvent(client *Client, msg protocol.WSMessage) error {
 	if err != nil {
 		return fmt.Errorf("marshal SSE event: %w", err)
 	}
+	armSSEWriteDeadline(client)
+	defer clearSSEWriteDeadline(client)
 	if _, err := fmt.Fprintf(client.w, "id:%d\nevent:%s\ndata:%s\n\n", msg.Seq, msg.Type, data); err != nil {
 		return fmt.Errorf("write SSE event: %w", err)
 	}
-	client.flusher.Flush()
+	if err := flushSSE(client); err != nil {
+		return err
+	}
 	client.lastSentSeq = msg.Seq
 	return nil
 }
 
 func writeSSEHeartbeat(client *Client) error {
+	armSSEWriteDeadline(client)
+	defer clearSSEWriteDeadline(client)
 	if _, err := io.WriteString(client.w, ":heartbeat\n\n"); err != nil {
 		return fmt.Errorf("write SSE heartbeat: %w", err)
 	}
-	client.flusher.Flush()
+	return flushSSE(client)
+}
+
+func flushSSEResponse(client *Client) error {
+	armSSEWriteDeadline(client)
+	defer clearSSEWriteDeadline(client)
+	return flushSSE(client)
+}
+
+func flushSSE(client *Client) error {
+	if err := http.NewResponseController(client.w).Flush(); err != nil {
+		return fmt.Errorf("flush SSE response: %w", err)
+	}
 	return nil
+}
+
+func armSSEWriteDeadline(client *Client) {
+	_ = http.NewResponseController(client.w).SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+}
+
+func clearSSEWriteDeadline(client *Client) {
+	_ = http.NewResponseController(client.w).SetWriteDeadline(time.Time{})
 }

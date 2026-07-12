@@ -2,12 +2,14 @@ package web
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,6 +129,24 @@ func TestSSELastEventIDReplaysMissedEvents(t *testing.T) {
 	next := assertSSEMessage(t, readSSEEvent(t, bufio.NewReader(resp.Body)), protocol.MsgTypeText, 3)
 	if next.Content != "live" {
 		t.Fatalf("next content = %q, want live", next.Content)
+	}
+}
+
+func TestSSEInitialConnectStartsAtCurrentHighWater(t *testing.T) {
+	db := newTestDB(t)
+	wc, _ := newTestWebChannel(t, db)
+	wc.hub.sendToClient("web-1", protocol.WSMessage{Type: protocol.MsgTypeText, Content: "old text"})
+	wc.hub.sendToClient("web-1", protocol.WSMessage{Type: protocol.MsgTypeAskUser, Content: `{"request_id":"resolved"}`})
+	server := startTestServer(t, wc)
+	cookie := loginTestAdmin(t, server.URL)
+
+	resp := openSSE(t, server.URL, cookie, "web-1", "")
+	defer resp.Body.Close()
+	wc.hub.sendToClient("web-1", protocol.WSMessage{Type: protocol.MsgTypeText, Content: "live"})
+
+	msg := assertSSEMessage(t, readSSEEvent(t, bufio.NewReader(resp.Body)), protocol.MsgTypeText, 3)
+	if msg.Content != "live" {
+		t.Fatalf("initial SSE event content = %q, want live", msg.Content)
 	}
 }
 
@@ -255,6 +275,91 @@ func TestSSEPendingAskUserFallbackRevalidatesRequest(t *testing.T) {
 	}
 	if got := wc.getEventStream(chatID).lastSeq(); got != 0 {
 		t.Fatalf("last sequence = %d, want 0 for stale AskUser fallback", got)
+	}
+}
+
+func TestSSEActiveProgressFallbackStopsAtIdleEvent(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	chatID := "web-1"
+	lookupStarted := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	lookupCount := 0
+	wc.SetCallbacks(WebCallbacks{
+		GetActiveProgress: func(channel, gotChatID string) *protocol.ProgressEvent {
+			lookupCount++
+			if lookupCount == 1 {
+				close(lookupStarted)
+				<-releaseLookup
+			}
+			return &protocol.ProgressEvent{Phase: "thinking"}
+		},
+	})
+
+	done := make(chan struct{})
+	go func() {
+		wc.publishSSEFallbacks(SessionSelector{Channel: "web", ChatID: chatID}, 0)
+		close(done)
+	}()
+	<-lookupStarted
+	wc.SendSessionState(protocol.SessionEvent{Channel: "web", ChatID: chatID, Action: "idle"})
+	close(releaseLookup)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("active progress fallback did not finish")
+	}
+
+	if lookupCount != 1 {
+		t.Fatalf("active progress lookup count = %d, want 1 after terminal event", lookupCount)
+	}
+	events := wc.replaySSEEvents(SessionSelector{Channel: "web", ChatID: chatID}, 0)
+	if len(events) != 1 || events[0].Type != protocol.MsgTypeSession || events[0].Session == nil || events[0].Session.Action != "idle" {
+		t.Fatalf("events after terminal handoff = %#v", events)
+	}
+}
+
+func TestSSEActiveProgressFallbackRevalidatesSnapshot(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	lookupCount := 0
+	wc.SetCallbacks(WebCallbacks{
+		GetActiveProgress: func(channel, chatID string) *protocol.ProgressEvent {
+			lookupCount++
+			if lookupCount == 1 {
+				return &protocol.ProgressEvent{Phase: "thinking"}
+			}
+			return nil
+		},
+	})
+
+	wc.publishSSEFallbacks(SessionSelector{Channel: "web", ChatID: "web-1"}, 0)
+
+	if lookupCount != 2 {
+		t.Fatalf("active progress lookup count = %d, want 2", lookupCount)
+	}
+	if got := wc.getEventStream("web-1").lastSeq(); got != 0 {
+		t.Fatalf("last sequence = %d, want 0 for stale progress fallback", got)
+	}
+}
+
+func TestSSEActiveProgressFallbackHonorsIdleAtHighWater(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	chatID := "web-1"
+	wc.SendSessionState(protocol.SessionEvent{Channel: "web", ChatID: chatID, Action: "idle"})
+	lookupCount := 0
+	wc.SetCallbacks(WebCallbacks{
+		GetActiveProgress: func(channel, gotChatID string) *protocol.ProgressEvent {
+			lookupCount++
+			return &protocol.ProgressEvent{Phase: "thinking"}
+		},
+	})
+
+	wc.publishSSEFallbacks(SessionSelector{Channel: "web", ChatID: chatID}, 1)
+
+	if lookupCount != 1 {
+		t.Fatalf("active progress lookup count = %d, want 1 at idle high-water mark", lookupCount)
+	}
+	if got := wc.getEventStream(chatID).lastSeq(); got != 1 {
+		t.Fatalf("last sequence = %d, want terminal sequence 1", got)
 	}
 }
 
@@ -486,18 +591,20 @@ func TestSSESessionBroadcastIsIsolatedBySubscription(t *testing.T) {
 	wc, _ := newTestWebChannel(t, nil)
 	client1 := &Client{connType: clientConnTypeSSE, sendCh: make(chan protocol.WSMessage, 1), done: make(chan struct{}), id: "user-1", userID: "web-1"}
 	client2 := &Client{connType: clientConnTypeSSE, sendCh: make(chan protocol.WSMessage, 1), done: make(chan struct{}), id: "user-2", userID: "web-2"}
-	wsClient := &Client{connType: clientConnTypeWS, sendCh: make(chan protocol.WSMessage, 1), done: make(chan struct{}), id: "legacy-ws"}
-	for _, client := range []*Client{client1, client2, wsClient} {
+	wsClient := &Client{connType: clientConnTypeWS, sendCh: make(chan protocol.WSMessage, 1), done: make(chan struct{}), id: "browser-ws"}
+	cliClient := &Client{connType: clientConnTypeWS, sendCh: make(chan protocol.WSMessage, 1), done: make(chan struct{}), id: "cli-ws", isCLI: true}
+	for _, client := range []*Client{client1, client2, wsClient, cliClient} {
 		wc.hub.addClient(client.id, client)
 	}
 	wc.hub.subscribe(client1.id, "web-1")
 	wc.hub.subscribe(client2.id, "web-2")
 
 	wc.SendSessionState(protocol.SessionEvent{Channel: "web", ChatID: "web-1", Action: "busy"})
+	var sseMsg protocol.WSMessage
 	select {
-	case msg := <-client1.sendCh:
-		if msg.Type != protocol.MsgTypeSession || msg.Seq == 0 {
-			t.Fatalf("user-1 session event = %#v", msg)
+	case sseMsg = <-client1.sendCh:
+		if sseMsg.Type != protocol.MsgTypeSession || sseMsg.Seq == 0 {
+			t.Fatalf("user-1 session event = %#v", sseMsg)
 		}
 	default:
 		t.Fatal("authorized SSE client did not receive session event")
@@ -508,10 +615,100 @@ func TestSSESessionBroadcastIsIsolatedBySubscription(t *testing.T) {
 	default:
 	}
 	select {
-	case <-wsClient.sendCh:
+	case msg := <-wsClient.sendCh:
+		if msg.Seq != sseMsg.Seq {
+			t.Fatalf("browser WS session seq = %d, SSE seq = %d", msg.Seq, sseMsg.Seq)
+		}
 	default:
-		t.Fatal("legacy WS broadcast behavior changed")
+		t.Fatal("browser WS broadcast behavior changed")
 	}
+	select {
+	case msg := <-cliClient.sendCh:
+		if msg.Seq != 0 {
+			t.Fatalf("CLI WS session seq = %d, want 0", msg.Seq)
+		}
+	default:
+		t.Fatal("CLI WS broadcast behavior changed")
+	}
+}
+
+func TestWebChannelStopInterruptsBlockedSSEWrite(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	writer := newDeadlineBlockingResponseWriter()
+	defer writer.release()
+	client := &Client{
+		connType: clientConnTypeSSE,
+		w:        writer,
+		flusher:  writer,
+		sendCh:   make(chan protocol.WSMessage, 1),
+		done:     make(chan struct{}),
+		chatID:   "web-1",
+		id:       "blocked-sse",
+	}
+	wc.hub.addClient(client.id, client)
+	wc.hub.subscribe(client.id, client.chatID)
+	wc.hub.sendToClient(client.chatID, protocol.WSMessage{Type: protocol.MsgTypeText, Content: "blocked"})
+
+	wc.wg.Add(1)
+	go func() {
+		defer wc.wg.Done()
+		wc.sseWriteLoop(context.Background(), client)
+	}()
+	select {
+	case <-writer.writeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SSE write did not block")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		wc.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("WebChannel.Stop did not interrupt blocked SSE write")
+	}
+}
+
+type deadlineBlockingResponseWriter struct {
+	header       http.Header
+	writeStarted chan struct{}
+	unblock      chan struct{}
+	startOnce    sync.Once
+	unblockOnce  sync.Once
+}
+
+func newDeadlineBlockingResponseWriter() *deadlineBlockingResponseWriter {
+	return &deadlineBlockingResponseWriter{
+		header:       make(http.Header),
+		writeStarted: make(chan struct{}),
+		unblock:      make(chan struct{}),
+	}
+}
+
+func (w *deadlineBlockingResponseWriter) Header() http.Header { return w.header }
+
+func (w *deadlineBlockingResponseWriter) Write([]byte) (int, error) {
+	w.startOnce.Do(func() { close(w.writeStarted) })
+	<-w.unblock
+	return 0, context.Canceled
+}
+
+func (w *deadlineBlockingResponseWriter) WriteHeader(int) {}
+
+func (w *deadlineBlockingResponseWriter) Flush() {}
+
+func (w *deadlineBlockingResponseWriter) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() && time.Until(deadline) < sseWriteTimeout/2 {
+		w.release()
+	}
+	return nil
+}
+
+func (w *deadlineBlockingResponseWriter) release() {
+	w.unblockOnce.Do(func() { close(w.unblock) })
 }
 
 func TestHubUsesSequencedCopyWithoutChangingCLIWSMessage(t *testing.T) {

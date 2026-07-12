@@ -287,7 +287,7 @@ func (h *Hub) broadcastSessionState(chatID string, msg protocol.WSMessage) {
 	h.mu.RUnlock()
 	for _, c := range clients {
 		deliveryMsg := msg
-		if c.connType == clientConnTypeSSE {
+		if !c.isCLI {
 			deliveryMsg = sequencedMsg
 		}
 		select {
