@@ -70,9 +70,8 @@ type WebChannel struct {
 	ossProvider OSSProvider
 
 	// Event stream buffer — per chatID monotonic seq + ring buffer for replay
-	evtBuf        map[string]*eventStream
-	evtBufMu      sync.Mutex
-	sseFallbackMu sync.Mutex
+	evtBuf   map[string]*eventStream
+	evtBufMu sync.Mutex
 
 	// Per-user current session (multi-chatroom + cross-channel support).
 	// Key: senderID, Value: SessionSelector (channel + chatID).

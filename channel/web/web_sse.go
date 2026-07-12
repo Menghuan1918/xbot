@@ -157,14 +157,19 @@ func (wc *WebChannel) publishSSEFallbacks(sel SessionSelector, lastSeq uint64) {
 }
 
 func (wc *WebChannel) publishSSEFallbackIfMissing(sel SessionSelector, lastSeq uint64, msg protocol.WSMessage, requestID string) {
-	// Multiple reconnects can ask for the same fallback concurrently. Serialize
-	// the final check and publish so they share one eventStream sequence.
-	wc.sseFallbackMu.Lock()
-	defer wc.sseFallbackMu.Unlock()
-	if containsSSEEvent(wc.replaySSEEvents(sel, lastSeq), msg.Type, requestID) {
-		return
-	}
-	wc.hub.sendToClient(sel.ChatID, msg)
+	wc.hub.sendSSEEventIf(sel.ChatID, func() (protocol.WSMessage, bool) {
+		if containsSSEEvent(wc.replaySSEEvents(sel, lastSeq), msg.Type, requestID) {
+			return protocol.WSMessage{}, false
+		}
+		if msg.Type == protocol.MsgTypeAskUser {
+			pending := wc.callbacks.GetPendingAskUser(sel.Channel, sel.ChatID)
+			if pending == nil || pending.RequestID != requestID {
+				return protocol.WSMessage{}, false
+			}
+			msg.Progress = pending
+		}
+		return msg, true
+	})
 }
 
 func containsSSEEvent(events []protocol.WSMessage, msgType, requestID string) bool {

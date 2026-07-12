@@ -235,6 +235,29 @@ func TestSSEPendingAskUserReplayDoesNotDuplicate(t *testing.T) {
 	}
 }
 
+func TestSSEPendingAskUserFallbackRevalidatesRequest(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	chatID := "web-1"
+	requestIDs := []string{"request-old", "request-new"}
+	lookup := 0
+	wc.SetCallbacks(WebCallbacks{
+		GetPendingAskUser: func(channel, gotChatID string) *protocol.ProgressEvent {
+			requestID := requestIDs[lookup]
+			lookup++
+			return &protocol.ProgressEvent{RequestID: requestID}
+		},
+	})
+
+	wc.publishSSEFallbacks(SessionSelector{Channel: "web", ChatID: chatID}, 0)
+
+	if lookup != 2 {
+		t.Fatalf("pending AskUser lookup count = %d, want 2", lookup)
+	}
+	if got := wc.getEventStream(chatID).lastSeq(); got != 0 {
+		t.Fatalf("last sequence = %d, want 0 for stale AskUser fallback", got)
+	}
+}
+
 func TestSSEFallbackIsSharedBySubscribedClients(t *testing.T) {
 	wc, _ := newTestWebChannel(t, nil)
 	chatID := "web-1"
@@ -273,6 +296,106 @@ func TestSSEFallbackIsSharedBySubscribedClients(t *testing.T) {
 		if next.Type != protocol.MsgTypeText || next.Seq != 2 {
 			t.Fatalf("client %s next event = %#v", client.id, next)
 		}
+	}
+}
+
+func TestSSEFallbackCheckAndPublishIsAtomicWithLiveEvent(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	chatID := "web-1"
+	client := &Client{
+		connType: clientConnTypeSSE,
+		sendCh:   make(chan protocol.WSMessage, 4),
+		done:     make(chan struct{}),
+		id:       "sse-atomic",
+		chatID:   chatID,
+	}
+	wc.hub.addClient(client.id, client)
+	wc.hub.subscribe(client.id, chatID)
+
+	checkComplete := make(chan struct{})
+	releasePublish := make(chan struct{})
+	fallbackDone := make(chan struct{})
+	go func() {
+		wc.hub.sendSSEEventIf(chatID, func() (protocol.WSMessage, bool) {
+			shouldPublish := !containsSSEEvent(
+				wc.replaySSEEvents(SessionSelector{Channel: "web", ChatID: chatID}, 0),
+				protocol.MsgTypeProgress,
+				"",
+			)
+			close(checkComplete)
+			<-releasePublish
+			return protocol.WSMessage{
+				Type:     protocol.MsgTypeProgress,
+				Progress: &protocol.ProgressEvent{Phase: "fallback"},
+			}, shouldPublish
+		})
+		close(fallbackDone)
+	}()
+	<-checkComplete
+	if wc.hub.seqMu.TryLock() {
+		wc.hub.seqMu.Unlock()
+		t.Fatal("sequence lock was released between fallback check and publish")
+	}
+
+	liveStarted := make(chan struct{})
+	liveDone := make(chan struct{})
+	go func() {
+		close(liveStarted)
+		wc.SendProgress(chatID, &protocol.ProgressEvent{Phase: "live"})
+		close(liveDone)
+	}()
+	<-liveStarted
+	close(releasePublish)
+	for name, done := range map[string]<-chan struct{}{
+		"fallback": fallbackDone,
+		"live":     liveDone,
+	} {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s publish did not finish", name)
+		}
+	}
+
+	fallback := <-client.sendCh
+	live := <-client.sendCh
+	if fallback.Seq != 1 || fallback.Progress == nil || fallback.Progress.Phase != "fallback" {
+		t.Fatalf("fallback event = %#v", fallback)
+	}
+	if live.Seq != 2 || live.Progress == nil || live.Progress.Phase != "live" {
+		t.Fatalf("live event = %#v", live)
+	}
+}
+
+func TestHubOfflineSequencingPreservesWebAndCLIContracts(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	tests := []struct {
+		name    string
+		chatID  string
+		isCLI   bool
+		wantSeq uint64
+	}{
+		{name: "web websocket", chatID: "web-1", wantSeq: 1},
+		{name: "CLI websocket", chatID: "/workspace/cli-1", isCLI: true, wantSeq: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wc.hub.sendToClient(tt.chatID, protocol.WSMessage{Type: protocol.MsgTypeText, Content: "offline"})
+			client := &Client{
+				connType: clientConnTypeWS,
+				sendCh:   make(chan protocol.WSMessage, 1),
+				done:     make(chan struct{}),
+				id:       tt.name,
+				isCLI:    tt.isCLI,
+			}
+			wc.hub.addClient(client.id, client)
+			wc.hub.subscribe(client.id, tt.chatID)
+
+			msg := <-client.sendCh
+			if msg.Seq != tt.wantSeq {
+				t.Fatalf("offline sequence = %d, want %d", msg.Seq, tt.wantSeq)
+			}
+		})
 	}
 }
 

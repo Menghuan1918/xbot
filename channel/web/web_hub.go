@@ -84,8 +84,12 @@ func (h *Hub) subscribe(clientID, chatID string) {
 		if buf, ok := h.offline[chatID]; ok {
 			msgs := buf.flush()
 			for _, msg := range msgs {
+				deliveryMsg := msg
+				if c.isCLI && isSSEEventType(deliveryMsg.Type) {
+					deliveryMsg.Seq = 0
+				}
 				select {
-				case c.sendCh <- msg:
+				case c.sendCh <- deliveryMsg:
 				default:
 					log.WithFields(log.Fields{"client_id": clientID, "chat_id": chatID, "msg_type": msg.Type}).Warn("Hub.subscribe flush: sendCh full, dropping buffered message")
 				}
@@ -102,13 +106,32 @@ func (h *Hub) subscribe(clientID, chatID string) {
 // If no clients are subscribed, buffers the message for later delivery.
 func (h *Hub) sendToClient(chatID string, msg protocol.WSMessage) bool {
 	isSSEEvent := isSSEEventType(msg.Type)
-	sequencedMsg := msg
-	if isSSEEvent {
-		h.seqMu.Lock()
-		defer h.seqMu.Unlock()
-		sequencedMsg = h.sequenceEventLocked(chatID, msg)
+	if !isSSEEvent {
+		return h.deliverToSubscribers(chatID, msg, msg, false)
 	}
 
+	h.seqMu.Lock()
+	defer h.seqMu.Unlock()
+	sequencedMsg := h.sequenceEventLocked(chatID, msg)
+	return h.deliverToSubscribers(chatID, msg, sequencedMsg, true)
+}
+
+// sendSSEEventIf atomically checks and publishes a sequenced Web event.
+// prepare runs under seqMu so ordinary publishers cannot enter between a
+// replay check and the fallback event it guards.
+func (h *Hub) sendSSEEventIf(chatID string, prepare func() (protocol.WSMessage, bool)) bool {
+	h.seqMu.Lock()
+	defer h.seqMu.Unlock()
+
+	msg, ok := prepare()
+	if !ok || !isSSEEventType(msg.Type) {
+		return false
+	}
+	sequencedMsg := h.sequenceEventLocked(chatID, msg)
+	return h.deliverToSubscribers(chatID, msg, sequencedMsg, true)
+}
+
+func (h *Hub) deliverToSubscribers(chatID string, msg, sequencedMsg protocol.WSMessage, isSSEEvent bool) bool {
 	h.mu.RLock()
 	// Copy subscriber keys to a slice to avoid iterating the map while
 	// removeClient() may concurrently delete from it (data race).
@@ -168,16 +191,14 @@ func (h *Hub) sendToClient(chatID string, msg protocol.WSMessage) bool {
 			buf = newRingBuffer(webOfflineMsgBufSize)
 			h.offline[chatID] = buf
 		}
-		buf.push(msg)
+		bufferedMsg := msg
+		if isSSEEvent {
+			bufferedMsg = sequencedMsg
+		}
+		buf.push(bufferedMsg)
 		h.offMu.Unlock()
 	}
 	return sent
-}
-
-func (h *Hub) sequenceEvent(chatID string, msg protocol.WSMessage) protocol.WSMessage {
-	h.seqMu.Lock()
-	defer h.seqMu.Unlock()
-	return h.sequenceEventLocked(chatID, msg)
 }
 
 func (h *Hub) sequenceEventLocked(chatID string, msg protocol.WSMessage) protocol.WSMessage {
