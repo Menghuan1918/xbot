@@ -500,6 +500,7 @@ type runnerActiveResponse struct {
 
 type runnerCommandResponse struct {
 	OK      bool              `json:"ok"`
+	Token   string            `json:"token,omitempty"`
 	Command string            `json:"command,omitempty"`
 	Runner  *tools.RunnerInfo `json:"runner,omitempty"`
 	Error   string            `json:"error,omitempty"`
@@ -528,7 +529,6 @@ func (wc *WebChannel) handleRunners(w http.ResponseWriter, r *http.Request) {
 		maskedRunners := make([]tools.RunnerInfo, len(runners))
 		for i, r := range runners {
 			maskedRunners[i] = r
-			maskedRunners[i].Token = maskSensitive(r.Token)
 			maskedRunners[i].LLMAPIKey = maskSensitive(r.LLMAPIKey)
 		}
 		writeJSON(w, http.StatusOK, runnersListResponse{
@@ -556,16 +556,24 @@ func (wc *WebChannel) handleRunners(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, runnerCommandResponse{OK: false, Error: err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, runnerCommandResponse{
-			OK:      true,
-			Command: cmd,
-			Runner: &tools.RunnerInfo{
-				Name:        req.Name,
-				Mode:        req.Mode,
-				DockerImage: req.DockerImage,
-				Workspace:   req.Workspace,
-			},
-		})
+		created := &tools.RunnerInfo{
+			Name:        req.Name,
+			Mode:        req.Mode,
+			DockerImage: req.DockerImage,
+			Workspace:   req.Workspace,
+		}
+		if wc.callbacks.RunnerList != nil {
+			if runners, listErr := wc.callbacks.RunnerList(senderID); listErr == nil {
+				for _, runner := range runners {
+					if runner.Name == req.Name {
+						created = &runner
+						created.LLMAPIKey = maskSensitive(created.LLMAPIKey)
+						break
+					}
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, runnerCommandResponse{OK: true, Token: created.Token, Command: cmd, Runner: created})
 	}
 }
 

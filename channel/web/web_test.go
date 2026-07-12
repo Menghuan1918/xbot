@@ -167,13 +167,13 @@ func TestRegisterAndLogin(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
 	var regResp authResponse
-	json.NewDecoder(resp.Body).Decode(&regResp)
-	if !regResp.OK || regResp.UserID == 0 {
+	envelope := decodeAPIData(t, resp.Body, &regResp)
+	if !envelope.OK || regResp.UserID == 0 {
 		t.Fatal("registration failed")
 	}
 
@@ -316,7 +316,7 @@ func TestWebSocketAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	regResp.Body.Close()
-	if regResp.StatusCode != http.StatusCreated {
+	if regResp.StatusCode != http.StatusOK {
 		t.Fatalf("register failed: %d", regResp.StatusCode)
 	}
 
@@ -463,9 +463,7 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 		Sessions        []SessionTreeNode     `json:"sessions"`
 		OrphanSubAgents []UserChatWithPreview `json:"orphan_subagents"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeAPIData(t, resp.Body, &out)
 	if len(out.Chats) != 2 {
 		t.Fatalf("expected 2 chats, got %d: %#v", len(out.Chats), out.Chats)
 	}
@@ -555,9 +553,7 @@ func TestChatsChannelListFiltersSubAgentRows(t *testing.T) {
 		OK    bool                  `json:"ok"`
 		Chats []UserChatWithPreview `json:"chats"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeAPIData(t, resp.Body, &out)
 	if len(out.Chats) != 1 {
 		t.Fatalf("expected only main chat row, got %#v", out.Chats)
 	}
@@ -645,9 +641,7 @@ func TestSessionTreeReturnsChildrenForAdmin(t *testing.T) {
 		Sessions        []SessionTreeNode     `json:"sessions"`
 		OrphanSubAgents []UserChatWithPreview `json:"orphan_subagents"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeAPIData(t, resp.Body, &out)
 	if len(out.Sessions) != 1 || len(out.Sessions[0].Children) != 1 {
 		t.Fatalf("expected one parent with one child, got %#v", out.Sessions)
 	}

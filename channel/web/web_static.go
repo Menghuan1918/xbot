@@ -12,6 +12,10 @@ import (
 // ---------------------------------------------------------------------------
 
 func (wc *WebChannel) handleStatic(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+		jsonErrorResponse(w, http.StatusNotFound, "endpoint not found")
+		return
+	}
 	if wc.staticDir == "" {
 		http.NotFound(w, r)
 		return

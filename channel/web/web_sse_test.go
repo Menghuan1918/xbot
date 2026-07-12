@@ -1721,8 +1721,8 @@ func loginTestWebUser(t *testing.T, serverURL, username string) *http.Cookie {
 		t.Fatal(err)
 	}
 	registerResp.Body.Close()
-	if registerResp.StatusCode != http.StatusCreated {
-		t.Fatalf("register %s status = %d, want 201", username, registerResp.StatusCode)
+	if registerResp.StatusCode != http.StatusOK {
+		t.Fatalf("register %s status = %d, want 200", username, registerResp.StatusCode)
 	}
 
 	loginResp, err := http.Post(

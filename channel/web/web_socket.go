@@ -5,17 +5,16 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"xbot/bus"
 	log "xbot/logger"
 	"xbot/protocol"
 	"xbot/tools"
@@ -450,44 +449,21 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 			}
 			continue
 		case protocol.MsgTypeCancel:
-			// Reuse existing /cancel mechanism: push "/cancel" text into msgBus.
-			// Resolve business channel/chatID from getCurrentSession (same as message handler)
-			// so the cancel key matches the one used during message processing.
-			cancelSel := wc.GetCurrentSession(c.userID)
-			msgChannel := cancelSel.Channel
-			msgChatID := cancelSel.ChatID
-			msgSenderID := c.userID
-			msgSenderName := username
-			if msg.Channel != "" && msg.ChatID != "" {
-				msgChannel = msg.Channel
-				msgChatID = msg.ChatID
-				webUserID := 0
-				if si != nil {
-					webUserID = si.userID
-				}
-				if !c.isCLI && !wc.canAccessSession(context.Background(), webUserID, c.userID, msgChannel, msgChatID) {
-					log.WithFields(log.Fields{"channel": msgChannel, "chat_id": msgChatID, "user_id": c.userID}).Warn("Web client cancel denied")
-					continue
-				}
+			identity := inboundIdentity{
+				SenderID:           c.userID,
+				SenderName:         username,
+				CanonicalUserID:    c.canonicalUserID,
+				CanonicalRole:      c.canonicalRole,
+				IsCLI:              c.isCLI,
+				OverrideSenderID:   msg.SenderID,
+				OverrideSenderName: msg.SenderName,
 			}
-			if c.isCLI {
-				if msg.SenderID != "" {
-					msgSenderID = msg.SenderID
-				}
-				if msg.SenderName != "" {
-					msgSenderName = msg.SenderName
-				}
+			if si != nil {
+				identity.WebUserID = si.userID
+				identity.FeishuUserID = si.feishuUserID
 			}
-			wc.msgBus.Inbound <- bus.InboundMessage{
-				Channel:    msgChannel,
-				SenderID:   msgSenderID,
-				SenderName: msgSenderName,
-				ChatID:     msgChatID,
-				ChatType:   "p2p",
-				Content:    "/cancel",
-				Time:       time.Now(),
-				RequestID:  strings.ReplaceAll(uuid.New().String(), "-", ""),
-				From:       bus.NewIMAddress(msgChannel, msgSenderID),
+			if _, err := wc.dispatchCancel(context.Background(), identity, msg.Channel, msg.ChatID); err != nil {
+				log.WithError(err).WithFields(log.Fields{"channel": msg.Channel, "chat_id": msg.ChatID, "user_id": c.userID}).Warn("Web client cancel denied")
 			}
 			continue
 		case protocol.MsgTypeRPC:
@@ -597,186 +573,44 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 				wc.hub.tuiRespFn(msg.ID, msg.TUIControl)
 			}
 		case protocol.MsgTypeMessage:
-			if msg.Content == "" && len(msg.UploadKeys) == 0 {
+			identity := inboundIdentity{
+				SenderID:        c.userID,
+				SenderName:      username,
+				FeishuUserID:    feishuUserID,
+				CanonicalUserID: c.canonicalUserID,
+				CanonicalRole:   c.canonicalRole,
+				IsCLI:           c.isCLI,
+			}
+			if si != nil {
+				identity.WebUserID = si.userID
+			}
+			sel, err := wc.dispatchUserMessage(context.Background(), identity, msg)
+			if err != nil {
+				if !errors.Is(err, errEmptyMessage) {
+					log.WithError(err).WithFields(log.Fields{"channel": msg.Channel, "chat_id": msg.ChatID, "user_id": c.userID}).Warn("Web client message denied")
+				}
 				continue
 			}
-
-			var mediaPaths []string
-			originalContent := msg.Content
-			content := msg.Content
-
-			// Handle OSS upload_keys: files already uploaded to cloud by frontend
-			// Web uploads MUST go through OSS — local file storage is never allowed for security
-			if len(msg.UploadKeys) > 0 && wc.ossProvider != nil {
-				for i, key := range msg.UploadKeys {
-					displayName := key
-					if i < len(msg.FileNames) && msg.FileNames[i] != "" {
-						displayName = filepath.Base(msg.FileNames[i])
-					}
-					var fileSize int64
-					if i < len(msg.FileSizes) {
-						fileSize = msg.FileSizes[i]
-					}
-
-					// Get signed download URL (private OSS requires signed URLs with TTL)
-					downloadURL, err := wc.ossProvider.GetDownloadURL(key)
-					if err != nil {
-						log.WithError(err).WithField("key", key).Warn("Failed to get download URL for OSS file")
-						content += fmt.Sprintf("\n\n📎 [用户上传文件: %s] (获取下载链接失败)", displayName)
-						continue
-					}
-
-					ext := strings.ToLower(filepath.Ext(displayName))
-					if isImageExt(ext) {
-						content += fmt.Sprintf("\n\n<image url=\"%s\" name=\"%s\" size=\"%d\" />\n![%s](%s)", downloadURL, displayName, fileSize, displayName, downloadURL)
-					} else {
-						content += fmt.Sprintf("\n\n<file name=\"%s\" url=\"%s\" size=\"%d\" />", displayName, downloadURL, fileSize)
-					}
-				}
-			}
-
-			metadata := map[string]string{bus.MetadataReplyPolicy: bus.ReplyPolicyOptional}
-
-			if feishuUserID != "" {
-				metadata["feishu_user_id"] = feishuUserID
-			}
-			// Inject canonical user identity for agent layer
-			if c.canonicalUserID > 0 {
-				metadata["user_id"] = strconv.FormatInt(c.canonicalUserID, 10)
-				metadata["user_role"] = c.canonicalRole
-			}
-
-			// Resolve active session (channel + chatID) — supports cross-channel browsing.
-			sel := wc.GetCurrentSession(c.userID)
-			msgChannel := sel.Channel
-			msgSenderID := c.userID
-			msgSenderName := username
-			msgChatID := sel.ChatID
-			msgChatType := "p2p"
-			if msg.Channel != "" && msg.ChatID != "" {
-				msgChannel = msg.Channel
-				msgChatID = msg.ChatID
-				webUserID := 0
-				if si != nil {
-					webUserID = si.userID
-				}
-				if !c.isCLI && !wc.canAccessSession(context.Background(), webUserID, c.userID, msgChannel, msgChatID) {
-					log.WithFields(log.Fields{"channel": msgChannel, "chat_id": msgChatID, "user_id": c.userID}).Warn("Web client message denied")
-					continue
-				}
-			}
-			if c.isCLI {
-				if msg.SenderID != "" {
-					msgSenderID = msg.SenderID
-				}
-				if msg.SenderName != "" {
-					msgSenderName = msg.SenderName
-				}
-				if msg.ChatType != "" {
-					msgChatType = msg.ChatType
-				}
-			}
-
-			// Echo back complete user message (with file info) so frontend can update optimistic message
-			if content != originalContent && len(msg.UploadKeys) > 0 {
-				echoMsg := protocol.WSMessage{
-					Type:            "user_echo",
-					Content:         content,
-					OriginalContent: originalContent,
-					TS:              time.Now().Unix(),
-				}
-				wc.hub.sendToClient(msgChatID, echoMsg)
-			}
-
-			// Subscribe this client to receive messages for this chatID.
-			// Hub routes by business chatID directly — no transport metadata needed.
-			// Always subscribe on every message — idempotent and handles both
-			// vanilla web messages (no channel/chat_id) and CLI relay messages.
-			wc.hub.subscribe(c.id, msgChatID)
-
-			// Eagerly save user message so history API can return it during processing.
-			// Skip command inputs (! and / prefixes). TUI handles slash commands
-			// locally, so Web must not persist command text such as /new as chat
-			// history before the agent command handler runs.
-			// For remote CLI (business channel=cli), do NOT eager-save here: this web-layer
-			// helper persists by web sender/chat tenant, while remote CLI history must be
-			// stored under business tenant (channel=cli, chat_id=<abs cwd>) inside agent.processMessage().
-			trimmed := strings.TrimSpace(content)
-			if shouldEagerSaveUserMessage(msgChannel, trimmed) {
-				if err := eagerSaveUserMsg(wc.db, msgChannel, msgChatID, content); err != nil {
-					log.WithError(err).Warn("Failed to eager-save user message")
-				}
-				metadata["user_msg_eager_saved"] = "true"
-			}
-
-			wc.msgBus.Inbound <- bus.InboundMessage{
-				Channel:    msgChannel,
-				SenderID:   msgSenderID,
-				SenderName: msgSenderName,
-				ChatID:     msgChatID,
-				ChatType:   msgChatType,
-				Content:    content,
-				Media:      mediaPaths,
-				Time:       time.Now(),
-				RequestID:  strings.ReplaceAll(uuid.New().String(), "-", ""),
-				From:       bus.NewIMAddress(msgChannel, msgSenderID),
-				Metadata:   metadata,
-			}
+			wc.hub.subscribe(c.id, sel.ChatID)
 		case protocol.MsgTypeAskUserResponse:
 			var resp protocol.AskUserResponse
 			if err := json.Unmarshal(raw, &resp); err != nil {
 				log.WithError(err).Debug("WS invalid ask_user_response")
 				continue
 			}
-			// Resolve business channel/chatID (same as message/cancel handlers)
-			// so the response routes to the correct chatroom session.
-			respSel := wc.GetCurrentSession(c.userID)
-			respChatID := respSel.ChatID
-			respChannel := respSel.Channel
-			if msg.Channel != "" && msg.ChatID != "" {
-				respChatID = msg.ChatID
-				respChannel = msg.Channel
-				webUserID := 0
-				if si != nil {
-					webUserID = si.userID
-				}
-				if !c.isCLI && !wc.canAccessSession(context.Background(), webUserID, c.userID, respChannel, respChatID) {
-					log.WithFields(log.Fields{"channel": respChannel, "chat_id": respChatID, "user_id": c.userID}).Warn("Web client ask_user_response denied")
-					continue
-				}
+			identity := inboundIdentity{
+				SenderID:        c.userID,
+				SenderName:      username,
+				FeishuUserID:    feishuUserID,
+				CanonicalUserID: c.canonicalUserID,
+				CanonicalRole:   c.canonicalRole,
+				IsCLI:           c.isCLI,
 			}
-			if resp.Cancelled {
-				// User cancelled — send /cancel equivalent
-				wc.msgBus.Inbound <- bus.InboundMessage{
-					Channel:    respChannel,
-					SenderID:   c.userID,
-					SenderName: username,
-					ChatID:     respChatID,
-					ChatType:   "p2p",
-					Content:    "/cancel",
-					Time:       time.Now(),
-					RequestID:  strings.ReplaceAll(uuid.New().String(), "-", ""),
-					From:       bus.NewIMAddress(respChannel, c.userID),
-				}
-			} else {
-				// Format answers as indexed Q/A pairs
-				var parts []string
-				for idx, ans := range resp.Answers {
-					parts = append(parts, fmt.Sprintf("Q%s: %s", idx, ans))
-				}
-				content := strings.Join(parts, "\n\n")
-				wc.msgBus.Inbound <- bus.InboundMessage{
-					Channel:    respChannel,
-					SenderID:   c.userID,
-					SenderName: username,
-					ChatID:     respChatID,
-					ChatType:   "p2p",
-					Content:    content,
-					Time:       time.Now(),
-					RequestID:  strings.ReplaceAll(uuid.New().String(), "-", ""),
-					From:       bus.NewIMAddress(respChannel, c.userID),
-					Metadata:   map[string]string{"ask_user_answered": "true"},
-				}
+			if si != nil {
+				identity.WebUserID = si.userID
+			}
+			if _, err := wc.dispatchAskUserResponse(context.Background(), identity, msg.Channel, msg.ChatID, resp); err != nil {
+				log.WithError(err).WithFields(log.Fields{"channel": msg.Channel, "chat_id": msg.ChatID, "user_id": c.userID}).Warn("Web client ask_user_response denied")
 			}
 		default:
 			log.WithField("type", msg.Type).Debug("WS unknown message type")

@@ -148,79 +148,7 @@ func (wc *WebChannel) Name() string { return "web" }
 
 // Start 启动 Web 渠道 HTTP server
 func (wc *WebChannel) Start() error {
-	mux := http.NewServeMux()
-
-	// WebSocket endpoint
-	mux.HandleFunc("/ws", wc.handleWS)
-	// Server-sent events endpoint for browser push notifications.
-	mux.HandleFunc("/api/sse", wc.authMiddleware(wc.handleSSE))
-
-	// Auth API
-	mux.HandleFunc("/api/auth/register", limitBodySize(wc.handleRegister))
-	mux.HandleFunc("/api/auth/login", limitBodySize(wc.handleLogin))
-	mux.HandleFunc("/api/auth/logout", wc.handleLogout)
-	mux.HandleFunc("/api/auth/feishu-link", limitBodySize(wc.handleFeishuLink))
-	mux.HandleFunc("/api/auth/feishu-login", limitBodySize(wc.handleFeishuLogin))
-	mux.HandleFunc("/api/auth/config", wc.handleAuthConfig)
-
-	// REST API
-	mux.HandleFunc("/api/history", wc.authMiddleware(wc.handleHistory))
-	mux.HandleFunc("/api/history/rewind", wc.authMiddleware(wc.handleHistoryRewind))
-	mux.HandleFunc("/api/settings", wc.authMiddleware(wc.handleSettings))
-	mux.HandleFunc("/api/runner/token", wc.authMiddleware(wc.handleRunnerToken))
-	mux.HandleFunc("/api/search", wc.authMiddleware(wc.handleSearch))
-	mux.HandleFunc("/api/cwd", wc.authMiddleware(wc.handleCWD))
-	mux.HandleFunc("/api/tasks", wc.authMiddleware(wc.handleTasks))
-	mux.HandleFunc("/api/background-tasks", wc.authMiddleware(wc.handleBackgroundTasks))
-	mux.HandleFunc("/api/commands", wc.authMiddleware(wc.handleCommands))
-	mux.HandleFunc("/api/session-subscription", wc.authMiddleware(wc.handleSessionSubscription))
-
-	// Multi-runner API
-	mux.HandleFunc("/api/runners", wc.authMiddleware(wc.handleRunners))
-	mux.HandleFunc("/api/runners/active", wc.authMiddleware(wc.handleRunnerActive))
-	mux.HandleFunc("/api/runners/{name}", wc.authMiddleware(wc.handleRunnerByName))
-
-	// LLM Config API
-	mux.HandleFunc("/api/llm-config", wc.authMiddleware(wc.handleLLMConfig))
-	mux.HandleFunc("/api/llm-config/model", wc.authMiddleware(wc.handleLLMModelSet))
-	mux.HandleFunc("/api/llm-max-context", wc.authMiddleware(wc.handleLLMMaxContext))
-
-	// File API
-	mux.HandleFunc("/api/files/upload", wc.authMiddleware(wc.handleFileUpload))
-
-	// File System API (browse, read, search, stat)
-	mux.HandleFunc("/api/fs/list", wc.authMiddleware(wc.handleFsList))
-	mux.HandleFunc("/api/fs/read", wc.authMiddleware(wc.handleFsRead))
-	mux.HandleFunc("/api/fs/raw", wc.authMiddleware(wc.handleFsRaw))
-	mux.HandleFunc("/api/fs/search", wc.authMiddleware(wc.handleFsSearch))
-	mux.HandleFunc("/api/fs/stat", wc.authMiddleware(wc.handleFsStat))
-
-	// Chatroom API
-	mux.HandleFunc("/api/chats", wc.authMiddleware(wc.handleChats))
-	mux.HandleFunc("/api/session-tree", wc.authMiddleware(wc.handleSessionTree))
-	mux.HandleFunc("/api/subagents", wc.authMiddleware(wc.handleSubAgents))
-	mux.HandleFunc("/api/chats/{chatID}/switch", wc.authMiddleware(wc.handleChatSwitch))
-	mux.HandleFunc("/api/chats/{chatID}/rename", wc.authMiddleware(wc.handleChatRename))
-	mux.HandleFunc("/api/chats/{chatID}", wc.authMiddleware(wc.handleChatDelete))
-
-	// Cross-channel browsing API
-	mux.HandleFunc("/api/context-info", wc.authMiddleware(wc.handleContextInfo))
-	mux.HandleFunc("/api/channels", wc.authMiddleware(wc.handleChannels))
-
-	// Account linking + identity management API
-	mux.HandleFunc("/api/account/link-code", wc.authMiddleware(wc.handleLinkCode))
-	mux.HandleFunc("/api/account/link", wc.authMiddleware(wc.handleLink))
-	mux.HandleFunc("/api/account/identities", wc.authMiddleware(wc.handleIdentities))
-	mux.HandleFunc("/api/account/identities/{id}", wc.authMiddleware(wc.handleUnlinkIdentity))
-
-	// Admin management API
-	mux.HandleFunc("/api/admin/users", wc.authMiddleware(wc.handleAdminUsers))
-	mux.HandleFunc("/api/admin/users/{id}/role", wc.authMiddleware(wc.handleAdminSetRole))
-
-	// Static files
-	if wc.staticDir != "" {
-		mux.HandleFunc("/", wc.handleStatic)
-	}
+	mux := wc.newServeMux()
 
 	addr := fmt.Sprintf("%s:%d", wc.config.Host, wc.config.Port)
 	// Use custom listener with SO_REUSEADDR to avoid "address already in use"
@@ -258,6 +186,64 @@ func (wc *WebChannel) Start() error {
 		return nil
 	}
 	return err
+}
+
+func (wc *WebChannel) newServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wc.handleWS)
+	mux.HandleFunc("/api/sse", wc.authMiddleware(wc.handleSSE))
+
+	mux.HandleFunc("/api/auth/register", limitBodySize(postOnly(wc.handleRegister)))
+	mux.HandleFunc("/api/auth/login", limitBodySize(postOnly(wc.handleLogin)))
+	mux.HandleFunc("/api/auth/logout", postOnly(wc.handleLogout))
+	mux.HandleFunc("/api/auth/feishu-link", limitBodySize(postOnly(wc.handleFeishuLink)))
+	mux.HandleFunc("/api/auth/feishu-login", limitBodySize(postOnly(wc.handleFeishuLogin)))
+	mux.HandleFunc("/api/auth/config", postOnly(wc.handleAuthConfig))
+
+	mux.HandleFunc("/api/message", wc.authenticatedPOST(wc.handleMessage))
+	mux.HandleFunc("/api/cancel", wc.authenticatedPOST(wc.handleCancel))
+	mux.HandleFunc("/api/ask_user/respond", wc.authenticatedPOST(wc.handleAskUserRespond))
+	mux.HandleFunc("/api/rpc", wc.authenticatedPOST(wc.handleRPC))
+	mux.HandleFunc("/api/history", wc.authenticatedPOST(wc.handleHistoryPOST))
+	mux.HandleFunc("/api/history/rewind", wc.authenticatedPOST(wc.handleHistoryRewind))
+	mux.HandleFunc("/api/search", wc.authenticatedPOST(wc.handleSearchPOST))
+
+	mux.HandleFunc("/api/settings", wc.authenticatedPOST(wc.handleSettingsPOST))
+	mux.HandleFunc("/api/llm-config", wc.authenticatedPOST(wc.handleLLMConfigPOST))
+	mux.HandleFunc("/api/session/status", wc.authenticatedPOST(wc.handleSessionStatus))
+
+	mux.HandleFunc("/api/runners/list", wc.authenticatedPOST(wc.handleRunnersListPOST))
+	mux.HandleFunc("/api/runners/create", wc.authenticatedPOST(wc.handleRunnersCreatePOST))
+	mux.HandleFunc("/api/runners/active", wc.authenticatedPOST(wc.handleRunnerActivePOST))
+	mux.HandleFunc("/api/runners/{name}/delete", wc.authenticatedPOST(wc.handleRunnerDeletePOST))
+
+	mux.HandleFunc("/api/files/upload", wc.authenticatedPOST(wc.handleFileUpload))
+	mux.HandleFunc("/api/fs/list", wc.authenticatedPOST(wc.handleFsListPOST))
+	mux.HandleFunc("/api/fs/read", wc.authenticatedPOST(wc.handleFsReadPOST))
+	mux.HandleFunc("/api/fs/search", wc.authenticatedPOST(wc.handleFsSearchPOST))
+
+	mux.HandleFunc("/api/chats/list", wc.authenticatedPOST(wc.handleChatsListPOST))
+	mux.HandleFunc("/api/chats/create", wc.authenticatedPOST(wc.handleChatsCreatePOST))
+	mux.HandleFunc("/api/chats/{chatID}/switch", wc.authenticatedPOST(wc.handleChatSwitchPOST))
+	mux.HandleFunc("/api/chats/{chatID}/rename", wc.authenticatedPOST(wc.handleChatRename))
+	mux.HandleFunc("/api/chats/{chatID}/delete", wc.authenticatedPOST(wc.handleChatDeletePOST))
+	mux.HandleFunc("/api/session-tree", wc.authenticatedPOST(wc.handleSessionTreePOST))
+
+	mux.HandleFunc("/api/account/link-code", wc.authenticatedPOST(wc.handleLinkCode))
+	mux.HandleFunc("/api/account/link", wc.authenticatedPOST(wc.handleLink))
+	mux.HandleFunc("/api/account/identities/list", wc.authenticatedPOST(wc.handleIdentitiesListPOST))
+	mux.HandleFunc("/api/account/identities/{id}/delete", wc.authenticatedPOST(wc.handleUnlinkIdentityPOST))
+
+	mux.HandleFunc("/api/admin/users/list", wc.authenticatedPOST(wc.handleAdminUsersListPOST))
+	mux.HandleFunc("/api/admin/users/{id}/set-role", wc.authenticatedPOST(wc.handleAdminSetRole))
+
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		jsonErrorResponse(w, http.StatusNotFound, "endpoint not found")
+	})
+	if wc.staticDir != "" {
+		mux.HandleFunc("/", wc.handleStatic)
+	}
+	return mux
 }
 
 // Stop 停止 Web 渠道

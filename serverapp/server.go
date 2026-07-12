@@ -795,7 +795,11 @@ func Run(args []string) error {
 					role = r
 				}
 			}
-			ctx := WithRPCCtxResolved(context.Background(), senderID, senderIDFromParams(params, senderID), userID, role)
+			bizID := senderID
+			if role == "admin" {
+				bizID = senderIDFromParams(params, senderID)
+			}
+			ctx := WithRPCCtxResolved(context.Background(), senderID, bizID, userID, role)
 			return rpcTable.Dispatch(ctx, method, params)
 		})
 	}
