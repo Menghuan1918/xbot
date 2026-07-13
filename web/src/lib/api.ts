@@ -42,7 +42,7 @@ export async function postAPI<T>(
   })
 
   const envelope = await readEnvelope<T>(response)
-  if (!response.ok || !envelope.ok || envelope.data === null) {
+  if (!response.ok || !envelope.ok) {
     const error = envelope.error
     throw new APIError(
       error?.message || `request failed with status ${response.status}`,
@@ -50,7 +50,7 @@ export async function postAPI<T>(
       response.status,
     )
   }
-  return envelope.data
+  return envelope.data as T
 }
 
 /** POST variant for endpoints that intentionally return raw bytes (fs/read raw=true). */

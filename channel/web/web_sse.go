@@ -44,11 +44,9 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lastEventIDValues := r.Header.Values("Last-Event-ID")
-	hasLastEventID := len(lastEventIDValues) > 0
-	lastSeq, err := parseLastEventID(r.Header.Get("Last-Event-ID"))
+	lastSeq, hasResumeCursor, err := sseResumeCursor(r)
 	if err != nil {
-		jsonErrorResponse(w, http.StatusBadRequest, "invalid Last-Event-ID")
+		jsonErrorResponse(w, http.StatusBadRequest, "invalid SSE resume cursor")
 		return
 	}
 	flusher, ok := w.(http.Flusher)
@@ -80,7 +78,7 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 	// event is either below the fresh baseline or delivered after subscription.
 	wc.hub.seqMu.Lock()
 	streamLastSeq := wc.getEventStream(chatID).lastSeq()
-	if !hasLastEventID {
+	if !hasResumeCursor {
 		client.lastSentSeq = streamLastSeq
 	} else if client.lastSentSeq > streamLastSeq {
 		// The server restarted and its in-memory sequence restarted from zero.
@@ -119,7 +117,7 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	// A fresh EventSource has no reconnect cursor until it receives an id field.
 	// Publish the selected high-water mark even when no business event is ready.
-	if !hasLastEventID {
+	if !hasResumeCursor {
 		if err := writeSSECursor(client, client.lastSentSeq); err != nil {
 			return
 		}
@@ -154,6 +152,18 @@ func parseLastEventID(raw string) (uint64, error) {
 		return 0, nil
 	}
 	return strconv.ParseUint(raw, 10, 64)
+}
+
+func sseResumeCursor(r *http.Request) (uint64, bool, error) {
+	if len(r.Header.Values("Last-Event-ID")) > 0 {
+		seq, err := parseLastEventID(r.Header.Get("Last-Event-ID"))
+		return seq, true, err
+	}
+	if _, ok := r.URL.Query()["last_event_id"]; ok {
+		seq, err := parseLastEventID(r.URL.Query().Get("last_event_id"))
+		return seq, true, err
+	}
+	return 0, false, nil
 }
 
 func (wc *WebChannel) replaySSEEvents(sel SessionSelector, lastSeq uint64) []protocol.WSMessage {

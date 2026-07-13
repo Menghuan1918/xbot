@@ -184,7 +184,6 @@ func TestRESTRPCRejectsUnsafeNonAdminMethods(t *testing.T) {
 		{method: "upsert_model", params: `{"sub_id":"foreign","model":"injected"}`},
 		{method: "set_subscription_enabled", params: `{"sub_id":"foreign","enabled":false}`},
 		{method: "select_model", params: `{"sub_id":"foreign","model":"secret","channel":"cli","chat_id":"/foreign"}`},
-		{method: "get_session_subscription", params: `{"channel":"cli","chat_id":"/foreign"}`},
 		{method: "get_token_state", params: `{"channel":"cli","chat_id":"/foreign"}`},
 		{method: "get_history", params: `{"channel":"agent","chat_id":"web:web-1/private:1"}`},
 		{method: "plugin_widgets", params: `{"chat_id":"/another-users-session"}`},
@@ -199,6 +198,44 @@ func TestRESTRPCRejectsUnsafeNonAdminMethods(t *testing.T) {
 				t.Fatalf("status=%d dispatched=%v body=%s", recorder.Code, dispatched, recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestRESTRPCGetSessionSubscriptionChecksOwnership(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.Exec(
+		"INSERT INTO tenants (channel, chat_id, owner_user_id, last_active_at) VALUES (?, ?, ?, ?)",
+		"cli", "/owned", 42, time.Now().Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(
+		"INSERT INTO tenants (channel, chat_id, owner_user_id, last_active_at) VALUES (?, ?, ?, ?)",
+		"cli", "/foreign", 7, time.Now().Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatched := 0
+	wc := NewWebChannel(WebChannelConfig{DB: db}, bus.NewMessageBus())
+	wc.SetCallbacks(WebCallbacks{
+		IdentityResolver: fixedIdentityResolver{userID: 42, role: "user"},
+		RPCHandler: func(method string, params json.RawMessage, identity RPCIdentity) (json.RawMessage, error) {
+			dispatched++
+			return json.RawMessage(`{"subscription_id":"sub-a","model":"model-a"}`), nil
+		},
+	})
+
+	owned := httptest.NewRecorder()
+	wc.handleRPC(owned, authedAPIRequestFor(http.MethodPost, "/api/rpc", []byte(`{"method":"get_session_subscription","params":{"channel":"cli","chat_id":"/owned"}}`), "web-2", 2))
+	if owned.Code != http.StatusOK || dispatched != 1 {
+		t.Fatalf("owned status=%d dispatched=%d body=%s", owned.Code, dispatched, owned.Body.String())
+	}
+
+	foreign := httptest.NewRecorder()
+	wc.handleRPC(foreign, authedAPIRequestFor(http.MethodPost, "/api/rpc", []byte(`{"method":"get_session_subscription","params":{"channel":"cli","chat_id":"/foreign"}}`), "web-2", 2))
+	if foreign.Code != http.StatusForbidden || dispatched != 1 {
+		t.Fatalf("foreign status=%d dispatched=%d body=%s", foreign.Code, dispatched, foreign.Body.String())
 	}
 }
 
@@ -291,6 +328,31 @@ func TestRESTSessionStatusMergesTokenAndTasks(t *testing.T) {
 	}
 	if len(data["tasks"].([]any)) != 1 || len(data["background_tasks"].([]any)) != 1 {
 		t.Fatalf("status did not merge tasks: %#v", data)
+	}
+}
+
+func TestRESTSessionStatusReturnsIdleOwnedSessionCWD(t *testing.T) {
+	db := newTestDB(t)
+	if _, err := db.Exec(
+		"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
+		"web", "web-2", "owned-chat", "Owned",
+	); err != nil {
+		t.Fatal(err)
+	}
+	wc := NewWebChannel(WebChannelConfig{DB: db}, bus.NewMessageBus())
+	wc.SetCallbacks(WebCallbacks{
+		GetCWD: func(senderID string, sel SessionSelector) (string, error) {
+			if senderID != "web-2" || sel.Channel != "web" || sel.ChatID != "owned-chat" {
+				t.Fatalf("unexpected CWD selector: sender=%q selector=%#v", senderID, sel)
+			}
+			return "/workspace/idle", nil
+		},
+	})
+	recorder := httptest.NewRecorder()
+	wc.handleSessionStatus(recorder, authedAPIRequestFor(http.MethodPost, "/api/session/status", []byte(`{"channel":"web","chat_id":"owned-chat"}`), "web-2", 2))
+	_, data := decodeAPIResponse(t, recorder)
+	if recorder.Code != http.StatusOK || data["cwd"] != "/workspace/idle" {
+		t.Fatalf("status=%d data=%#v", recorder.Code, data)
 	}
 }
 

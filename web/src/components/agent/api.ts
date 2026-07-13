@@ -57,8 +57,8 @@ export async function fetchHistory(_ws: WSConnection, session?: SessionSelector 
 }
 
 export async function fetchCwd(session?: SessionSelector | null): Promise<{ dir?: string }> {
-  const history = await postAPI<HistoryResponse>('/api/history', sessionBody(session))
-  return { dir: history.active_progress?.cwd }
+  const status = await postAPI<SessionStatusResponse<unknown, unknown>>('/api/session/status', sessionBody(session))
+  return { dir: status.cwd }
 }
 
 export async function setCwd(session: SessionSelector, dir: string): Promise<{ dir?: string }> {
@@ -89,10 +89,10 @@ export async function fetchCommands<T>(): Promise<T[]> {
   ))
 }
 
-export async function fetchSessionSubscription(_session: SessionSelector): Promise<Record<string, string>> {
+export async function fetchSessionSubscription(session: SessionSelector): Promise<Record<string, string>> {
   return postAPI<Record<string, string>>('/api/rpc', {
-    method: 'get_default_subscription',
-    params: {},
+    method: 'get_session_subscription',
+    params: sessionBody(session),
   })
 }
 
@@ -117,6 +117,7 @@ interface SessionStatusResponse<CronTask, BackgroundTask> {
   tasks?: CronTask[]
   background_tasks?: BackgroundTask[]
   token_usage?: Record<string, unknown>
+  cwd?: string
 }
 
 export function fetchSessionStatus<CronTask = unknown, BackgroundTask = unknown>(

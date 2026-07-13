@@ -86,6 +86,18 @@ describe('SSEConnectionImpl', () => {
     connection.dispose()
   })
 
+  it('resumes from the cached cursor after switching A to B to A', () => {
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+    MockEventSource.instances[0].emit('text', { type: 'text', seq: 7, content: 'cached' })
+
+    connection.subscribe('chat-b')
+    connection.subscribe('chat-a')
+
+    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&last_event_id=7')
+    connection.dispose()
+  })
+
   it('deduplicates sequences and records structured progress', () => {
     const connection = new SSEConnectionImpl()
     const received: WSMessage[] = []
@@ -148,6 +160,23 @@ describe('SSEConnectionImpl', () => {
     connection.dispose()
   })
 
+  it('resumes from the cached cursor when polling recreates a closed source', async () => {
+    vi.useFakeTimers()
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    source.emit('text', { type: 'text', seq: 5, content: 'before disconnect' })
+    source.fail()
+    source.readyState = 2
+
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-a&last_event_id=5')
+    connection.dispose()
+  })
+
   it('requests active progress when reconnect replay is empty', async () => {
     vi.useFakeTimers()
     postAPIMock.mockImplementation(async (endpoint: string) => {
@@ -176,12 +205,93 @@ describe('SSEConnectionImpl', () => {
     connection.dispose()
   })
 
+  it('ignores a completed active-progress recovery snapshot', async () => {
+    vi.useFakeTimers()
+    postAPIMock.mockImplementation(async (endpoint: string) => {
+      if (endpoint === '/api/rpc') return { phase: 'done', iteration: 2 }
+      return {}
+    })
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    source.fail()
+    source.open()
+
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(received).toEqual([])
+    expect(progressSnapshotCache.has('chat-a')).toBe(false)
+    connection.dispose()
+  })
+
+  it('does not apply delayed recovery after a newer SSE event', async () => {
+    let resolveProgress: (progress: { phase: string; iteration: number }) => void = () => undefined
+    postAPIMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/api/rpc') {
+        return new Promise((resolve) => {
+          resolveProgress = resolve
+        })
+      }
+      return Promise.resolve({})
+    })
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    lastSeqCache.set('chat-a', 1)
+
+    source.emit('text', { type: 'text', seq: 4, content: 'gap event' })
+    source.emit('text', { type: 'text', seq: 5, content: 'newer event' })
+    resolveProgress({ phase: 'tool', iteration: 1 })
+    await Promise.resolve()
+
+    expect(received.map((message) => message.content)).toEqual(['gap event', 'newer event'])
+    expect(progressSnapshotCache.has('chat-a')).toBe(false)
+    connection.dispose()
+  })
+
+  it('does not apply delayed recovery after switching sessions', async () => {
+    let resolveProgress: (progress: { phase: string; iteration: number }) => void = () => undefined
+    postAPIMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/api/rpc') {
+        return new Promise((resolve) => {
+          resolveProgress = resolve
+        })
+      }
+      return Promise.resolve({})
+    })
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    lastSeqCache.set('chat-a', 1)
+
+    source.emit('text', { type: 'text', seq: 4, content: 'gap event' })
+    connection.subscribe('chat-b')
+    resolveProgress({ phase: 'tool', iteration: 1 })
+    await Promise.resolve()
+
+    expect(received).toHaveLength(1)
+    expect(progressSnapshotCache.has('chat-a')).toBe(false)
+    expect(progressSnapshotCache.has('chat-b')).toBe(false)
+    connection.dispose()
+  })
+
   it('requests active progress when an event sequence gap reveals replay overflow', async () => {
     postAPIMock.mockImplementation(async (endpoint: string) => {
       if (endpoint === '/api/rpc') return { phase: 'tool', iteration: 3 }
       return {}
     })
     const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
     connection.subscribe('chat-a')
     const source = MockEventSource.instances[0]
     source.open()
@@ -193,6 +303,10 @@ describe('SSEConnectionImpl', () => {
     expect(postAPIMock).toHaveBeenCalledWith('/api/rpc', {
       method: 'get_active_progress',
       params: { channel: 'web', chat_id: 'chat-a' },
+    })
+    expect(received.at(-1)).toMatchObject({
+      type: 'progress_structured',
+      progress: { phase: 'tool', iteration: 3 },
     })
     connection.dispose()
   })

@@ -849,13 +849,10 @@ export function useSessionStoreImpl(): SessionStore {
       const selector = { channel: useChannel, chatID: id }
       activeSessionRef.current = selector
       setActiveSession(selector)
-      setSessions((prev) => prev.map((s) => {
-        if (sameSession(s, selector)) {
-          // Clear unread status when switching to this session
-          return { ...s, isCurrent: true, status: s.status === 'unread' ? 'idle' : s.status }
-        }
-        return { ...s, isCurrent: false }
-      }))
+      const nextSessions = markCurrentSession(sessionsRef.current, selector)
+      sessionsRef.current = nextSessions
+      saveSessionTreeCache(nextSessions, flattenTreeAgents(nextSessions))
+      setSessions(nextSessions)
     },
     [ws],
   )
@@ -1045,6 +1042,18 @@ export function useSessionStoreImpl(): SessionStore {
     clearAskUserPrompt,
   }), [sessions, groups, sortedSessions, activeSessionId, activeSession, starredIds, category, loading, error, subAgents,
     askUserPrompts, setCategory, refresh, toggleStar, createSession, switchSession, renameSession, deleteSession, clearAskUserPrompt])
+}
+
+function markCurrentSession(nodes: SessionInfo[], selector: SessionSelector): SessionInfo[] {
+  return nodes.map((session) => {
+    const current = sameSession(session, selector)
+    return {
+      ...session,
+      isCurrent: current,
+      status: current && session.status === 'unread' ? 'idle' : session.status,
+      children: session.children ? markCurrentSession(session.children, selector) : session.children,
+    }
+  })
 }
 
 function sameSessionList(a: SessionInfo[], b: SessionInfo[]): boolean {

@@ -1753,6 +1753,49 @@ func TestHandleCLIRPCGetSessionSubscription_Empty(t *testing.T) {
 	// Model from LLMFactory fallback is expected; we just verify subscription_id is empty.
 }
 
+func TestSetCWDAllowsOwnedGeneratedWebChat(t *testing.T) {
+	dir := t.TempDir()
+	ag, err := agent.New(agent.Config{
+		WorkDir:        dir,
+		DBPath:         filepath.Join(dir, "xbot.db"),
+		XbotHome:       dir,
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+	ag.SetIdentityResolver(agent.NewIdentityResolver(ag.MultiSession().DB().Conn()))
+
+	const senderID = "web-2"
+	const chatID = "generated-chat"
+	if _, err := ag.MultiSession().DB().Conn().Exec(
+		"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
+		"web", senderID, chatID, "Generated",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	table := BuildRPCTable(&config.Config{}, ag, nil, nil, nil)
+	params, _ := json.Marshal(map[string]string{
+		"channel": "web",
+		"chat_id": chatID,
+		"dir":     dir,
+	})
+	ctx := WithRPCCtxResolved(context.Background(), senderID, senderID, 42, "user")
+	if _, err := table.Dispatch(ctx, "set_cwd", params); err != nil {
+		t.Fatalf("set_cwd for owned generated chat: %v", err)
+	}
+	sess, ok := ag.MultiSession().GetSession("web", chatID)
+	if !ok {
+		t.Fatal("owned generated chat session was not created")
+	}
+	if got := sess.GetCurrentDir(); got != dir {
+		t.Fatalf("session CWD = %q, want %q", got, dir)
+	}
+}
+
 // TestSetDefaultSubscription_GlobalSwitch_PreservesPerSession verifies that a global
 // subscription switch (chatID="") does NOT destroy other sessions' per-session
 // subscriptions. This was a critical cross-session contamination bug:

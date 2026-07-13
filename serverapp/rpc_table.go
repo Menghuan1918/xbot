@@ -62,6 +62,11 @@ func (h *RPCContext) ownOrAdmin(ctx context.Context, channel, chatID string) boo
 	if isAdmin(ctx) || chatID == "" || chatID == rpcBizID(ctx) {
 		return true
 	}
+	// A newly created Web chat is recorded in user_chats before its first
+	// message or CWD update creates the corresponding tenant row.
+	if channel == "web" && h.webChatOwnedBySender(chatID, rpcAuthID(ctx)) {
+		return true
+	}
 	// Check canonical session ownership
 	if h.Ag != nil && h.Ag.IdentityResolver() != nil {
 		userID := rpcUserID(ctx)
@@ -70,6 +75,18 @@ func (h *RPCContext) ownOrAdmin(ctx context.Context, channel, chatID string) boo
 		}
 	}
 	return false
+}
+
+func (h *RPCContext) webChatOwnedBySender(chatID, senderID string) bool {
+	if senderID == "" || h.Ag == nil || h.Ag.MultiSession() == nil || h.Ag.MultiSession().DB() == nil {
+		return false
+	}
+	var count int
+	err := h.Ag.MultiSession().DB().Conn().QueryRow(
+		`SELECT COUNT(*) FROM user_chats WHERE channel = 'web' AND sender_id = ? AND chat_id = ?`,
+		senderID, chatID,
+	).Scan(&count)
+	return err == nil && count > 0
 }
 
 // sessionOwnedByUser checks if a tenant (channel+chatID) has owner_user_id == userID.
@@ -204,8 +221,8 @@ func registerSettingsHandlers(t RPCTable, h *RPCContext) {
 		ChatID  string `json:"chat_id"`
 		Dir     string `json:"dir"`
 	}) error {
-		if err := ownOrAdmin(ctx, p.ChatID); err != nil {
-			return err
+		if !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
+			return fmt.Errorf("access denied")
 		}
 		// SetCWD internally refreshes plugin workDir with correct tenantID
 		return h.Ag.SetCWD(p.Channel, p.ChatID, p.Dir)

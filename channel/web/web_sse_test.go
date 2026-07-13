@@ -1624,6 +1624,39 @@ func TestSSERejectsInvalidLastEventID(t *testing.T) {
 	}
 }
 
+func TestSSEResumeCursorPrefersHeaderOverQuery(t *testing.T) {
+	tests := []struct {
+		name       string
+		target     string
+		header     *string
+		wantSeq    uint64
+		wantCursor bool
+		wantErr    bool
+	}{
+		{name: "no cursor", target: "/api/sse?chat_id=web-1"},
+		{name: "query cursor", target: "/api/sse?chat_id=web-1&last_event_id=7", wantSeq: 7, wantCursor: true},
+		{name: "invalid query cursor", target: "/api/sse?chat_id=web-1&last_event_id=bad", wantCursor: true, wantErr: true},
+		{name: "header takes priority", target: "/api/sse?chat_id=web-1&last_event_id=7", header: stringPointer("9"), wantSeq: 9, wantCursor: true},
+		{name: "empty header still takes priority", target: "/api/sse?chat_id=web-1&last_event_id=7", header: stringPointer(""), wantCursor: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			if tt.header != nil {
+				req.Header["Last-Event-Id"] = []string{*tt.header}
+			}
+			seq, hasCursor, err := sseResumeCursor(req)
+			if (err != nil) != tt.wantErr || seq != tt.wantSeq || hasCursor != tt.wantCursor {
+				t.Fatalf("sseResumeCursor() = (%d, %v, %v), want (%d, %v, err=%v)", seq, hasCursor, err, tt.wantSeq, tt.wantCursor, tt.wantErr)
+			}
+		})
+	}
+}
+
+func stringPointer(value string) *string {
+	return &value
+}
+
 func TestSSERequiresAuthenticationAndChatID(t *testing.T) {
 	db := newTestDB(t)
 	wc, _ := newTestWebChannel(t, db)

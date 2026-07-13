@@ -222,6 +222,7 @@ var nonAdminRESTRPCMethods = map[string]struct{}{
 	"clear_proxy_llm":                    {},
 	"list_subscriptions":                 {},
 	"get_default_subscription":           {},
+	"get_session_subscription":           {},
 	"add_subscription":                   {},
 	"get_user_token_usage":               {},
 	"get_daily_token_usage":              {},
@@ -252,6 +253,21 @@ func (wc *WebChannel) authorizeRESTRPC(r *http.Request, identity RPCIdentity, me
 			return http.StatusBadRequest, fmt.Errorf("chat_id is required")
 		}
 		if !wc.canAccessSession(r.Context(), userIDFromContext(r.Context()), senderID, "cli", request.ChatID) {
+			return http.StatusForbidden, fmt.Errorf("access denied")
+		}
+	}
+	if method == "get_session_subscription" {
+		var request sessionBody
+		if err := json.Unmarshal(params, &request); err != nil {
+			return http.StatusBadRequest, fmt.Errorf("invalid params: %w", err)
+		}
+		if request.ChatID == "" {
+			return http.StatusBadRequest, fmt.Errorf("chat_id is required")
+		}
+		if request.Channel == "" {
+			request.Channel = "cli"
+		}
+		if !wc.canAccessSession(r.Context(), userIDFromContext(r.Context()), senderID, request.Channel, request.ChatID) {
 			return http.StatusForbidden, fmt.Errorf("access denied")
 		}
 	}
@@ -589,10 +605,19 @@ func (wc *WebChannel) handleSessionStatus(w http.ResponseWriter, r *http.Request
 			return
 		}
 	}
+	cwd := ""
+	if wc.callbacks.GetCWD != nil {
+		cwd, err = wc.callbacks.GetCWD(senderID, sel)
+		if err != nil {
+			jsonErrorResponse(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token_usage":      tokenUsage,
 		"tasks":            tasks,
 		"background_tasks": backgroundTasks,
+		"cwd":              cwd,
 	})
 }
 

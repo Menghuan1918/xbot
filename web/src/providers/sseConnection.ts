@@ -44,6 +44,7 @@ export class SSEConnectionImpl implements WSConnection {
   private eventsSinceOpen = 0
   private pollTimer: ReturnType<typeof setInterval> | null = null
   private replayTimer: ReturnType<typeof setTimeout> | null = null
+  private stateVersion = 0
 
   private messageHandlers = new Set<Handler<WSMessage>>()
   private sessionHandlers = new Set<Handler<SessionEvent>>()
@@ -92,6 +93,7 @@ export class SSEConnectionImpl implements WSConnection {
   }
 
   disconnect(): void {
+    this.stateVersion += 1
     this.clearPoll()
     this.clearReplayTimer()
     if (this.source) {
@@ -127,9 +129,13 @@ export class SSEConnectionImpl implements WSConnection {
     const chatID = this._chatID
     if (this.disposed || !chatID || typeof EventSource === 'undefined') return
 
+    const params = new URLSearchParams({ chat_id: chatID })
+    const lastSeq = getLastSeq(chatID)
+    if (lastSeq > 0) params.set('last_event_id', String(lastSeq))
+
     let source: EventSource
     try {
-      source = new EventSource(`/api/sse?chat_id=${encodeURIComponent(chatID)}`)
+      source = new EventSource(`/api/sse?${params.toString()}`)
     } catch {
       this.startPolling()
       return
@@ -168,6 +174,7 @@ export class SSEConnectionImpl implements WSConnection {
     msg.type = eventType
     const seq = msg.seq ?? parseSequence(event.lastEventId)
     const chatID = this._chatID
+    let replayGap = false
     if (chatID && seq > 0) {
       let previousSeq = getLastSeq(chatID)
       if (seq < previousSeq) {
@@ -177,13 +184,15 @@ export class SSEConnectionImpl implements WSConnection {
         return
       }
       if (previousSeq > 0 && seq > previousSeq + 1) {
-        void this.restoreActiveProgress(chatID)
+        replayGap = true
       }
       msg.seq = seq
       setLastSeq(chatID, seq)
     }
     this.eventsSinceOpen += 1
+    this.stateVersion += 1
     this.dispatch(msg)
+    if (chatID && replayGap) void this.restoreActiveProgress(chatID)
   }
 
   private dispatch(msg: WSMessage): void {
@@ -230,12 +239,19 @@ export class SSEConnectionImpl implements WSConnection {
   }
 
   private async restoreActiveProgress(chatID: string): Promise<void> {
+    const stateVersion = this.stateVersion
     try {
       const progress = await this.rpc<ProgressEvent | null>('get_active_progress', {
         channel: this._channel,
         chat_id: chatID,
       })
-      if (!progress || this._chatID !== chatID) return
+      if (
+        !progress ||
+        progress.phase === 'done' ||
+        this._chatID !== chatID ||
+        this.stateVersion !== stateVersion
+      ) return
+      this.stateVersion += 1
       this.dispatch({
         type: 'progress_structured',
         chat_id: chatID,

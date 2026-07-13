@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { normalizeCanonicalSessionTree, normalizeSessionTree, useSessionStoreImpl } from './useSessionStore'
+import { SESSION_TREE_CACHE_KEY } from '@/lib/webCache'
 
 let sessionHandler: ((event: { channel?: string; chat_id?: string; action?: string; role?: string; instance?: string; parent_id?: string }) => void) | null = null
 
@@ -1093,6 +1094,11 @@ describe('normalizeSessionTree', () => {
       await result.current.switchSession('second', 'cli')
     })
     expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'second' })
+    const cached = JSON.parse(localStorage.getItem(SESSION_TREE_CACHE_KEY) ?? '{}') as {
+      sessions?: Array<{ chatID: string; isCurrent?: boolean }>
+    }
+    expect(cached.sessions?.find((session) => session.chatID === 'first')?.isCurrent).toBe(false)
+    expect(cached.sessions?.find((session) => session.chatID === 'second')?.isCurrent).toBe(true)
 
     await act(async () => {
       await result.current.refresh()

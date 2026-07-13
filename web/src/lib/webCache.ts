@@ -55,7 +55,11 @@ export function resetLastSeq(chatID: string): void {
 }
 
 export function clearWebCaches(): void {
-  localStorage.removeItem(SESSION_TREE_CACHE_KEY)
+  try {
+    localStorage.removeItem(SESSION_TREE_CACHE_KEY)
+  } catch {
+    // Memory caches still need to be cleared when storage is unavailable.
+  }
   messagesCache.clear()
   lastSeqCache.clear()
   progressSnapshotCache.clear()

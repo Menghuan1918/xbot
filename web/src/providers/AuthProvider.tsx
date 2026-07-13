@@ -22,6 +22,7 @@ import {
   type ReactNode,
 } from 'react'
 import { postAPI } from '@/lib/api'
+import { clearWebCaches } from '@/lib/webCache'
 
 /** Current authenticated user. `username` is empty on cold reload (no /me). */
 export interface AuthUser {
@@ -80,6 +81,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (username: string, password: string): Promise<boolean> => {
     try {
       await postAPI('/api/auth/login', { username, password })
+      clearWebCaches()
       localStorage.setItem(USERNAME_KEY, username)
       setUser({ username })
       return true
@@ -104,6 +106,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await postAPI('/api/auth/logout')
     } finally {
+      clearWebCaches()
       localStorage.removeItem(USERNAME_KEY)
       setUser(null)
     }

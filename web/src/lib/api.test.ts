@@ -39,4 +39,14 @@ describe('postAPI', () => {
       status: 404,
     })
   })
+
+  it('accepts null data in a successful response', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: null,
+      error: null,
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+
+    await expect(postAPI<null>('/api/example')).resolves.toBeNull()
+  })
 })
