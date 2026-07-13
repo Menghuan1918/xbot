@@ -129,6 +129,20 @@ describe('useProgressStream event dispatch', () => {
     expect(result.current.isStreaming).toBe(false)
   })
 
+  it('clears the previous session progress before returning from a transition', () => {
+    const { result, rerender } = renderHook(
+      ({ chatID }) => useProgressStream({ chatID, ws: currentWS as unknown as WSConnection }),
+      { initialProps: { chatID: 'c1' } },
+    )
+    emitAndFlush({ type: 'stream_content', chat_id: 'c1', progress: { stream_content: 'session A' } })
+    expect(result.current.liveMessage?.content).toBe('session A')
+
+    rerender({ chatID: 'c2' })
+
+    expect(result.current.liveMessage).toBeNull()
+    expect(result.current.isStreaming).toBe(false)
+  })
+
   it('resets finalization when a later turn begins with structured tool progress', () => {
     const complete = vi.fn()
     renderHook(() =>

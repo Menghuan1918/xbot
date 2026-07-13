@@ -22,7 +22,7 @@
  * `liveMessage` is derived from the same store snapshot (memoized), so it only
  * changes when the snapshot changes — i.e. at most once per frame.
  */
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { useSyncExternalStore } from 'react'
 
 import { ProgressStore, normalizeWebSubAgents, normalizeWebTools } from '@/components/agent/progressStore'
@@ -151,7 +151,7 @@ export function useProgressStream({
   )
 
   // Switch immediately to this chat's in-memory snapshot while history refreshes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     finalizedRef.current = false
     store.reset()
     if (disabled) {

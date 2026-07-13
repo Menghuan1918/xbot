@@ -182,3 +182,23 @@ func (wc *WebChannel) getEventStream(chatID string) *eventStream {
 	}
 	return es
 }
+
+// clearSessionTransportState drops replay and request-dedup state after a
+// session is deleted. Lock ordering matches event publication: seqMu then
+// evtBufMu, so an in-flight publisher cannot restore an older stream entry.
+func (wc *WebChannel) clearSessionTransportState(channel, chatID string) {
+	routeKey := sessionRouteKey(channel, chatID)
+	wc.hub.seqMu.Lock()
+	wc.evtBufMu.Lock()
+	delete(wc.evtBuf, routeKey)
+	wc.evtBufMu.Unlock()
+	wc.hub.seqMu.Unlock()
+
+	wc.inboundRequestsMu.Lock()
+	for key := range wc.inboundRequests {
+		if key.channel == channel && key.chatID == chatID {
+			delete(wc.inboundRequests, key)
+		}
+	}
+	wc.inboundRequestsMu.Unlock()
+}

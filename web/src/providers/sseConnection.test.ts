@@ -267,6 +267,36 @@ describe('SSEConnectionImpl', () => {
     connection.dispose()
   })
 
+  it('serializes status polls and ignores a completion from a replaced source', async () => {
+    vi.useFakeTimers()
+    let resolveStatus: (value: object) => void = () => undefined
+    postAPIMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/api/session/status') {
+        return new Promise((resolve) => {
+          resolveStatus = resolve
+        })
+      }
+      return Promise.resolve({})
+    })
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+    const failedSource = MockEventSource.instances[0]
+    failedSource.fail()
+    failedSource.readyState = 2
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(postAPIMock.mock.calls.filter(([endpoint]) => endpoint === '/api/session/status')).toHaveLength(1)
+
+    connection.setLastSeq('chat-a', 1)
+    expect(MockEventSource.instances).toHaveLength(2)
+    resolveStatus({})
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(MockEventSource.instances).toHaveLength(2)
+    connection.dispose()
+  })
+
   it('resumes from the cached cursor when polling recreates a closed source', async () => {
     vi.useFakeTimers()
     const connection = new SSEConnectionImpl()
@@ -392,6 +422,36 @@ describe('SSEConnectionImpl', () => {
 
     expect(received.map((message) => message.content)).toEqual(['gap event', 'newer event'])
     expect(progressSnapshotCache.has(sessionCacheKey('web', 'chat-a'))).toBe(false)
+    connection.dispose()
+  })
+
+  it('applies delayed recovery after later non-progress replay events', async () => {
+    let resolveProgress: (progress: { phase: string; iteration: number }) => void = () => undefined
+    postAPIMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/api/rpc') {
+        return new Promise((resolve) => {
+          resolveProgress = resolve
+        })
+      }
+      return Promise.resolve({})
+    })
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+
+    source.emit('runner_status', { type: 'runner_status', seq: 4 })
+    source.emit('card', { type: 'card', seq: 5 })
+    source.emit('session', { type: 'session', seq: 6, session: { action: 'renamed', chat_id: 'chat-a' } })
+    resolveProgress({ phase: 'tool', iteration: 7 })
+    await Promise.resolve()
+
+    expect(received.at(-1)).toMatchObject({
+      type: 'progress_structured',
+      progress: { phase: 'tool', iteration: 7 },
+    })
     connection.dispose()
   })
 

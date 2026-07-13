@@ -1963,6 +1963,26 @@ func TestAgentRPCsCheckGeneratedWebChatOwner(t *testing.T) {
 
 func TestWebChatCRUDCallbacksKeepChannelsIsolated(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("XBOT_HOME", dir)
+	const chatID = "/repo/project:Agent-main"
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	localSessions, err := json.Marshal(map[string]any{
+		"dir": "/repo/project",
+		"sessions": []map[string]any{
+			{"name": "Agent-main", "chat_id": chatID, "created_at": "2026-07-02T00:00:00Z"},
+			{"name": "keep", "chat_id": "/repo/project:keep", "created_at": "2026-07-01T00:00:00Z", "model": "model-a"},
+		},
+		"last_active": chatID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "project.json"), localSessions, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	ag, err := agent.New(agent.Config{
 		WorkDir:        dir,
 		DBPath:         filepath.Join(dir, "xbot.db"),
@@ -1978,19 +1998,23 @@ func TestWebChatCRUDCallbacksKeepChannelsIsolated(t *testing.T) {
 	for _, channelName := range []string{"web", "cli"} {
 		if _, err := db.Conn().Exec(
 			"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
-			channelName, "shared", time.Now().Format(time.RFC3339),
+			channelName, chatID, time.Now().Format(time.RFC3339),
 		); err != nil {
 			t.Fatal(err)
 		}
+		senderID := "web-1"
+		if channelName == "cli" {
+			senderID = "cli_user"
+		}
 		if _, err := db.Conn().Exec(
 			"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
-			channelName, "web-1", "shared", channelName+" label",
+			channelName, senderID, chatID, channelName+" label",
 		); err != nil {
 			t.Fatal(err)
 		}
 	}
 	callbacks := buildWebCallbacks(&config.Config{}, ag, db)
-	if err := callbacks.ChatRename("web-1", "cli", "shared", "renamed cli"); err != nil {
+	if err := callbacks.ChatRename("web-1", "cli", chatID, "renamed cli"); err != nil {
 		t.Fatalf("rename CLI session: %v", err)
 	}
 
@@ -2009,19 +2033,38 @@ func TestWebChatCRUDCallbacksKeepChannelsIsolated(t *testing.T) {
 		t.Fatalf("cross-channel labels = %#v", labels)
 	}
 
-	if err := callbacks.ChatDelete("web-1", "cli", "shared"); err != nil {
+	if err := callbacks.ChatDelete("web-1", "cli", chatID); err != nil {
 		t.Fatalf("delete CLI session: %v", err)
 	}
 	for channelName, want := range map[string]int{"web": 1, "cli": 0} {
 		var count int
 		if err := db.Conn().QueryRow(
 			"SELECT COUNT(*) FROM tenants WHERE channel = ? AND chat_id = ?",
-			channelName, "shared",
+			channelName, chatID,
 		).Scan(&count); err != nil {
 			t.Fatal(err)
 		}
 		if count != want {
 			t.Fatalf("%s tenant count = %d, want %d", channelName, count, want)
+		}
+	}
+	var cliLabels int
+	if err := db.Conn().QueryRow(
+		"SELECT COUNT(*) FROM user_chats WHERE channel = ? AND chat_id = ?",
+		"cli", chatID,
+	).Scan(&cliLabels); err != nil {
+		t.Fatal(err)
+	}
+	if cliLabels != 0 {
+		t.Fatalf("deleted CLI label rows = %d, want 0", cliLabels)
+	}
+	cliRows, err := listCLIChatSessions(db.Conn(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range cliRows {
+		if row.ChatID == chatID {
+			t.Fatalf("deleted CLI session reappeared from local store: %#v", cliRows)
 		}
 	}
 }

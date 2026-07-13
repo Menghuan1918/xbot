@@ -74,6 +74,14 @@ export function clearProgressSnapshot(cacheKey: string): void {
   progressSnapshotCache.delete(cacheKey)
 }
 
+/** Remove every in-memory cache entry owned by one channel-qualified session. */
+export function clearSessionCaches(cacheKey: string): void {
+  messagesCache.delete(cacheKey)
+  lastSeqCache.delete(cacheKey)
+  progressSnapshotCache.delete(cacheKey)
+  progressGenerationCache.delete(cacheKey)
+}
+
 export function clearWebCaches(): void {
   try {
     localStorage.removeItem(SESSION_TREE_CACHE_KEY)

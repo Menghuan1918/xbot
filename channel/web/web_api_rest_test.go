@@ -103,6 +103,12 @@ func TestRESTResponseEnvelope(t *testing.T) {
 func TestRESTChatCRUDPassesChannelToCallbacks(t *testing.T) {
 	db := newTestDB(t)
 	wc := NewWebChannel(WebChannelConfig{DB: db}, bus.NewMessageBus())
+	cliStream := wc.getEventStream(sessionRouteKey("cli", "shared"))
+	webStream := wc.getEventStream(sessionRouteKey("web", "shared"))
+	cliStream.nextSeq()
+	webStream.nextSeq()
+	requestKey := inboundRequestKey{senderID: "web-1", channel: "cli", chatID: "shared", requestID: "request-1"}
+	wc.inboundRequests[requestKey] = &inboundRequestState{}
 	if _, err := db.Exec(
 		"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
 		"cli", "shared", time.Now().Format(time.RFC3339),
@@ -147,6 +153,15 @@ func TestRESTChatCRUDPassesChannelToCallbacks(t *testing.T) {
 	}
 	if deleted != (SessionSelector{Channel: "cli", ChatID: "shared"}) {
 		t.Fatalf("delete selector = %#v", deleted)
+	}
+	if fresh := wc.getEventStream(sessionRouteKey("cli", "shared")); fresh == cliStream || fresh.lastSeq() != 0 {
+		t.Fatalf("deleted CLI replay stream was retained: same=%v seq=%d", fresh == cliStream, fresh.lastSeq())
+	}
+	if wc.getEventStream(sessionRouteKey("web", "shared")) != webStream || webStream.lastSeq() != 1 {
+		t.Fatal("deleting CLI session changed same-ID Web replay state")
+	}
+	if _, ok := wc.inboundRequests[requestKey]; ok {
+		t.Fatal("deleted CLI request-dedup state was retained")
 	}
 }
 

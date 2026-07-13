@@ -211,15 +211,15 @@ func (s *ChatService) DeleteChat(channel, senderID, chatID string) error {
 		return fmt.Errorf("check chat ownership: %w", err)
 	}
 
-	if count > 0 {
-		// Delete from user_chats (web sessions use this table)
-		_, err = conn.Exec(
-			"DELETE FROM user_chats WHERE channel = ? AND sender_id = ? AND chat_id = ?",
-			channel, senderID, chatID,
-		)
-		if err != nil {
-			return fmt.Errorf("delete chat record: %w", err)
-		}
+	// A session can acquire labels from more than one authenticated surface
+	// (for example cli_user plus an admin Web identity). Delete them together
+	// so a later session with the same key cannot inherit stale metadata.
+	_, err = conn.Exec(
+		"DELETE FROM user_chats WHERE channel = ? AND chat_id = ?",
+		channel, chatID,
+	)
+	if err != nil {
+		return fmt.Errorf("delete chat record: %w", err)
 	}
 
 	// Delete tenant (cascades to session_messages, memory, etc.) regardless of user_chats.

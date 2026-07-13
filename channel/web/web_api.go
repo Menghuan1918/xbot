@@ -1352,6 +1352,7 @@ func (wc *WebChannel) handleChatDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	wc.clearSessionTransportState(channelName, chatID)
 
 	// If deleting current chat, reset to default session
 	wc.userCurrentSessionMu.Lock()

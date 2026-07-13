@@ -14,6 +14,7 @@ import (
 
 	"xbot/agent"
 	"xbot/channel"
+	cli "xbot/channel/cli"
 	"xbot/channel/feishu"
 	"xbot/channel/web"
 	"xbot/config"
@@ -590,6 +591,11 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) we
 	callbacks.ChatDelete = func(senderID, channel, chatID string) error {
 		if webDB == nil {
 			return fmt.Errorf("database not available")
+		}
+		if channel == "cli" {
+			if err := cli.RemoveStoredSessionByChatID(chatID); err != nil {
+				return fmt.Errorf("remove CLI session metadata: %w", err)
+			}
 		}
 		cs := sqlite.NewChatService(webDB)
 		if err := cs.DeleteChat(channel, senderID, chatID); err != nil {

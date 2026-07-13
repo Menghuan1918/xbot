@@ -46,8 +46,10 @@ export class SSEConnectionImpl implements WSConnection {
   private reconnecting = false
   private eventsSinceOpen = 0
   private pollTimer: ReturnType<typeof setInterval> | null = null
+  private pollRequestToken: object | null = null
   private replayTimer: ReturnType<typeof setTimeout> | null = null
-  private stateVersion = 0
+  private sessionVersion = 0
+  private progressVersion = 0
 
   private messageHandlers = new Set<Handler<WSMessage>>()
   private sessionHandlers = new Set<Handler<SessionEvent>>()
@@ -103,7 +105,7 @@ export class SSEConnectionImpl implements WSConnection {
   }
 
   disconnect(): void {
-    this.stateVersion += 1
+    this.sessionVersion += 1
     this.clearPoll()
     this.clearReplayTimer()
     if (this.source) {
@@ -176,7 +178,7 @@ export class SSEConnectionImpl implements WSConnection {
   }
 
   private restartSource(): void {
-    this.stateVersion += 1
+    this.sessionVersion += 1
     this.clearPoll()
     this.clearReplayTimer()
     this.source?.close()
@@ -215,8 +217,10 @@ export class SSEConnectionImpl implements WSConnection {
       setLastSeq(cacheKey, seq)
     }
     this.eventsSinceOpen += 1
-    this.stateVersion += 1
-    if (cacheKey && isProgressLifecycleEvent(msg)) bumpProgressGeneration(cacheKey)
+    if (cacheKey && isProgressLifecycleEvent(msg)) {
+      this.progressVersion += 1
+      bumpProgressGeneration(cacheKey)
+    }
     this.dispatch(msg)
     if (chatID && replayGap) void this.restoreActiveProgress(channel, chatID)
   }
@@ -272,7 +276,8 @@ export class SSEConnectionImpl implements WSConnection {
   }
 
   private async restoreActiveProgress(channel: string, chatID: string): Promise<void> {
-    const stateVersion = this.stateVersion
+    const sessionVersion = this.sessionVersion
+    const progressVersion = this.progressVersion
     try {
       const progress = await this.rpc<ProgressEvent | null>('get_active_progress', {
         channel,
@@ -281,10 +286,11 @@ export class SSEConnectionImpl implements WSConnection {
       if (
         this._channel !== channel ||
         this._chatID !== chatID ||
-        this.stateVersion !== stateVersion
+        this.sessionVersion !== sessionVersion ||
+        this.progressVersion !== progressVersion
       ) return
       bumpProgressGeneration(sessionCacheKey(channel, chatID))
-      this.stateVersion += 1
+      this.progressVersion += 1
       if (!progress || progress.phase === 'done') {
         this.dispatch({
           type: 'progress_structured',
@@ -306,26 +312,43 @@ export class SSEConnectionImpl implements WSConnection {
   private startPolling(): void {
     if (this.pollTimer || !this._chatID) return
     this.pollTimer = setInterval(() => {
-      const chatID = this._chatID
-      const source = this.source
-      if (!chatID) return
-      void postAPI('/api/session/status', { channel: this._channel, chat_id: chatID })
-        .then(() => {
-          if (this._chatID !== chatID || this._connected) return
-          if (!source || source.readyState === 2) {
-            source?.close()
-            if (this.source === source) this.source = null
-            this.connect()
-          }
-        })
-        .catch(() => undefined)
+      void this.pollSessionStatus()
     }, STATUS_POLL_MS)
   }
 
+  private async pollSessionStatus(): Promise<void> {
+    if (this.pollRequestToken || !this._chatID) return
+    const token = {}
+    const chatID = this._chatID
+    const channel = this._channel
+    const source = this.source
+    this.pollRequestToken = token
+    try {
+      await postAPI('/api/session/status', { channel, chat_id: chatID })
+      if (
+        this._chatID !== chatID ||
+        this._channel !== channel ||
+        this._connected ||
+        this.source !== source
+      ) return
+      if (!source || source.readyState === 2) {
+        source?.close()
+        this.source = null
+        this.connect()
+      }
+    } catch {
+      // Continue polling until the native EventSource reconnects.
+    } finally {
+      if (this.pollRequestToken === token) this.pollRequestToken = null
+    }
+  }
+
   private clearPoll(): void {
-    if (!this.pollTimer) return
-    clearInterval(this.pollTimer)
-    this.pollTimer = null
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer)
+      this.pollTimer = null
+    }
+    this.pollRequestToken = null
   }
 
   private clearReplayTimer(): void {
@@ -365,11 +388,14 @@ function newMessageRequestID(): string {
 }
 
 function isProgressLifecycleEvent(msg: WSMessage): boolean {
-  return msg.type === 'stream_content' ||
+  if (
+    msg.type === 'stream_content' ||
     msg.type === 'progress_structured' ||
     msg.type === 'sync_progress' ||
-    msg.type === 'text' ||
-    msg.type === 'session'
+    msg.type === 'text'
+  ) return true
+  if (msg.type !== 'session') return false
+  return ['busy', 'idle', 'deleted', 'HistoryCompacted'].includes(msg.session?.action ?? '')
 }
 
 function isTerminalProgressEvent(msg: WSMessage): boolean {

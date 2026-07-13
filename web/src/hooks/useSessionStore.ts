@@ -27,7 +27,7 @@ import { setCwd } from '@/components/agent/api'
 import { useWSConnection } from '@/hooks/useWSConnection'
 import { postAPI } from '@/lib/api'
 import { groupSessions, parseAgentChatID, sameSession, sessionKey, sortSessions } from '@/lib/session-grouping'
-import { loadSessionTreeCache, saveSessionTreeCache } from '@/lib/webCache'
+import { clearSessionCaches, loadSessionTreeCache, saveSessionTreeCache, sessionCacheKey } from '@/lib/webCache'
 import type { SessionCategory, SessionEvent, SessionInfo, SessionSelector, SessionStatus } from '@/types/shared'
 import type { AskUserPrompt, AskUserQuestion } from '@/types/agent'
 
@@ -870,6 +870,7 @@ export function useSessionStoreImpl(): SessionStore {
         return false
       }
       const selector = { channel, chatID: id }
+      clearSessionCaches(sessionCacheKey(channel, id))
       const deleted = sessionsRef.current.find((s) => sameSession(s, selector))
       setSessions((prev) => prev.filter((s) => !sameSession(s, selector)))
       setStarredIds((prev) => {

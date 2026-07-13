@@ -2,7 +2,13 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { normalizeCanonicalSessionTree, normalizeSessionTree, useSessionStoreImpl } from './useSessionStore'
-import { SESSION_TREE_CACHE_KEY } from '@/lib/webCache'
+import {
+  lastSeqCache,
+  messagesCache,
+  progressSnapshotCache,
+  SESSION_TREE_CACHE_KEY,
+  sessionCacheKey,
+} from '@/lib/webCache'
 import type { WSMessage } from '@/types/shared'
 
 let sessionHandler: ((event: { channel?: string; chat_id?: string; action?: string; role?: string; instance?: string; parent_id?: string }) => void) | null = null
@@ -659,6 +665,10 @@ describe('normalizeSessionTree', () => {
     vi.stubGlobal('fetch', fetchMock)
     const { result } = renderHook(() => useSessionStoreImpl())
     await waitFor(() => expect(result.current.sessions).toHaveLength(2))
+    const cliCacheKey = sessionCacheKey('cli', 'shared')
+    messagesCache.set(cliCacheKey, [])
+    lastSeqCache.set(cliCacheKey, 9)
+    progressSnapshotCache.set(cliCacheKey, { phase: 'tool' })
 
     await act(async () => {
       expect(await result.current.renameSession('shared', 'cli', 'renamed')).toBe(true)
@@ -669,6 +679,9 @@ describe('normalizeSessionTree', () => {
     const deleteCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/delete'))
     expect(JSON.parse(String(renameCall?.[1]?.body))).toEqual({ channel: 'cli', label: 'renamed' })
     expect(JSON.parse(String(deleteCall?.[1]?.body))).toEqual({ channel: 'cli' })
+    expect(messagesCache.has(cliCacheKey)).toBe(false)
+    expect(lastSeqCache.has(cliCacheKey)).toBe(false)
+    expect(progressSnapshotCache.has(cliCacheKey)).toBe(false)
   })
 
   it('uses /api/chats as the authoritative SubAgent tree source', async () => {

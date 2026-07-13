@@ -647,6 +647,24 @@ describe('useChatMessages', () => {
     expect(messagesCache.get(sessionCacheKey('web', 'session-b'))?.map((message) => message.content)).toEqual(['history B'])
   })
 
+  it('never returns the previous session messages during a target transition', async () => {
+    const historyB = deferred<{ messages: never[]; chat_id: string }>()
+    const ws = makeWS([
+      { messages: [{ role: 'user', content: 'history A', timestamp: '2026-07-08T00:00:00Z' }] },
+      historyB.promise,
+    ])
+    const { result, rerender } = renderHook(
+      ({ chatID }) => useChatMessages({ chatID, channel: 'web', ws }),
+      { initialProps: { chatID: 'session-a' } },
+    )
+    await waitFor(() => expect(result.current.messages.map((message) => message.content)).toEqual(['history A']))
+
+    rerender({ chatID: 'session-b' })
+
+    expect(result.current.messages).toEqual([])
+    historyB.resolve({ messages: [], chat_id: 'session-b' })
+  })
+
   it('keeps an optimistic message visible when the initial history request fails', async () => {
     let rejectHistory!: (reason: Error) => void
     const historyPromise = new Promise<never>((_resolve, reject) => {

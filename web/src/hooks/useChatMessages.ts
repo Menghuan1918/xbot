@@ -16,7 +16,7 @@
  * so the virtualized list only re-renders on real list changes (load / send /
  * finalize), never per token.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import {
@@ -440,7 +440,7 @@ export function useChatMessages({
   }, [ws, channel, chatID, subAgentRole, subAgentInstance, parentChatID, agentChatID, activeMessageCacheKey])
 
   // Load history when the chatID changes (or on first enable).
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!enabled) return
     void reload()
   }, [enabled, chatID, reload])
@@ -625,11 +625,20 @@ export function useChatMessages({
     setInitialProgress(null)
   }, [cacheCurrentMessages])
 
+  // Effects hydrate the backing state, but render from the target cache key so
+  // a session transition can never expose the previous session for one frame.
+  const visibleMessages = lastReloadKeyRef.current === activeMessageCacheKey
+    ? messages
+    : (messagesCache.get(activeMessageCacheKey) ?? [])
+  const visibleInitialProgress = lastReloadKeyRef.current === activeMessageCacheKey
+    ? initialProgress
+    : null
+
   return {
-    messages,
+    messages: visibleMessages,
     loading,
     error,
-    initialProgress,
+    initialProgress: visibleInitialProgress,
     resolvedChatID,
     reload,
     sendMessage,
