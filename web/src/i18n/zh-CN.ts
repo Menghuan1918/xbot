@@ -159,7 +159,7 @@ const zhCN = {
     statusError: '出错',
     statusPending: '等待',
     none: '—',
-    toolGroup: '{{count}} 个工具',
+    toolGroup: '{{count}} 次调用',
     processed: '已处理 {{iterations}} 次迭代 · 调用 {{tools}} 个工具',
     toolGenerating: '正在生成参数…',
     reasoningStreaming: '思考中…',

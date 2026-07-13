@@ -10,7 +10,7 @@ import {
   Terminal, FileText, Search, FolderSearch, FilePlus, FilePen,
   Globe, Download, Asterisk, Wrench, GitBranch, FolderOpen,
   Clock, MessageSquare, Users, Settings, ListTodo, Edit, Zap,
-  Layers, type LucideIcon,
+  Layers, HelpCircle, type LucideIcon,
 } from 'lucide-react'
 
 const TOOL_ICON_MAP: Record<string, LucideIcon> = {
@@ -34,6 +34,7 @@ const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   CreateChat:   Asterisk,
   SendMessage:  MessageSquare,
   Worktree:     GitBranch,
+  AskUser:      HelpCircle,
 
   // Tool management
   ManageTools:  Wrench,

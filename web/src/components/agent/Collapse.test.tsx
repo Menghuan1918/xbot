@@ -135,7 +135,7 @@ describe('FoldedToolGroup', () => {
     const { container } = renderWithProviders(<FoldedToolGroup tools={tools} level="minimal" />)
     // Merged line now shows icons + tool count text (no "Name · Name" join)
     // The tool-group count text should be present
-    expect(screen.getByText(/2.*tool/)).toBeInTheDocument()
+    expect(screen.getByText(/2.*call/)).toBeInTheDocument()
     // Icons should be rendered as SVG elements in the merged row
     const icons = container.querySelectorAll('.tool-icon-group svg')
     expect(icons.length).toBe(2)
@@ -230,7 +230,7 @@ describe('IterationGroup', () => {
     })
     const { container } = renderWithProviders(<IterationGroup iteration={iter} level="minimal" />)
     // Merged line shows tool count text + icons
-    expect(screen.getByText(/2.*tool/)).toBeInTheDocument()
+    expect(screen.getByText(/2.*call/)).toBeInTheDocument()
     const icons = container.querySelectorAll('.tool-icon-group svg')
     expect(icons.length).toBe(2)
   })

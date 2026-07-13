@@ -162,7 +162,7 @@ const en: Translations = {
     statusError: 'error',
     statusPending: 'pending',
     none: '—',
-    toolGroup: '{{count}} tools',
+    toolGroup: '{{count}} calls',
     processed: 'Processed {{iterations}} iterations · {{tools}} tools',
     toolGenerating: 'generating args…',
     reasoningStreaming: 'thinking…',

@@ -479,7 +479,13 @@ export class MultiSSEManager implements WSConnection {
 
   /** Remove a persistent SSE subscription by its ID. */
   removeSubscription(id: string): void {
-    if (id === 'primary') return // Primary is never removed via this path
+    if (id === 'primary') {
+      // Disconnect the primary connection back to idle state so it can be
+      // reused by the next addSubscription call. Without this, the primary
+      // SSE connection stays open after the panel closes, leaking resources.
+      this.primary.disconnect()
+      return
+    }
     const conn = this.extra.get(id)
     if (conn) {
       conn.dispose()
@@ -540,14 +546,13 @@ export class MultiSSEManager implements WSConnection {
 
   onConnectionChange = (handler: Handler<boolean>): (() => void) => {
     this.connHandlers.add(handler)
+    // Only route the primary connection's state to consumers.
+    // Extra connections (per-panel SSE) should not trigger global UI
+    // disconnect/reconnect overlays — only the primary matters.
     const unsubPrimary = this.primary.onConnectionChange(handler)
-    const unsubs: (() => void)[] = [unsubPrimary]
-    for (const conn of this.extra.values()) {
-      unsubs.push(conn.onConnectionChange(handler))
-    }
     return () => {
       this.connHandlers.delete(handler)
-      unsubs.forEach((u) => u())
+      unsubPrimary()
     }
   }
 

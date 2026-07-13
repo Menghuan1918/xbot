@@ -127,23 +127,30 @@ function formatMergedTitle(
   t: (key: string, params?: Record<string, string | number>) => string,
 ): ReactNode {
   // Use the worst status among all tools for the merged dot
-  const worstStatus = tools.some((t) => t.status === 'error')
+  const worstStatus = tools.some((tool) => tool.status === 'error')
     ? 'error'
-    : tools.some((t) => t.status === 'running' || t.status === 'generating')
+    : tools.some((tool) => tool.status === 'running' || tool.status === 'generating')
       ? 'running'
       : 'done'
 
-  const visibleTools = tools.slice(0, MAX_MERGED_ICONS)
-  const remaining = tools.length - MAX_MERGED_ICONS
+  // Deduplicate tool icons by name — 3 Read calls should show 1 FileText icon
+  const seenNames = new Set<string>()
+  const uniqueIcons: ReactNode[] = []
+  for (const tool of tools) {
+    if (seenNames.has(tool.name)) continue
+    seenNames.add(tool.name)
+    if (uniqueIcons.length >= MAX_MERGED_ICONS) break
+    const Icon = getToolIcon(tool.name)
+    uniqueIcons.push(<Icon key={`${tool.name}-${uniqueIcons.length}`} className="tool-icon" />)
+  }
+  const remainingUnique = seenNames.size - MAX_MERGED_ICONS
+  const remaining = remainingUnique > 0 ? remainingUnique : 0
 
   return (
     <span className="flex items-center gap-1.5">
       <span className={cn('tool-status-dot', statusDotClass(worstStatus))} aria-hidden />
       <span className="tool-icon-group">
-        {visibleTools.map((tool, i) => {
-          const Icon = getToolIcon(tool.name)
-          return <Icon key={`${tool.name}-${i}`} className="tool-icon" />
-        })}
+        {uniqueIcons}
         {remaining > 0 && (
           <span className="text-text-muted text-[11px] shrink-0">+{remaining}</span>
         )}
