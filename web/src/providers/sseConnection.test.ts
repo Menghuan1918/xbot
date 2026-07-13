@@ -77,11 +77,27 @@ describe('SSEConnectionImpl', () => {
     const first = MockEventSource.instances[0]
 
     expect([...first.listeners.keys()]).toEqual(SSE_EVENT_TYPES)
-    expect(first.url).toBe('/api/sse?chat_id=chat-a&channel=web')
+    expect(first.url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=0')
 
     connection.subscribe('chat-b', 'cli')
     expect(first.closed).toBe(true)
-    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=cli')
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=cli&last_event_id=0')
+    connection.dispose()
+  })
+
+  it('replays from zero after switching away before the first event', () => {
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    connection.subscribe('chat-b')
+    connection.subscribe('chat-a')
+
+    const resumed = MockEventSource.instances[2]
+    expect(resumed.url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=0')
+    resumed.emit('text', { type: 'text', seq: 1, content: 'buffered while inactive' })
+
+    expect(received.map((message) => message.content)).toEqual(['buffered while inactive'])
     connection.dispose()
   })
 
@@ -106,7 +122,27 @@ describe('SSEConnectionImpl', () => {
     connection.subscribe('chat-a')
 
     expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=web&last_event_id=9')
-    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&channel=web')
+    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=0')
+    connection.dispose()
+  })
+
+  it('restarts from a history cursor published after EventSource construction', () => {
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const initial = MockEventSource.instances[0]
+
+    expect(initial.url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=0')
+    connection.setLastSeq('chat-a', 2)
+    const resumed = MockEventSource.instances[1]
+    expect(initial.closed).toBe(true)
+    expect(resumed.url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=2')
+
+    initial.emit('text', { type: 'text', seq: 1, content: 'ignored closed source' })
+    resumed.emit('text', { type: 'text', seq: 3, content: 'after history' })
+
+    expect(received.map((message) => message.content)).toEqual(['after history'])
     connection.dispose()
   })
 

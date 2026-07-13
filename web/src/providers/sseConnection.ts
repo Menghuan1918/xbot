@@ -66,7 +66,9 @@ export class SSEConnectionImpl implements WSConnection {
   }
 
   setLastSeq(chatID: string, seq: number): void {
-    if (chatID && seq > 0) setLastSeq(chatID, seq)
+    if (!chatID || seq <= getLastSeq(chatID)) return
+    setLastSeq(chatID, seq)
+    if (this._chatID === chatID && this.source) this.restartSource()
   }
 
   async send(msg: WSClientMessage): Promise<void> {
@@ -137,7 +139,7 @@ export class SSEConnectionImpl implements WSConnection {
 
     const params = new URLSearchParams({ chat_id: chatID, channel: this._channel })
     const lastSeq = getLastSeq(chatID)
-    if (lastSeq > 0) params.set('last_event_id', String(lastSeq))
+    params.set('last_event_id', String(lastSeq))
 
     let source: EventSource
     try {
@@ -168,6 +170,18 @@ export class SSEConnectionImpl implements WSConnection {
       this.setConnected(false)
       this.startPolling()
     }
+  }
+
+  private restartSource(): void {
+    this.stateVersion += 1
+    this.clearPoll()
+    this.clearReplayTimer()
+    this.source?.close()
+    this.source = null
+    this.reconnecting = false
+    this.eventsSinceOpen = 0
+    this.setConnected(false)
+    this.connect()
   }
 
   private handleEvent(eventType: string, event: MessageEvent<string>): void {

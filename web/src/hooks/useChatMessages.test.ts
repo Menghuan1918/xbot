@@ -243,21 +243,14 @@ describe('useChatMessages', () => {
     expect(ws.setLastSeq).not.toHaveBeenCalled()
   })
 
-  it('keeps visible history when a send fails during a background reload', async () => {
-    const backgroundHistory = deferred<{
+  it('restores initial history when an optimistic send fails during loading', async () => {
+    const initialHistory = deferred<{
       messages: { role: string; content: string; timestamp: string }[]
       chat_id: string
       last_seq: number
     }>()
-    let fetchCount = 0
     vi.stubGlobal('fetch', vi.fn(async () => {
-      fetchCount += 1
-      const data = fetchCount === 1
-        ? {
-            messages: [{ role: 'user', content: 'visible history', timestamp: '2026-07-08T00:00:00Z' }],
-            chat_id: 'failed-send-chat',
-          }
-        : await backgroundHistory.promise
+      const data = await initialHistory.promise
       return new Response(JSON.stringify({ ok: true, data, error: null }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -276,40 +269,67 @@ describe('useChatMessages', () => {
     const { result } = renderHook(() => (
       useChatMessages({ chatID: 'failed-send-chat', channel: 'web', ws })
     ))
-    await waitFor(() => expect(result.current.messages.map((message) => message.content)).toEqual([
-      'visible history',
-    ]))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
 
-    let reloadPromise!: Promise<void>
     act(() => {
-      reloadPromise = result.current.reload()
       result.current.sendMessage('temporary message')
     })
-    expect(result.current.messages.map((message) => message.content)).toEqual([
-      'visible history',
-      'temporary message',
-    ])
+    expect(result.current.messages.map((message) => message.content)).toEqual(['temporary message'])
 
     await act(async () => {
       rejectSend(new Error('network unavailable'))
       await sendPromise.catch(() => undefined)
     })
-    expect(result.current.messages.map((message) => message.content)).toEqual(['visible history'])
+    expect(result.current.messages).toEqual([])
 
     await act(async () => {
-      backgroundHistory.resolve({
-        messages: [{ role: 'user', content: 'stale replacement', timestamp: '2026-07-08T00:00:01Z' }],
+      initialHistory.resolve({
+        messages: [{ role: 'user', content: 'persisted history', timestamp: '2026-07-08T00:00:01Z' }],
         chat_id: 'failed-send-chat',
         last_seq: 77,
       })
-      await reloadPromise
+      await initialHistory.promise
     })
 
-    expect(result.current.messages.map((message) => message.content)).toEqual(['visible history'])
+    await waitFor(() => expect(result.current.messages.map((message) => message.content)).toEqual([
+      'persisted history',
+    ]))
     expect(messagesCache.get('failed-send-chat')?.map((message) => message.content)).toEqual([
-      'visible history',
+      'persisted history',
     ])
     expect(ws.setLastSeq).not.toHaveBeenCalled()
+  })
+
+  it('keeps an optimistic message visible when the initial history request fails', async () => {
+    let rejectHistory!: (reason: Error) => void
+    const historyPromise = new Promise<never>((_resolve, reject) => {
+      rejectHistory = reject
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => historyPromise))
+    const ws = {
+      rpc: vi.fn(),
+      send: vi.fn(async () => undefined),
+      setLastSeq: vi.fn(),
+      onMessage: vi.fn(() => vi.fn()),
+    } as unknown as WSConnection
+    const { result } = renderHook(() => (
+      useChatMessages({ chatID: 'failed-history-chat', channel: 'web', ws })
+    ))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      result.current.sendMessage('keep optimistic')
+    })
+    await act(async () => {
+      rejectHistory(new Error('history unavailable'))
+      await historyPromise.catch(() => undefined)
+    })
+
+    expect(result.current.messages.map((message) => message.content)).toEqual(['keep optimistic'])
+    expect(messagesCache.get('failed-history-chat')?.map((message) => message.content)).toEqual([
+      'keep optimistic',
+    ])
+    expect(result.current.error).toBe('history unavailable')
   })
 
   it('does not publish delayed active progress after a newer live progress event', async () => {

@@ -382,7 +382,7 @@ export function useChatMessages({
     } catch (e) {
       if (requestIsSuperseded() || requestHasDestructiveMutation()) return
       setError(e instanceof Error ? e.message : String(e))
-      if (!sameTarget && !cachedRows) {
+      if (!sameTarget && !cachedRows && !requestHasMessageMutation()) {
         messagesRef.current = []
         setMessages([])
       }
@@ -499,7 +499,6 @@ export function useChatMessages({
         if (optimisticID) {
           const failedID = optimisticID
           messageMutationGenRef.current += 1
-          destructiveMutationGenRef.current += 1
           setMessages((prev) => {
             const next = prev.filter((message) => message.id !== failedID)
             messagesRef.current = next
