@@ -2067,6 +2067,16 @@ func TestWebChatCRUDCallbacksKeepChannelsIsolated(t *testing.T) {
 			t.Fatalf("deleted CLI session reappeared from local store: %#v", cliRows)
 		}
 	}
+	const localOnlyChatID = "/repo/project:keep"
+	if callbacks.LocalSessionExists == nil || !callbacks.LocalSessionExists("cli", localOnlyChatID) {
+		t.Fatal("local-only CLI session was not exposed to Web authorization")
+	}
+	if err := callbacks.ChatDelete("web-1", "cli", localOnlyChatID); err != nil {
+		t.Fatalf("delete local-only CLI session: %v", err)
+	}
+	if callbacks.LocalSessionExists("cli", localOnlyChatID) {
+		t.Fatal("local-only CLI session metadata survived deletion")
+	}
 }
 
 // TestSetDefaultSubscription_GlobalSwitch_PreservesPerSession verifies that a global

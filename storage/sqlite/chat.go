@@ -3,6 +3,7 @@ package sqlite
 import (
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	log "xbot/logger"
 )
+
+var ErrChatNotFound = errors.New("chat not found")
 
 // UserChat represents a chatroom owned by a user.
 type UserChat struct {
@@ -234,7 +237,7 @@ func (s *ChatService) DeleteChat(channel, senderID, chatID string) error {
 
 	rows, _ := result.RowsAffected()
 	if rows == 0 && count == 0 {
-		return fmt.Errorf("chat not found")
+		return ErrChatNotFound
 	}
 
 	log.WithFields(log.Fields{

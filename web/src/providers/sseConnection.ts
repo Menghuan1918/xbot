@@ -3,6 +3,7 @@ import {
   bumpProgressGeneration,
   clearProgressSnapshot,
   getLastSeq,
+  hasLastSeq,
   progressSnapshotCache,
   resetLastSeq,
   sessionCacheKey,
@@ -50,6 +51,7 @@ export class SSEConnectionImpl implements WSConnection {
   private replayTimer: ReturnType<typeof setTimeout> | null = null
   private sessionVersion = 0
   private progressVersion = 0
+  private recoveryRequestVersion = 0
 
   private messageHandlers = new Set<Handler<WSMessage>>()
   private sessionHandlers = new Set<Handler<SessionEvent>>()
@@ -70,9 +72,15 @@ export class SSEConnectionImpl implements WSConnection {
 
   setLastSeq(chatID: string, seq: number, channel = this._channel): void {
     const cacheKey = sessionCacheKey(channel, chatID)
-    if (!chatID || seq <= getLastSeq(cacheKey)) return
+    if (!chatID) return
+    const previousSeq = getLastSeq(cacheKey)
     setLastSeq(cacheKey, seq)
-    if (this._chatID === chatID && this._channel === channel && this.source) this.restartSource()
+    if (
+      seq > previousSeq &&
+      this._chatID === chatID &&
+      this._channel === channel &&
+      this.source
+    ) this.restartSource()
   }
 
   async send(msg: WSClientMessage): Promise<void> {
@@ -143,8 +151,11 @@ export class SSEConnectionImpl implements WSConnection {
     if (this.disposed || !chatID || typeof EventSource === 'undefined') return
 
     const params = new URLSearchParams({ chat_id: chatID, channel })
-    const lastSeq = getLastSeq(sessionCacheKey(channel, chatID))
-    params.set('last_event_id', String(lastSeq))
+    const cacheKey = sessionCacheKey(channel, chatID)
+    const lastSeq = getLastSeq(cacheKey)
+    if (hasLastSeq(cacheKey)) {
+      params.set('last_event_id', String(lastSeq))
+    }
 
     let source: EventSource
     try {
@@ -278,6 +289,7 @@ export class SSEConnectionImpl implements WSConnection {
   private async restoreActiveProgress(channel: string, chatID: string): Promise<void> {
     const sessionVersion = this.sessionVersion
     const progressVersion = this.progressVersion
+    const recoveryRequestVersion = ++this.recoveryRequestVersion
     try {
       const progress = await this.rpc<ProgressEvent | null>('get_active_progress', {
         channel,
@@ -287,7 +299,8 @@ export class SSEConnectionImpl implements WSConnection {
         this._channel !== channel ||
         this._chatID !== chatID ||
         this.sessionVersion !== sessionVersion ||
-        this.progressVersion !== progressVersion
+        this.progressVersion !== progressVersion ||
+        this.recoveryRequestVersion !== recoveryRequestVersion
       ) return
       bumpProgressGeneration(sessionCacheKey(channel, chatID))
       this.progressVersion += 1

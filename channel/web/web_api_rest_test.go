@@ -165,6 +165,43 @@ func TestRESTChatCRUDPassesChannelToCallbacks(t *testing.T) {
 	}
 }
 
+func TestRESTChatDeleteAllowsAdminVerifiedLocalCLISession(t *testing.T) {
+	db := newTestDB(t)
+	wc := NewWebChannel(WebChannelConfig{DB: db}, bus.NewMessageBus())
+	deleted := false
+	wc.SetCallbacks(WebCallbacks{
+		LocalSessionExists: func(channel, chatID string) bool {
+			return channel == "cli" && chatID == "/repo/project:local-only"
+		},
+		ChatDelete: func(senderID, channel, chatID string) error {
+			deleted = senderID == "web-1" && channel == "cli" && chatID == "/repo/project:local-only"
+			return nil
+		},
+	})
+	foreignRequest := authedAPIRequestFor(
+		http.MethodPost,
+		"/api/chats/local/delete",
+		[]byte(`{"channel":"cli"}`),
+		"web-2",
+		2,
+	)
+	foreignRequest.SetPathValue("chatID", "/repo/project:local-only")
+	foreignRecorder := httptest.NewRecorder()
+	wc.handleChatDeletePOST(foreignRecorder, foreignRequest)
+	if foreignRecorder.Code != http.StatusForbidden || deleted {
+		t.Fatalf("non-admin local CLI delete status=%d deleted=%v", foreignRecorder.Code, deleted)
+	}
+
+	request := authedAPIRequest(http.MethodPost, "/api/chats/local/delete", []byte(`{"channel":"cli"}`))
+	request.SetPathValue("chatID", "/repo/project:local-only")
+	recorder := httptest.NewRecorder()
+	wc.handleChatDeletePOST(recorder, request)
+
+	if recorder.Code != http.StatusOK || !deleted {
+		t.Fatalf("local CLI delete status=%d deleted=%v body=%s", recorder.Code, deleted, recorder.Body.String())
+	}
+}
+
 func TestRESTMessageCancelAndAskUserReuseInboundPath(t *testing.T) {
 	db := newTestDB(t)
 	msgBus := bus.NewMessageBus()

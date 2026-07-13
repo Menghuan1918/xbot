@@ -685,6 +685,7 @@ export function useSessionStoreImpl(): SessionStore {
   const activeSessionRef = useRef(activeSession)
   activeSessionRef.current = activeSession
   const refreshSeqRef = useRef(0)
+  const switchSeqRef = useRef(0)
   const subAgentRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const transientSubAgentsRef = useRef(new Map<string, TransientSubAgent>())
 
@@ -831,6 +832,7 @@ export function useSessionStoreImpl(): SessionStore {
 
   const switchSession = useCallback(
     async (id: string, ch: string): Promise<void> => {
+      const switchSeq = ++switchSeqRef.current
       const useChannel = ch || DEFAULT_CHANNEL
       try {
         await postAPI<SwitchChatResponse>(
@@ -840,6 +842,7 @@ export function useSessionStoreImpl(): SessionStore {
       } catch {
         return
       }
+      if (switchSeq !== switchSeqRef.current) return
       const selector = { channel: useChannel, chatID: id }
       activeSessionRef.current = selector
       setActiveSession(selector)

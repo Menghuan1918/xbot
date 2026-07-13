@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -592,14 +593,19 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) we
 		if webDB == nil {
 			return fmt.Errorf("database not available")
 		}
+		removedLocal := false
 		if channel == "cli" {
-			if err := cli.RemoveStoredSessionByChatID(chatID); err != nil {
+			var err error
+			removedLocal, err = cli.RemoveStoredSessionByChatID(chatID)
+			if err != nil {
 				return fmt.Errorf("remove CLI session metadata: %w", err)
 			}
 		}
 		cs := sqlite.NewChatService(webDB)
 		if err := cs.DeleteChat(channel, senderID, chatID); err != nil {
-			return err
+			if !removedLocal || !errors.Is(err, sqlite.ErrChatNotFound) {
+				return err
+			}
 		}
 		ag.CleanupSessionFiles(channel, chatID)
 		tools.GlobalWorktreeRegistry.CleanupSession(channel + ":" + chatID)
@@ -613,6 +619,9 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) we
 		}
 		cs := sqlite.NewChatService(webDB)
 		return cs.RenameChat(channel, senderID, chatID, label)
+	}
+	callbacks.LocalSessionExists = func(channel, chatID string) bool {
+		return channel == "cli" && cli.StoredSessionExists(chatID)
 	}
 
 	// Identity resolver — wire agent's IdentityResolver to WebChannel

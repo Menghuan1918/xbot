@@ -1418,7 +1418,8 @@ func (wc *WebChannel) handleChatRename(w http.ResponseWriter, r *http.Request) {
 
 // canAccessSession checks whether a browser-authenticated user may address a
 // session. Web UUID chats are owned through user_chats; non-web sessions are
-// admin-only and must exist in tenants.
+// admin-only unless canonical ownership is recorded. CLI metadata-only rows
+// surfaced in the session tree are also addressable by admins.
 func (wc *WebChannel) canAccessSession(ctx context.Context, webUserID int, senderID, channelName, chatID string) bool {
 	if channelName == "" {
 		channelName = "web"
@@ -1448,7 +1449,7 @@ func (wc *WebChannel) canAccessCanonicalSession(webUserID int, senderID, channel
 		uid, role, err := wc.callbacks.IdentityResolver.Resolve("web", senderID)
 		if err == nil && uid > 0 {
 			if role == "admin" {
-				return wc.tenantExists(channelName, chatID)
+				return wc.canonicalSessionExists(channelName, chatID)
 			}
 			// Non-admin: check canonical session ownership
 			var ownerUserID int64
@@ -1464,9 +1465,16 @@ func (wc *WebChannel) canAccessCanonicalSession(webUserID int, senderID, channel
 	}
 	// Legacy fallback: web-1 or "admin" is admin
 	if senderID == "admin" || webUserID == 1 {
-		return wc.tenantExists(channelName, chatID)
+		return wc.canonicalSessionExists(channelName, chatID)
 	}
 	return false
+}
+
+func (wc *WebChannel) canonicalSessionExists(channelName, chatID string) bool {
+	if wc.tenantExists(channelName, chatID) {
+		return true
+	}
+	return wc.callbacks.LocalSessionExists != nil && wc.callbacks.LocalSessionExists(channelName, chatID)
 }
 
 func (wc *WebChannel) tenantExists(channelName, chatID string) bool {

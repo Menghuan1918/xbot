@@ -25,8 +25,12 @@ func TestRemoveStoredSessionByChatIDPreservesOtherSessionMetadata(t *testing.T) 
 	if err := ds.save(); err != nil {
 		t.Fatal(err)
 	}
-	if err := RemoveStoredSessionByChatID(target); err != nil {
+	removed, err := RemoveStoredSessionByChatID(target)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !removed || StoredSessionExists(target) {
+		t.Fatalf("removed = %v, still exists = %v", removed, StoredSessionExists(target))
 	}
 
 	data, err := os.ReadFile(filepath.Join(sessionsDir(), sessionDirHash(workDir)+".json"))

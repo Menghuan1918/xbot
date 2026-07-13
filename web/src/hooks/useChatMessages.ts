@@ -413,7 +413,7 @@ export function useChatMessages({
         cursorCacheKey === progressCacheKey &&
         getProgressGeneration(cursorCacheKey) !== progressGen,
       )
-      if (data.last_seq && cursorChatID && !progressChanged && !mutated) {
+      if (typeof data.last_seq === 'number' && cursorChatID && !progressChanged && !mutated) {
         ws.setLastSeq(cursorChatID, data.last_seq, cursorChannel)
       }
       const rows = data.messages ?? []

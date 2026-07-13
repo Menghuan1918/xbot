@@ -362,11 +362,12 @@ func (ds *dirSessions) removeSessionByChatID(chatID string) error {
 
 // RemoveStoredSessionByChatID removes a CLI session from whichever local
 // per-directory session file owns it. Missing records are already clean.
-func RemoveStoredSessionByChatID(chatID string) error {
+func RemoveStoredSessionByChatID(chatID string) (bool, error) {
 	paths, err := filepath.Glob(filepath.Join(sessionsDir(), "*.json"))
 	if err != nil {
-		return err
+		return false, err
 	}
+	removed := false
 	for _, path := range paths {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -386,19 +387,44 @@ func RemoveStoredSessionByChatID(chatID string) error {
 			}
 			encoded, err := json.MarshalIndent(&ds, "", "  ")
 			if err != nil {
-				return err
+				return removed, err
 			}
 			tmp := path + ".tmp"
 			if err := os.WriteFile(tmp, encoded, 0o600); err != nil {
-				return err
+				return removed, err
 			}
 			if err := os.Rename(tmp, path); err != nil {
-				return err
+				return removed, err
 			}
+			removed = true
 			break
 		}
 	}
-	return nil
+	return removed, nil
+}
+
+// StoredSessionExists reports whether local CLI metadata contains chatID.
+func StoredSessionExists(chatID string) bool {
+	paths, err := filepath.Glob(filepath.Join(sessionsDir(), "*.json"))
+	if err != nil {
+		return false
+	}
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var ds dirSessions
+		if err := json.Unmarshal(data, &ds); err != nil {
+			continue
+		}
+		for _, stored := range ds.Sessions {
+			if stored.ChatID == chatID {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // sortedSessions returns sessions sorted by creation time (newest first).

@@ -1210,6 +1210,59 @@ describe('normalizeSessionTree', () => {
     expect(result.current.sessions.find((s) => s.chatID === 'second')?.isCurrent).toBe(true)
   })
 
+  it('keeps the latest session switch when REST responses resolve out of order', async () => {
+    let resolveA!: (response: Response) => void
+    let resolveB!: (response: Response) => void
+    const responseA = new Promise<Response>((resolve) => { resolveA = resolve })
+    const responseB = new Promise<Response>((resolve) => { resolveB = resolve })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats') {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            chats: [
+              { chat_id: 'initial', channel: 'cli', label: 'initial', is_current: true, last_active: '2026-07-08T00:00:00Z' },
+              { chat_id: 'session-a', channel: 'cli', label: 'A', last_active: '2026-07-08T00:00:01Z' },
+              { chat_id: 'session-b', channel: 'cli', label: 'B', last_active: '2026-07-08T00:00:02Z' },
+            ],
+          }),
+        } as Response
+      }
+      if (url === '/api/chats/session-a/switch?channel=cli') return responseA
+      if (url === '/api/chats/session-b/switch?channel=cli') return responseB
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useSessionStoreImpl())
+    await waitFor(() => expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'initial' }))
+
+    let switchA!: Promise<void>
+    let switchB!: Promise<void>
+    act(() => {
+      switchA = result.current.switchSession('session-a', 'cli')
+      switchB = result.current.switchSession('session-b', 'cli')
+    })
+    await act(async () => {
+      resolveB({
+        ok: true,
+        json: async () => ({ ok: true, data: { chat_id: 'session-b', channel: 'cli' }, error: null }),
+      } as Response)
+      await switchB
+    })
+    expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'session-b' })
+
+    await act(async () => {
+      resolveA({
+        ok: true,
+        json: async () => ({ ok: true, data: { chat_id: 'session-a', channel: 'cli' }, error: null }),
+      } as Response)
+      await switchA
+    })
+    expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'session-b' })
+  })
+
   it('keeps session object identity when a background refresh returns the same tree', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)

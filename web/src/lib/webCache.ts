@@ -52,8 +52,12 @@ export function getLastSeq(cacheKey: string): number {
   return lastSeqCache.get(cacheKey) ?? 0
 }
 
+export function hasLastSeq(cacheKey: string): boolean {
+  return lastSeqCache.has(cacheKey)
+}
+
 export function setLastSeq(cacheKey: string, seq: number): void {
-  if (seq > getLastSeq(cacheKey)) lastSeqCache.set(cacheKey, seq)
+  if (!hasLastSeq(cacheKey) || seq > getLastSeq(cacheKey)) lastSeqCache.set(cacheKey, seq)
 }
 
 export function resetLastSeq(cacheKey: string): void {

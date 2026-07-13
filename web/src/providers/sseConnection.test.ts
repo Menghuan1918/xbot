@@ -77,17 +77,17 @@ afterEach(() => {
 })
 
 describe('SSEConnectionImpl', () => {
-  it('registers all contract event types and closes the prior chat stream', () => {
+  it('omits a replay cursor on cold startup, registers all events, and closes the prior stream', () => {
     const connection = new SSEConnectionImpl()
     connection.subscribe('chat-a')
     const first = MockEventSource.instances[0]
 
     expect([...first.listeners.keys()]).toEqual(SSE_EVENT_TYPES)
-    expect(first.url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=0')
+    expect(first.url).toBe('/api/sse?chat_id=chat-a&channel=web')
 
     connection.subscribe('chat-b', 'cli')
     expect(first.closed).toBe(true)
-    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=cli&last_event_id=0')
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=cli')
     connection.dispose()
   })
 
@@ -102,7 +102,7 @@ describe('SSEConnectionImpl', () => {
 
     connection.subscribe('shared', 'cli')
     const cliSource = MockEventSource.instances[1]
-    expect(cliSource.url).toBe('/api/sse?chat_id=shared&channel=cli&last_event_id=0')
+    expect(cliSource.url).toBe('/api/sse?chat_id=shared&channel=cli')
     cliSource.emit('progress_structured', {
       type: 'progress_structured',
       seq: 1,
@@ -119,11 +119,12 @@ describe('SSEConnectionImpl', () => {
     connection.dispose()
   })
 
-  it('replays from zero after switching away before the first event', () => {
+  it('replays from a zero cursor established by history', () => {
     const connection = new SSEConnectionImpl()
     const received: WSMessage[] = []
     connection.onMessage((message) => received.push(message))
     connection.subscribe('chat-a')
+    connection.setLastSeq('chat-a', 0)
     connection.subscribe('chat-b')
     connection.subscribe('chat-a')
 
@@ -156,7 +157,7 @@ describe('SSEConnectionImpl', () => {
     connection.subscribe('chat-a')
 
     expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=web&last_event_id=9')
-    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=0')
+    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&channel=web')
     connection.dispose()
   })
 
@@ -167,7 +168,7 @@ describe('SSEConnectionImpl', () => {
     connection.subscribe('chat-a')
     const initial = MockEventSource.instances[0]
 
-    expect(initial.url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=0')
+    expect(initial.url).toBe('/api/sse?chat_id=chat-a&channel=web')
     connection.setLastSeq('chat-a', 2)
     const resumed = MockEventSource.instances[1]
     expect(initial.closed).toBe(true)
@@ -452,6 +453,39 @@ describe('SSEConnectionImpl', () => {
       type: 'progress_structured',
       progress: { phase: 'tool', iteration: 7 },
     })
+    connection.dispose()
+  })
+
+  it('lets the newest overlapping progress recovery win', async () => {
+    const resolvers: Array<(progress: { phase: string; iteration: number }) => void> = []
+    postAPIMock.mockImplementation((endpoint: string) => {
+      if (endpoint === '/api/rpc') {
+        return new Promise((resolve) => {
+          resolvers.push(resolve)
+        })
+      }
+      return Promise.resolve({})
+    })
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+
+    source.emit('runner_status', { type: 'runner_status', seq: 4 })
+    source.emit('card', { type: 'card', seq: 7 })
+    expect(resolvers).toHaveLength(2)
+
+    resolvers[0]({ phase: 'tool', iteration: 1 })
+    await Promise.resolve()
+    expect(received.filter((message) => message.type === 'progress_structured')).toEqual([])
+
+    resolvers[1]({ phase: 'tool', iteration: 2 })
+    await Promise.resolve()
+    expect(received.filter((message) => message.type === 'progress_structured')).toEqual([
+      expect.objectContaining({ progress: { phase: 'tool', iteration: 2 } }),
+    ])
     connection.dispose()
   })
 
