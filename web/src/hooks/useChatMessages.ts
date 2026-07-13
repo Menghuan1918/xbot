@@ -185,11 +185,29 @@ function reconcileHistoryWithLiveRows(
   current: ChatMessage[],
   historySeq?: number,
 ): ChatMessage[] {
-  const liveRows = current.filter((message) => (
-    message.persisted === false &&
-    (historySeq === undefined || message.eventSeq === undefined || message.eventSeq > historySeq)
-  ))
+  const matchedHistoryRows = new Set<number>()
+  const liveRows = current.filter((message) => {
+    if (message.persisted !== false) return false
+    if (historySeq === undefined || message.eventSeq === undefined || message.eventSeq > historySeq) {
+      return true
+    }
+    const match = history.findIndex((persisted, index) => (
+      !matchedHistoryRows.has(index) && sameMessageOccurrence(persisted, message)
+    ))
+    if (match < 0) return true
+    matchedHistoryRows.add(match)
+    return false
+  })
   return [...history, ...liveRows]
+}
+
+function sameMessageOccurrence(persisted: ChatMessage, live: ChatMessage): boolean {
+  if (persisted.role !== live.role || persisted.content !== live.content) return false
+  const persistedAt = Date.parse(persisted.timestamp)
+  const liveAt = Date.parse(live.timestamp)
+  return Number.isFinite(persistedAt) &&
+    Number.isFinite(liveAt) &&
+    Math.abs(persistedAt - liveAt) <= 5_000
 }
 
 /** Parse SubAgent messages (simple role/content) into ChatMessage[]. */

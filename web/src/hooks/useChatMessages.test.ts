@@ -245,6 +245,7 @@ describe('useChatMessages', () => {
   })
 
   it('does not duplicate a replayed user echo already covered by history', async () => {
+    const replayTimestamp = '2026-08-06T07:06:40Z'
     const history = deferred<{
       messages: { role: string; content: string; timestamp: string }[]
       chat_id: string
@@ -277,7 +278,7 @@ describe('useChatMessages', () => {
         type: 'user_echo',
         chat_id: 'replay-chat',
         content: 'message with attachment',
-        ts: 1_786_000_000,
+        ts: Date.parse(replayTimestamp) / 1000,
         seq: 7,
       })
     })
@@ -290,7 +291,7 @@ describe('useChatMessages', () => {
         messages: [{
           role: 'user',
           content: 'message with attachment',
-          timestamp: '2026-07-08T00:00:00Z',
+          timestamp: replayTimestamp,
         }],
         chat_id: 'replay-chat',
         last_seq: 7,
@@ -304,6 +305,62 @@ describe('useChatMessages', () => {
       persisted: true,
     })
     expect(messagesCache.get('replay-chat')).toHaveLength(1)
+    expect(ws.setLastSeq).not.toHaveBeenCalled()
+  })
+
+  it('keeps a covered replay echo when history does not contain that occurrence', async () => {
+    const history = deferred<{
+      messages: never[]
+      chat_id: string
+      last_seq: number
+    }>()
+    let messageHandler: ((message: WSMessage) => void) | null = null
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const data = await history.promise
+      return new Response(JSON.stringify({ ok: true, data, error: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }))
+    const ws = {
+      rpc: vi.fn(),
+      send: vi.fn(async () => undefined),
+      setLastSeq: vi.fn(),
+      onMessage: vi.fn((handler) => {
+        messageHandler = handler
+        return vi.fn()
+      }),
+    } as unknown as WSConnection
+    const { result } = renderHook(() => (
+      useChatMessages({ chatID: 'missing-echo-chat', channel: 'web', ws })
+    ))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+
+    act(() => {
+      messageHandler?.({
+        type: 'user_echo',
+        chat_id: 'missing-echo-chat',
+        content: 'not persisted yet',
+        ts: Date.parse('2026-08-06T07:06:40Z') / 1000,
+        seq: 7,
+      })
+    })
+    await act(async () => {
+      history.resolve({
+        messages: [],
+        chat_id: 'missing-echo-chat',
+        last_seq: 7,
+      })
+      await history.promise
+    })
+
+    await waitFor(() => expect(result.current.messages).toHaveLength(1))
+    expect(result.current.messages[0]).toMatchObject({
+      content: 'not persisted yet',
+      persisted: false,
+      eventSeq: 7,
+    })
+    expect(messagesCache.get('missing-echo-chat')).toHaveLength(1)
     expect(ws.setLastSeq).not.toHaveBeenCalled()
   })
 

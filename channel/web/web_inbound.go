@@ -103,15 +103,6 @@ func (wc *WebChannel) dispatchUserMessage(ctx context.Context, identity inboundI
 		}
 	}
 
-	if content != originalContent && len(msg.UploadKeys) > 0 {
-		wc.hub.sendToClient(sel.ChatID, protocol.WSMessage{
-			Type:            protocol.MsgTypeUserEcho,
-			Content:         content,
-			OriginalContent: originalContent,
-			TS:              time.Now().Unix(),
-		})
-	}
-
 	trimmed := strings.TrimSpace(content)
 	if wc.db != nil && shouldEagerSaveUserMessage(sel.Channel, trimmed) {
 		if err := eagerSaveUserMsg(wc.db, sel.Channel, sel.ChatID, content); err != nil {
@@ -119,6 +110,18 @@ func (wc *WebChannel) dispatchUserMessage(ctx context.Context, identity inboundI
 		} else {
 			metadata["user_msg_eager_saved"] = "true"
 		}
+	}
+
+	// Publish the expanded attachment echo only after the eager history write.
+	// A history snapshot whose cursor covers this event can then also observe
+	// the persisted user message.
+	if content != originalContent && len(msg.UploadKeys) > 0 {
+		wc.hub.sendToClient(sel.ChatID, protocol.WSMessage{
+			Type:            protocol.MsgTypeUserEcho,
+			Content:         content,
+			OriginalContent: originalContent,
+			TS:              time.Now().Unix(),
+		})
 	}
 
 	err = wc.enqueueInbound(ctx, bus.InboundMessage{
