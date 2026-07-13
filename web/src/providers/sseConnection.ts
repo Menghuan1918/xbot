@@ -208,7 +208,7 @@ export class SSEConnectionImpl implements WSConnection {
       } else if (seq === previousSeq) {
         return
       }
-      if (previousSeq > 0 && seq > previousSeq + 1) {
+      if (seq > previousSeq + 1) {
         replayGap = true
       }
       msg.seq = seq

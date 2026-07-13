@@ -16,8 +16,8 @@
  *   POST   /api/session-tree                 → { ok, data: { sessions } }
  *   POST   /api/chats/create {label}         → { ok, data: { chat_id } }
  *   POST   /api/chats/{id}/switch {channel}  → { ok, data: { chat_id, channel } }
- *   POST   /api/chats/{id}/rename {label}    → { ok }
- *   POST   /api/chats/{id}/delete            → { ok, data: {} }
+ *   POST   /api/chats/{id}/rename {channel,label} → { ok }
+ *   POST   /api/chats/{id}/delete {channel}       → { ok, data: {} }
  *   POST   /api/rpc set_cwd                  → set working directory
  *   GET    /api/sse?chat_id=...&channel=...  → server events
  */
@@ -853,7 +853,7 @@ export function useSessionStoreImpl(): SessionStore {
 
   const renameSession = useCallback(async (id: string, channel: string, label: string): Promise<boolean> => {
     try {
-      await postAPI(`/api/chats/${encodeURIComponent(id)}/rename`, { label })
+      await postAPI(`/api/chats/${encodeURIComponent(id)}/rename`, { channel, label })
     } catch {
       return false
     }
@@ -865,7 +865,7 @@ export function useSessionStoreImpl(): SessionStore {
   const deleteSession = useCallback(
     async (id: string, channel: string): Promise<boolean> => {
       try {
-        await postAPI(`/api/chats/${encodeURIComponent(id)}/delete`)
+        await postAPI(`/api/chats/${encodeURIComponent(id)}/delete`, { channel })
       } catch {
         return false
       }

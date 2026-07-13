@@ -538,7 +538,18 @@ func (wc *WebChannel) handleChatSwitchPOST(w http.ResponseWriter, r *http.Reques
 }
 
 func (wc *WebChannel) handleChatDeletePOST(w http.ResponseWriter, r *http.Request) {
-	wc.handleChatDelete(w, legacyRequest(r, http.MethodDelete, nil, nil))
+	var body struct {
+		Channel string `json:"channel,omitempty"`
+	}
+	if err := decodeJSONBody(r, &body, true); err != nil {
+		jsonErrorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	query := make(url.Values)
+	if body.Channel != "" {
+		query.Set("channel", body.Channel)
+	}
+	wc.handleChatDelete(w, legacyRequest(r, http.MethodDelete, query, nil))
 }
 
 func (wc *WebChannel) handleSessionTreePOST(w http.ResponseWriter, r *http.Request) {

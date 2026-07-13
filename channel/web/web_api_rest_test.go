@@ -100,6 +100,56 @@ func TestRESTResponseEnvelope(t *testing.T) {
 	}
 }
 
+func TestRESTChatCRUDPassesChannelToCallbacks(t *testing.T) {
+	db := newTestDB(t)
+	wc := NewWebChannel(WebChannelConfig{DB: db}, bus.NewMessageBus())
+	if _, err := db.Exec(
+		"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
+		"cli", "shared", time.Now().Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+	var renamed, deleted SessionSelector
+	wc.SetCallbacks(WebCallbacks{
+		ChatRename: func(senderID, channel, chatID, label string) error {
+			if senderID != "web-1" || label != "renamed" {
+				t.Fatalf("rename callback args = (%q, %q)", senderID, label)
+			}
+			renamed = SessionSelector{Channel: channel, ChatID: chatID}
+			return nil
+		},
+		ChatDelete: func(senderID, channel, chatID string) error {
+			if senderID != "web-1" {
+				t.Fatalf("delete sender = %q", senderID)
+			}
+			deleted = SessionSelector{Channel: channel, ChatID: chatID}
+			return nil
+		},
+	})
+
+	rename := authedAPIRequest(http.MethodPost, "/api/chats/shared/rename", []byte(`{"channel":"cli","label":"renamed"}`))
+	rename.SetPathValue("chatID", "shared")
+	renameRecorder := httptest.NewRecorder()
+	wc.handleChatRename(renameRecorder, rename)
+	if renameRecorder.Code != http.StatusOK {
+		t.Fatalf("rename status = %d: %s", renameRecorder.Code, renameRecorder.Body.String())
+	}
+	if renamed != (SessionSelector{Channel: "cli", ChatID: "shared"}) {
+		t.Fatalf("rename selector = %#v", renamed)
+	}
+
+	deleteRequest := authedAPIRequest(http.MethodPost, "/api/chats/shared/delete", []byte(`{"channel":"cli"}`))
+	deleteRequest.SetPathValue("chatID", "shared")
+	deleteRecorder := httptest.NewRecorder()
+	wc.handleChatDeletePOST(deleteRecorder, deleteRequest)
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("delete status = %d: %s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+	if deleted != (SessionSelector{Channel: "cli", ChatID: "shared"}) {
+		t.Fatalf("delete selector = %#v", deleted)
+	}
+}
+
 func TestRESTMessageCancelAndAskUserReuseInboundPath(t *testing.T) {
 	db := newTestDB(t)
 	msgBus := bus.NewMessageBus()

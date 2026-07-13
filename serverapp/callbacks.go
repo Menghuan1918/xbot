@@ -587,19 +587,26 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) we
 		cs := sqlite.NewChatService(webDB)
 		return cs.CreateChat("web", senderID, label)
 	}
-	callbacks.ChatDelete = func(senderID, chatID string) error {
+	callbacks.ChatDelete = func(senderID, channel, chatID string) error {
 		if webDB == nil {
 			return fmt.Errorf("database not available")
 		}
 		cs := sqlite.NewChatService(webDB)
-		return cs.DeleteChat("web", senderID, chatID)
+		if err := cs.DeleteChat(channel, senderID, chatID); err != nil {
+			return err
+		}
+		ag.CleanupSessionFiles(channel, chatID)
+		tools.GlobalWorktreeRegistry.CleanupSession(channel + ":" + chatID)
+		session.DeletePersistedCWD(channel, chatID)
+		_ = ag.MultiSession().DestroySession(channel, chatID)
+		return nil
 	}
-	callbacks.ChatRename = func(senderID, chatID, label string) error {
+	callbacks.ChatRename = func(senderID, channel, chatID, label string) error {
 		if webDB == nil {
 			return fmt.Errorf("database not available")
 		}
 		cs := sqlite.NewChatService(webDB)
-		return cs.RenameChat("web", senderID, chatID, label)
+		return cs.RenameChat(channel, senderID, chatID, label)
 	}
 
 	// Identity resolver — wire agent's IdentityResolver to WebChannel
@@ -770,7 +777,7 @@ func listTenantsByChannel(db *sql.DB, channel, currentChatID string) ([]web.User
 	rows, err := db.Query(`
 		SELECT t.id, t.chat_id, t.last_active_at,
 									COALESCE((SELECT uc.label FROM user_chats uc
-										WHERE uc.chat_id = t.chat_id AND uc.label != ''
+					WHERE uc.channel = t.channel AND uc.chat_id = t.chat_id AND uc.label != ''
 										ORDER BY uc.rowid DESC LIMIT 1), '') AS label,
 		       (SELECT sm.content FROM session_messages sm
 		        WHERE sm.tenant_id = t.id AND sm.role IN ('user', 'assistant')

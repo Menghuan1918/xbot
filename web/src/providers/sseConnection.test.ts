@@ -451,6 +451,32 @@ describe('SSEConnectionImpl', () => {
     connection.dispose()
   })
 
+  it('requests active progress when replay overflow starts above a zero cursor', async () => {
+    postAPIMock.mockImplementation(async (endpoint: string) => {
+      if (endpoint === '/api/rpc') return { phase: 'tool', iteration: 4 }
+      return {}
+    })
+    const connection = new SSEConnectionImpl()
+    const received: WSMessage[] = []
+    connection.onMessage((message) => received.push(message))
+    connection.subscribe('chat-zero')
+    const source = MockEventSource.instances[0]
+    source.open()
+
+    source.emit('text', { type: 'text', seq: 4, content: 'first retained event' })
+    await Promise.resolve()
+
+    expect(postAPIMock).toHaveBeenCalledWith('/api/rpc', {
+      method: 'get_active_progress',
+      params: { channel: 'web', chat_id: 'chat-zero' },
+    })
+    expect(received.at(-1)).toMatchObject({
+      type: 'progress_structured',
+      progress: { phase: 'tool', iteration: 4 },
+    })
+    connection.dispose()
+  })
+
   it('accepts a lower sequence after the server sequence restarts', () => {
     const connection = new SSEConnectionImpl()
     const received: WSMessage[] = []

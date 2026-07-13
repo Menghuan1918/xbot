@@ -1278,7 +1278,6 @@ func (wc *WebChannel) handleChatSwitch(w http.ResponseWriter, r *http.Request) {
 		jsonErrorResponse(w, http.StatusBadRequest, "chat_id is required")
 		return
 	}
-
 	channel := r.URL.Query().Get("channel")
 	if channel == "" {
 		channel = "web"
@@ -1334,26 +1333,29 @@ func (wc *WebChannel) handleChatDelete(w http.ResponseWriter, r *http.Request) {
 		jsonErrorResponse(w, http.StatusBadRequest, "chat_id is required")
 		return
 	}
+	channelName := strings.TrimSpace(r.URL.Query().Get("channel"))
+	if channelName == "" {
+		channelName = "web"
+	}
 
 	if wc.callbacks.ChatDelete == nil {
 		jsonErrorResponse(w, http.StatusNotImplemented, "chat deletion not available")
 		return
 	}
 
-	// Ownership check: admin can delete any chat; non-admin must own it
-	if !wc.isAdmin(r.Context(), senderID) && !wc.userOwnsChat(senderID, chatID) {
+	if !wc.canAccessSession(r.Context(), userIDFromContext(r.Context()), senderID, channelName, chatID) {
 		jsonErrorResponse(w, http.StatusForbidden, "not your chat")
 		return
 	}
 
-	if err := wc.callbacks.ChatDelete(senderID, chatID); err != nil {
+	if err := wc.callbacks.ChatDelete(senderID, channelName, chatID); err != nil {
 		jsonErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	// If deleting current chat, reset to default session
 	wc.userCurrentSessionMu.Lock()
-	if sel, ok := wc.userCurrentSession[senderID]; ok && sel.ChatID == chatID {
+	if sel, ok := wc.userCurrentSession[senderID]; ok && sel.Channel == channelName && sel.ChatID == chatID {
 		delete(wc.userCurrentSession, senderID)
 	}
 	wc.userCurrentSessionMu.Unlock()
@@ -1379,14 +1381,9 @@ func (wc *WebChannel) handleChatRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ownership check: admin can rename any chat; non-admin must own it
-	if !wc.isAdmin(r.Context(), senderID) && !wc.userOwnsChat(senderID, chatID) {
-		jsonErrorResponse(w, http.StatusForbidden, "not your chat")
-		return
-	}
-
 	var req struct {
-		Label string `json:"label"`
+		Channel string `json:"channel"`
+		Label   string `json:"label"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		jsonErrorResponse(w, http.StatusBadRequest, "invalid request body")
@@ -1396,13 +1393,21 @@ func (wc *WebChannel) handleChatRename(w http.ResponseWriter, r *http.Request) {
 		jsonErrorResponse(w, http.StatusBadRequest, "label is required")
 		return
 	}
+	if req.Channel == "" {
+		req.Channel = "web"
+	}
+
+	if !wc.canAccessSession(r.Context(), userIDFromContext(r.Context()), senderID, req.Channel, chatID) {
+		jsonErrorResponse(w, http.StatusForbidden, "not your chat")
+		return
+	}
 
 	if wc.callbacks.ChatRename == nil {
 		jsonErrorResponse(w, http.StatusNotImplemented, "chat rename not available")
 		return
 	}
 
-	if err := wc.callbacks.ChatRename(senderID, chatID, req.Label); err != nil {
+	if err := wc.callbacks.ChatRename(senderID, req.Channel, chatID, req.Label); err != nil {
 		jsonErrorResponse(w, http.StatusBadRequest, err.Error())
 		return
 	}

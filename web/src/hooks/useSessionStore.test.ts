@@ -30,7 +30,6 @@ vi.mock('@/hooks/useWSConnection', () => ({
 vi.mock('@/lib/api', () => ({
   postAPI: async (endpoint: string, body: Record<string, unknown> = {}) => {
     let target = endpoint
-    let method = 'POST'
     if (endpoint === '/api/session-tree') {
       let response = await fetch('/api/chats', { method: 'POST', body: JSON.stringify(body) })
       if (!response.ok) response = await fetch('/api/session-tree', { method: 'POST', body: JSON.stringify(body) })
@@ -46,11 +45,7 @@ vi.mock('@/lib/api', () => ({
       const channel = typeof body.channel === 'string' ? body.channel : 'web'
       target = `${endpoint}?channel=${encodeURIComponent(channel)}`
     }
-    if (endpoint.endsWith('/delete')) {
-      target = endpoint.slice(0, -'/delete'.length)
-      method = 'DELETE'
-    }
-    const response = await fetch(target, { method, body: JSON.stringify(body) })
+    const response = await fetch(target, { method: 'POST', body: JSON.stringify(body) })
     if (!response.ok) throw new Error(`request failed: ${response.status}`)
     const raw = await response.json()
     return raw.data ?? raw
@@ -633,6 +628,47 @@ describe('normalizeSessionTree', () => {
       requestId: 'request-1',
       questions: [{ question: 'Continue?', options: ['yes', 'no'] }],
     })
+  })
+
+  it('sends the selected channel when renaming and deleting matching chat IDs', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/chats') {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            sessions: [
+              { chat_id: 'shared', channel: 'web', label: 'web', last_active: '2026-07-08T00:00:00Z' },
+              { chat_id: 'shared', channel: 'cli', label: 'cli', last_active: '2026-07-08T00:00:01Z' },
+            ],
+          }),
+        } as Response
+      }
+      if (url === '/api/chats/shared/rename' || url === '/api/chats/shared/delete') {
+        return {
+          ok: true,
+          json: async () => ({ ok: true, data: {}, error: null }),
+        } as Response
+      }
+      if (url === '/api/subagents') {
+        return { ok: true, json: async () => ({ ok: true, subagents: [] }) } as Response
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useSessionStoreImpl())
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2))
+
+    await act(async () => {
+      expect(await result.current.renameSession('shared', 'cli', 'renamed')).toBe(true)
+      expect(await result.current.deleteSession('shared', 'cli')).toBe(true)
+    })
+
+    const renameCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/rename'))
+    const deleteCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/delete'))
+    expect(JSON.parse(String(renameCall?.[1]?.body))).toEqual({ channel: 'cli', label: 'renamed' })
+    expect(JSON.parse(String(deleteCall?.[1]?.body))).toEqual({ channel: 'cli' })
   })
 
   it('uses /api/chats as the authoritative SubAgent tree source', async () => {

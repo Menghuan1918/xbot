@@ -1961,6 +1961,71 @@ func TestAgentRPCsCheckGeneratedWebChatOwner(t *testing.T) {
 	}
 }
 
+func TestWebChatCRUDCallbacksKeepChannelsIsolated(t *testing.T) {
+	dir := t.TempDir()
+	ag, err := agent.New(agent.Config{
+		WorkDir:        dir,
+		DBPath:         filepath.Join(dir, "xbot.db"),
+		XbotHome:       dir,
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+	db := ag.MultiSession().DB()
+	for _, channelName := range []string{"web", "cli"} {
+		if _, err := db.Conn().Exec(
+			"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
+			channelName, "shared", time.Now().Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Conn().Exec(
+			"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
+			channelName, "web-1", "shared", channelName+" label",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callbacks := buildWebCallbacks(&config.Config{}, ag, db)
+	if err := callbacks.ChatRename("web-1", "cli", "shared", "renamed cli"); err != nil {
+		t.Fatalf("rename CLI session: %v", err)
+	}
+
+	labels := make(map[string]string)
+	for _, channelName := range []string{"web", "cli"} {
+		rows, err := listTenantsByChannel(db.Conn(), channelName, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s rows = %#v", channelName, rows)
+		}
+		labels[channelName] = rows[0].Label
+	}
+	if labels["web"] != "web label" || labels["cli"] != "renamed cli" {
+		t.Fatalf("cross-channel labels = %#v", labels)
+	}
+
+	if err := callbacks.ChatDelete("web-1", "cli", "shared"); err != nil {
+		t.Fatalf("delete CLI session: %v", err)
+	}
+	for channelName, want := range map[string]int{"web": 1, "cli": 0} {
+		var count int
+		if err := db.Conn().QueryRow(
+			"SELECT COUNT(*) FROM tenants WHERE channel = ? AND chat_id = ?",
+			channelName, "shared",
+		).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("%s tenant count = %d, want %d", channelName, count, want)
+		}
+	}
+}
+
 // TestSetDefaultSubscription_GlobalSwitch_PreservesPerSession verifies that a global
 // subscription switch (chatID="") does NOT destroy other sessions' per-session
 // subscriptions. This was a critical cross-session contamination bug:
