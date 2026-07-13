@@ -98,6 +98,19 @@ describe('SSEConnectionImpl', () => {
     connection.dispose()
   })
 
+  it('stores a history cursor for its explicit chat instead of the active stream', () => {
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+
+    connection.setLastSeq('chat-b', 9)
+    connection.subscribe('chat-b')
+    connection.subscribe('chat-a')
+
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&last_event_id=9')
+    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a')
+    connection.dispose()
+  })
+
   it('deduplicates sequences and records structured progress', () => {
     const connection = new SSEConnectionImpl()
     const received: WSMessage[] = []
@@ -174,6 +187,33 @@ describe('SSEConnectionImpl', () => {
 
     expect(MockEventSource.instances).toHaveLength(2)
     expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-a&last_event_id=5')
+    connection.dispose()
+  })
+
+  it('uses the subscribed CLI channel for polling and progress recovery', async () => {
+    vi.useFakeTimers()
+    postAPIMock.mockImplementation(async (endpoint: string) => {
+      if (endpoint === '/api/rpc') return { phase: 'tool', iteration: 4 }
+      return {}
+    })
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('/repo:Agent-main', 'cli')
+    const source = MockEventSource.instances[0]
+    source.open()
+    source.fail()
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(postAPIMock).toHaveBeenCalledWith('/api/session/status', {
+      channel: 'cli',
+      chat_id: '/repo:Agent-main',
+    })
+
+    source.open()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(postAPIMock).toHaveBeenCalledWith('/api/rpc', {
+      method: 'get_active_progress',
+      params: { channel: 'cli', chat_id: '/repo:Agent-main' },
+    })
     connection.dispose()
   })
 

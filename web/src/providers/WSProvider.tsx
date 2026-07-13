@@ -29,7 +29,7 @@ export function WSProvider({ children }: { children: ReactNode }) {
 
   // Re-render on connection-state flips so consumers can read live status.
   const [connected, setConnected] = useState(conn.connected)
-  const [chatID, setChatID] = useState<string | null>(conn.chatID)
+  const [target, setTarget] = useState(() => ({ chatID: conn.chatID, channel: conn.channel }))
 
   useEffect(() => {
     const offConn = conn.onConnectionChange(setConnected)
@@ -42,35 +42,33 @@ export function WSProvider({ children }: { children: ReactNode }) {
     }
   }, [conn])
 
-  // Keep chatID reactive for the `chatID` field on the context value.
-  useEffect(() => {
-    const off = conn.onMessage((m) => {
-      if (m.type === 'session' && m.session?.chat_id) setChatID(m.session.chat_id)
-    })
-    return off
-  }, [conn])
-
   const value = useMemo<WSConnection>(
     () => ({
       connected,
       send: (msg) => conn.send(msg),
       subscribe: (id, channel) => {
         conn.subscribe(id, channel)
-        setChatID(id)
+        const next = { chatID: id, channel: channel ?? 'web' }
+        setTarget((current) => (
+          current.chatID === next.chatID && current.channel === next.channel ? current : next
+        ))
       },
       disconnect: () => {
         conn.disconnect()
-        setChatID(null)
+        setTarget((current) => (
+          current.chatID === null && current.channel === null ? current : { chatID: null, channel: null }
+        ))
       },
       rpc: (method, params) => conn.rpc(method, params),
-      chatID,
-      setLastSeq: (seq: number) => conn.setLastSeq(seq),
+      chatID: target.chatID,
+      channel: target.channel,
+      setLastSeq: (chatID: string, seq: number) => conn.setLastSeq(chatID, seq),
       onMessage: conn.onMessage,
       onSession: conn.onSession,
       onProgress: conn.onProgress,
       onConnectionChange: conn.onConnectionChange,
     }),
-    [chatID, conn, connected],
+    [conn, connected, target],
   )
 
   return <WSContext.Provider value={value}>{children}</WSContext.Provider>

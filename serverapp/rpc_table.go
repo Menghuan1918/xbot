@@ -67,12 +67,39 @@ func (h *RPCContext) ownOrAdmin(ctx context.Context, channel, chatID string) boo
 	if channel == "web" && h.webChatOwnedBySender(chatID, rpcAuthID(ctx)) {
 		return true
 	}
+	if channel == "agent" && h.agentSessionOwnedBySender(chatID, rpcAuthID(ctx)) {
+		return true
+	}
 	// Check canonical session ownership
 	if h.Ag != nil && h.Ag.IdentityResolver() != nil {
 		userID := rpcUserID(ctx)
 		if userID > 0 {
 			return h.sessionOwnedByUser(channel, chatID, userID)
 		}
+	}
+	return false
+}
+
+func (h *RPCContext) agentSessionOwnedBySender(chatID, senderID string) bool {
+	if senderID == "" || h.Ag == nil || h.Ag.MultiSession() == nil || h.Ag.MultiSession().DB() == nil {
+		return false
+	}
+	var count int
+	err := h.Ag.MultiSession().DB().Conn().QueryRow(
+		`SELECT COUNT(*) FROM tenants WHERE channel = 'agent' AND chat_id = ?`, chatID,
+	).Scan(&count)
+	if err != nil || count == 0 {
+		return false
+	}
+	for depth := 0; depth < 32; depth++ {
+		owner := sessionKeyOwner(chatID)
+		if owner == "" {
+			return false
+		}
+		if owner == senderID {
+			return true
+		}
+		chatID = owner
 	}
 	return false
 }
@@ -845,7 +872,7 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		if p.ChatID == "" {
 			p.ChatID = bizID
 		}
-		if !isAdmin(ctx) && p.ChatID != bizID && p.Channel != "agent" && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
+		if !isAdmin(ctx) && p.ChatID != bizID && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
 			return nil, fmt.Errorf("access denied")
 		}
 		// Update last_active_at so we can restore the most recent session on restart.
@@ -1013,7 +1040,7 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		if p.Channel == "" {
 			p.Channel = "web"
 		}
-		if !isAdmin(ctx) && p.ChatID != bizID && p.Channel != "agent" && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
+		if !isAdmin(ctx) && p.ChatID != bizID && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
 			return nil, fmt.Errorf("access denied")
 		}
 		return h.Ag.GetActiveProgress(p.Channel, p.ChatID, p.FromIteration), nil
@@ -1027,7 +1054,7 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		if p.Channel == "" {
 			p.Channel = "web"
 		}
-		if !isAdmin(ctx) && p.ChatID != bizID && p.Channel != "agent" && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
+		if !isAdmin(ctx) && p.ChatID != bizID && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
 			return nil, fmt.Errorf("access denied")
 		}
 		return h.Ag.GetPendingAskUser(p.Channel, p.ChatID), nil
@@ -1044,7 +1071,7 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		if p.ChatID == "" {
 			p.ChatID = bizID
 		}
-		if !isAdmin(ctx) && p.ChatID != bizID && p.Channel != "agent" && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
+		if !isAdmin(ctx) && p.ChatID != bizID && !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
 			return nil, fmt.Errorf("access denied")
 		}
 		return h.Ag.GetTodos(p.Channel, p.ChatID), nil

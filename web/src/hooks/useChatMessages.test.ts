@@ -145,6 +145,42 @@ describe('useChatMessages', () => {
     expect(third.result.current.messages.map((m) => m.content)).toEqual(['fresh'])
   })
 
+  it('keeps concurrent history cursors scoped to their response chats', async () => {
+    const histories = {
+      'cursor-a': deferred<{ messages: never[]; chat_id: string; last_seq: number }>(),
+      'cursor-b': deferred<{ messages: never[]; chat_id: string; last_seq: number }>(),
+    }
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body)) as { chat_id: keyof typeof histories }
+      const data = await histories[request.chat_id].promise
+      return new Response(JSON.stringify({ ok: true, data, error: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }))
+    const ws = {
+      rpc: vi.fn(),
+      send: vi.fn(async () => undefined),
+      setLastSeq: vi.fn(),
+      onMessage: vi.fn(() => vi.fn()),
+    } as unknown as WSConnection
+
+    const first = renderHook(() => useChatMessages({ chatID: 'cursor-a', channel: 'web', ws }))
+    const second = renderHook(() => useChatMessages({ chatID: 'cursor-b', channel: 'web', ws }))
+
+    await act(async () => {
+      histories['cursor-b'].resolve({ messages: [], chat_id: 'cursor-b', last_seq: 22 })
+      histories['cursor-a'].resolve({ messages: [], chat_id: 'cursor-a', last_seq: 11 })
+      await Promise.all([histories['cursor-a'].promise, histories['cursor-b'].promise])
+    })
+    await waitFor(() => expect(ws.setLastSeq).toHaveBeenCalledTimes(2))
+
+    expect(ws.setLastSeq).toHaveBeenCalledWith('cursor-a', 11)
+    expect(ws.setLastSeq).toHaveBeenCalledWith('cursor-b', 22)
+    first.unmount()
+    second.unmount()
+  })
+
   it('does not flash loading during same-session background reloads after an empty history loaded', async () => {
     const pendingSecond = deferred<{ messages: { role: string; content: string; timestamp: string }[] }>()
     const ws = makeWS([

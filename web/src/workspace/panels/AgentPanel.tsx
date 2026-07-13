@@ -17,6 +17,7 @@ import { useChatMessages, type Attachments } from '@/hooks/useChatMessages'
 import { useCollapseLevel } from '@/hooks/useCollapseLevel'
 import { useProgressStream } from '@/hooks/useProgressStream'
 import { useTodos } from '@/hooks/useTodos'
+import { useActiveSSESubscription } from '@/hooks/useActiveSSESubscription'
 import { rewindHistory } from '@/components/agent/api'
 
 import { AskUserPanel } from '@/components/agent/AskUserPanel'
@@ -81,11 +82,12 @@ export function AgentPanel({ params }: PanelProps) {
       ? !!chatID
       : !!activeSession?.chatID
 
-  useEffect(() => {
-    if (!shouldSubscribe) return
-    if (!subscribeChatID) return
-    ws.subscribe(subscribeChatID)
-  }, [ws, subscribeChatID, shouldSubscribe])
+  useActiveSSESubscription({
+    ws,
+    chatID: subscribeChatID,
+    channel: progressChannel,
+    active: shouldSubscribe,
+  })
 
   const chat = useChatMessages({
     chatID,

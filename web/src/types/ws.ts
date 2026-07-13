@@ -23,8 +23,10 @@ export interface WSConnection {
   rpc: <T = unknown>(method: string, params?: unknown) => Promise<T>
   /** The chatID currently subscribed, if any. */
   chatID: string | null
+  /** The channel of the current SSE subscription, if any. */
+  channel: string | null
   /** Set the last event seq from the history snapshot for SSE deduplication. */
-  setLastSeq: (seq: number) => void
+  setLastSeq: (chatID: string, seq: number) => void
 
   /** Stream subscriptions; each returns an unsubscribe function. */
   onMessage: (handler: (msg: WSMessage) => void) => () => void

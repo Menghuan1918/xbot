@@ -59,8 +59,12 @@ export class SSEConnectionImpl implements WSConnection {
     return this._chatID
   }
 
-  setLastSeq(seq: number): void {
-    if (this._chatID && seq > 0) setLastSeq(this._chatID, seq)
+  get channel(): string | null {
+    return this._chatID ? this._channel : null
+  }
+
+  setLastSeq(chatID: string, seq: number): void {
+    if (chatID && seq > 0) setLastSeq(chatID, seq)
   }
 
   async send(msg: WSClientMessage): Promise<void> {

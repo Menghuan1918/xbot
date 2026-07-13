@@ -684,8 +684,6 @@ export function useSessionStoreImpl(): SessionStore {
   sessionsRef.current = sessions
   const activeSessionRef = useRef(activeSession)
   activeSessionRef.current = activeSession
-  // Tracks the chatID whose EventSource currently owns live events.
-  const subscribedChatIDRef = useRef<string | null>(null)
   const refreshSeqRef = useRef(0)
   const subAgentRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const transientSubAgentsRef = useRef(new Map<string, TransientSubAgent>())
@@ -809,8 +807,6 @@ export function useSessionStoreImpl(): SessionStore {
           toast.error(`工作目录设置失败: ${msg}`)
         }
       }
-      ws.subscribe(chatID, DEFAULT_CHANNEL)
-      subscribedChatIDRef.current = chatID
       const selector = { channel: DEFAULT_CHANNEL, chatID }
       activeSessionRef.current = selector
       setActiveSession(selector)
@@ -830,7 +826,7 @@ export function useSessionStoreImpl(): SessionStore {
       void refresh()
       return chatID
     },
-    [ws, refresh],
+    [refresh],
   )
 
   const switchSession = useCallback(
@@ -844,8 +840,6 @@ export function useSessionStoreImpl(): SessionStore {
       } catch {
         return
       }
-      ws.subscribe(id, useChannel)
-      subscribedChatIDRef.current = id
       const selector = { channel: useChannel, chatID: id }
       activeSessionRef.current = selector
       setActiveSession(selector)
@@ -854,7 +848,7 @@ export function useSessionStoreImpl(): SessionStore {
       saveSessionTreeCache(nextSessions, flattenTreeAgents(nextSessions))
       setSessions(nextSessions)
     },
-    [ws],
+    [],
   )
 
   const renameSession = useCallback(async (id: string, channel: string, label: string): Promise<boolean> => {
@@ -887,9 +881,6 @@ export function useSessionStoreImpl(): SessionStore {
       })
       if (sameSession(activeSession, selector)) {
         setActiveSession(null)
-        // Clear the live subscription ref so a stale deleted chat can't be
-        // mistaken as the target of a later ask_user frame.
-        if (subscribedChatIDRef.current === id) subscribedChatIDRef.current = null
       }
       void refresh()
       return true
@@ -961,8 +952,10 @@ export function useSessionStoreImpl(): SessionStore {
       if (msg.type !== 'ask_user') return
       const explicitChatID = (msg as AskUserEnvelope).chat_id
       const fallback = activeSessionRef.current
-      const chatID = explicitChatID ?? subscribedChatIDRef.current ?? fallback?.chatID
-      const channel = explicitChatID || subscribedChatIDRef.current ? DEFAULT_CHANNEL : (fallback?.channel ?? DEFAULT_CHANNEL)
+      const chatID = explicitChatID ?? ws.chatID ?? fallback?.chatID
+      const channel = msg.channel
+        ?? (chatID === ws.chatID ? ws.channel : null)
+        ?? (fallback && chatID === fallback.chatID ? fallback.channel : DEFAULT_CHANNEL)
       if (chatID) {
         setStatus({ channel, chatID }, 'waiting_input')
         // Store the prompt so it survives session switch.
@@ -995,17 +988,6 @@ export function useSessionStoreImpl(): SessionStore {
   useEffect(() => {
     void refresh()
   }, [refresh])
-
-  // The active session owns exactly one EventSource. subscribe() closes the old one.
-  useEffect(() => {
-    if (!activeSession) {
-      ws.disconnect()
-      subscribedChatIDRef.current = null
-      return
-    }
-    subscribedChatIDRef.current = activeSession.chatID
-    ws.subscribe(activeSession.chatID, activeSession.channel)
-  }, [activeSession, ws])
 
   const sortedSessions = useMemo(() => sortSessions(sessions, starredIds), [sessions, starredIds])
   const clearAskUserPrompt = useCallback((channel: string, chatID: string) => {

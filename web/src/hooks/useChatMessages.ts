@@ -333,7 +333,8 @@ export function useChatMessages({
       // during an in-flight reload).
       if (gen !== reloadGenRef.current) return
       // Store last_seq for SSE deduplication and reconnect replay.
-      if (data.last_seq) ws.setLastSeq(data.last_seq)
+      const cursorChatID = data.chat_id ?? chatID
+      if (data.last_seq && cursorChatID) ws.setLastSeq(cursorChatID, data.last_seq)
       const rows = data.messages ?? []
       const parsed = parseHistoryMessages(rows)
       if (shouldKeepVisibleRowsOnRefresh(parsed, sameTarget, messagesRef.current)) return

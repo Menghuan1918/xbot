@@ -1796,6 +1796,41 @@ func TestSetCWDAllowsOwnedGeneratedWebChat(t *testing.T) {
 	}
 }
 
+func TestGetActiveProgressChecksEncodedWebAgentOwner(t *testing.T) {
+	dir := t.TempDir()
+	ag, err := agent.New(agent.Config{
+		WorkDir:        dir,
+		DBPath:         filepath.Join(dir, "xbot.db"),
+		XbotHome:       dir,
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+
+	for _, chatID := range []string{"web:web-2/review:1", "web:web-3/review:1"} {
+		if _, err := ag.MultiSession().DB().Conn().Exec(
+			"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
+			"agent", chatID, time.Now().Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	table := BuildRPCTable(&config.Config{}, ag, nil, nil, nil)
+	ctx := WithRPCCtxResolved(context.Background(), "web-2", "web-2", 42, "user")
+	owned, _ := json.Marshal(map[string]string{"channel": "agent", "chat_id": "web:web-2/review:1"})
+	if _, err := table.Dispatch(ctx, "get_active_progress", owned); err != nil {
+		t.Fatalf("owned agent progress: %v", err)
+	}
+	foreign, _ := json.Marshal(map[string]string{"channel": "agent", "chat_id": "web:web-3/review:1"})
+	if _, err := table.Dispatch(ctx, "get_active_progress", foreign); err == nil {
+		t.Fatal("foreign agent progress should be denied")
+	}
+}
+
 // TestSetDefaultSubscription_GlobalSwitch_PreservesPerSession verifies that a global
 // subscription switch (chatID="") does NOT destroy other sessions' per-session
 // subscriptions. This was a critical cross-session contamination bug:

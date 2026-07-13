@@ -142,7 +142,7 @@ func TestRESTRPCDispatchesThroughCallback(t *testing.T) {
 }
 
 func TestRESTRPCAllowsFrontendRecoveryMethods(t *testing.T) {
-	methods := []string{"get_active_progress", "list_command_names", "set_cwd"}
+	methods := []string{"list_command_names", "set_cwd"}
 	for _, wantMethod := range methods {
 		t.Run(wantMethod, func(t *testing.T) {
 			wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
@@ -159,6 +159,37 @@ func TestRESTRPCAllowsFrontendRecoveryMethods(t *testing.T) {
 				t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
 			}
 		})
+	}
+}
+
+func TestRESTRPCGetActiveProgressChecksAgentOwnership(t *testing.T) {
+	db := newTestDB(t)
+	for _, chatID := range []string{"web:web-2/review:1", "web:web-3/review:1"} {
+		if _, err := db.Exec(
+			"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
+			"agent", chatID, time.Now().Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dispatched := 0
+	wc := NewWebChannel(WebChannelConfig{DB: db}, bus.NewMessageBus())
+	wc.SetRPCHandler(func(method string, params json.RawMessage, identity RPCIdentity) (json.RawMessage, error) {
+		dispatched++
+		return json.RawMessage(`{"phase":"tool"}`), nil
+	})
+
+	owned := httptest.NewRecorder()
+	wc.handleRPC(owned, authedAPIRequestFor(http.MethodPost, "/api/rpc", []byte(`{"method":"get_active_progress","params":{"channel":"agent","chat_id":"web:web-2/review:1"}}`), "web-2", 2))
+	if owned.Code != http.StatusOK || dispatched != 1 {
+		t.Fatalf("owned status=%d dispatched=%d body=%s", owned.Code, dispatched, owned.Body.String())
+	}
+
+	foreign := httptest.NewRecorder()
+	wc.handleRPC(foreign, authedAPIRequestFor(http.MethodPost, "/api/rpc", []byte(`{"method":"get_active_progress","params":{"channel":"agent","chat_id":"web:web-3/review:1"}}`), "web-2", 2))
+	if foreign.Code != http.StatusForbidden || dispatched != 1 {
+		t.Fatalf("foreign status=%d dispatched=%d body=%s", foreign.Code, dispatched, foreign.Body.String())
 	}
 }
 

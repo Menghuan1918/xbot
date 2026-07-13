@@ -271,6 +271,21 @@ func (wc *WebChannel) authorizeRESTRPC(r *http.Request, identity RPCIdentity, me
 			return http.StatusForbidden, fmt.Errorf("access denied")
 		}
 	}
+	if method == "get_active_progress" {
+		var request sessionBody
+		if err := json.Unmarshal(params, &request); err != nil {
+			return http.StatusBadRequest, fmt.Errorf("invalid params: %w", err)
+		}
+		if request.ChatID == "" {
+			return http.StatusBadRequest, fmt.Errorf("chat_id is required")
+		}
+		if request.Channel == "" {
+			request.Channel = "web"
+		}
+		if !wc.canAccessSession(r.Context(), userIDFromContext(r.Context()), senderID, request.Channel, request.ChatID) {
+			return http.StatusForbidden, fmt.Errorf("access denied")
+		}
+	}
 	return 0, nil
 }
 
