@@ -132,7 +132,13 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (wc *WebChannel) resolveSSESession(w http.ResponseWriter, r *http.Request, senderID, chatID string) (SessionSelector, bool) {
-	sel := wc.GetCurrentSession(senderID)
+	channelName := strings.TrimSpace(r.URL.Query().Get("channel"))
+	var sel SessionSelector
+	if channelName != "" {
+		sel = SessionSelector{Channel: channelName, ChatID: chatID}
+	} else {
+		sel = wc.GetCurrentSession(senderID)
+	}
 	if sel.ChatID != chatID {
 		sel = SessionSelector{Channel: "web", ChatID: chatID}
 		if webChatIDLooksLikeSubAgent(chatID) {

@@ -1653,6 +1653,25 @@ func TestSSEResumeCursorPrefersHeaderOverQuery(t *testing.T) {
 	}
 }
 
+func TestSSEExplicitChannelOverridesStaleCurrentSession(t *testing.T) {
+	db := newTestDB(t)
+	wc, _ := newTestWebChannel(t, db)
+	setTestCurrentSession(wc, SessionSelector{Channel: "web", ChatID: "web-1"})
+	if _, err := db.Exec(
+		"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
+		"cli", "/repo:Agent-main", time.Now().Format(time.RFC3339),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	request := authedAPIRequest(http.MethodGet, "/api/sse?chat_id=%2Frepo%3AAgent-main&channel=cli", nil)
+	sel, ok := wc.resolveSSESession(recorder, request, "web-1", "/repo:Agent-main")
+	if !ok || sel.Channel != "cli" || sel.ChatID != "/repo:Agent-main" {
+		t.Fatalf("resolved selector=%#v ok=%v status=%d body=%s", sel, ok, recorder.Code, recorder.Body.String())
+	}
+}
+
 func stringPointer(value string) *string {
 	return &value
 }

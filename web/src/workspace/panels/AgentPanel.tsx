@@ -123,7 +123,7 @@ export function AgentPanel({ params }: PanelProps) {
   const progress = useProgressStream({
     chatID: progressChatID,
     channel: progressChannel,
-    initialProgress: chat.initialProgress,
+    initialProgress: chat.resolvedChatID === chatID ? chat.initialProgress : null,
     onAssistantComplete: isSubAgent ? undefined : (finalText, iterations) => {
       chat.appendAssistant(finalText, iterations)
       void chat.reload()

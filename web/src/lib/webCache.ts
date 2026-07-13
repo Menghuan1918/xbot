@@ -12,6 +12,7 @@ export const messagesCache = new Map<string, ChatMessage[]>()
 export const lastSeqCache = new Map<string, number>()
 /** Latest structured progress event for each business chat ID. */
 export const progressSnapshotCache = new Map<string, ProgressEvent>()
+const progressGenerationCache = new Map<string, number>()
 
 interface StoredSessionTree {
   version: 1
@@ -54,6 +55,20 @@ export function resetLastSeq(chatID: string): void {
   lastSeqCache.delete(chatID)
 }
 
+export function getProgressGeneration(chatID: string): number {
+  return progressGenerationCache.get(chatID) ?? 0
+}
+
+export function bumpProgressGeneration(chatID: string): number {
+  const next = getProgressGeneration(chatID) + 1
+  progressGenerationCache.set(chatID, next)
+  return next
+}
+
+export function clearProgressSnapshot(chatID: string): void {
+  progressSnapshotCache.delete(chatID)
+}
+
 export function clearWebCaches(): void {
   try {
     localStorage.removeItem(SESSION_TREE_CACHE_KEY)
@@ -63,4 +78,5 @@ export function clearWebCaches(): void {
   messagesCache.clear()
   lastSeqCache.clear()
   progressSnapshotCache.clear()
+  progressGenerationCache.clear()
 }

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { postAPI } from '@/lib/api'
-import { lastSeqCache, progressSnapshotCache } from '@/lib/webCache'
+import { clearWebCaches, getProgressGeneration, lastSeqCache, progressSnapshotCache } from '@/lib/webCache'
 import { SSEConnectionImpl, SSE_EVENT_TYPES } from './sseConnection'
 import type { WSMessage } from '@/types/shared'
 
@@ -59,8 +59,7 @@ class MockEventSource {
 
 beforeEach(() => {
   MockEventSource.instances = []
-  lastSeqCache.clear()
-  progressSnapshotCache.clear()
+  clearWebCaches()
   postAPIMock.mockReset()
   postAPIMock.mockResolvedValue({})
   vi.stubGlobal('EventSource', MockEventSource)
@@ -78,11 +77,11 @@ describe('SSEConnectionImpl', () => {
     const first = MockEventSource.instances[0]
 
     expect([...first.listeners.keys()]).toEqual(SSE_EVENT_TYPES)
-    expect(first.url).toBe('/api/sse?chat_id=chat-a')
+    expect(first.url).toBe('/api/sse?chat_id=chat-a&channel=web')
 
     connection.subscribe('chat-b', 'cli')
     expect(first.closed).toBe(true)
-    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b')
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=cli')
     connection.dispose()
   })
 
@@ -94,7 +93,7 @@ describe('SSEConnectionImpl', () => {
     connection.subscribe('chat-b')
     connection.subscribe('chat-a')
 
-    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&last_event_id=7')
+    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=7')
     connection.dispose()
   })
 
@@ -106,8 +105,8 @@ describe('SSEConnectionImpl', () => {
     connection.subscribe('chat-b')
     connection.subscribe('chat-a')
 
-    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&last_event_id=9')
-    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a')
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-b&channel=web&last_event_id=9')
+    expect(MockEventSource.instances[2].url).toBe('/api/sse?chat_id=chat-a&channel=web')
     connection.dispose()
   })
 
@@ -130,6 +129,25 @@ describe('SSEConnectionImpl', () => {
     expect(received.map((message) => message.seq)).toEqual([3, 4])
     expect(lastSeqCache.get('chat-a')).toBe(4)
     expect(progressSnapshotCache.get('chat-a')).toMatchObject({ phase: 'tool' })
+    expect(getProgressGeneration('chat-a')).toBeGreaterThan(0)
+    connection.dispose()
+  })
+
+  it('clears the cached progress snapshot on terminal text', () => {
+    const connection = new SSEConnectionImpl()
+    connection.subscribe('chat-a')
+    const source = MockEventSource.instances[0]
+    source.open()
+    source.emit('progress_structured', {
+      type: 'progress_structured',
+      seq: 1,
+      progress: { phase: 'tool', completed_tools: [{ name: 'Read' }] },
+    })
+    expect(progressSnapshotCache.has('chat-a')).toBe(true)
+
+    source.emit('text', { type: 'text', seq: 2, content: 'done' })
+
+    expect(progressSnapshotCache.has('chat-a')).toBe(false)
     connection.dispose()
   })
 
@@ -186,7 +204,7 @@ describe('SSEConnectionImpl', () => {
     await vi.advanceTimersByTimeAsync(5_000)
 
     expect(MockEventSource.instances).toHaveLength(2)
-    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-a&last_event_id=5')
+    expect(MockEventSource.instances[1].url).toBe('/api/sse?chat_id=chat-a&channel=web&last_event_id=5')
     connection.dispose()
   })
 
@@ -254,6 +272,7 @@ describe('SSEConnectionImpl', () => {
     const connection = new SSEConnectionImpl()
     const received: WSMessage[] = []
     connection.onMessage((message) => received.push(message))
+    progressSnapshotCache.set('chat-a', { phase: 'tool' })
     connection.subscribe('chat-a')
     const source = MockEventSource.instances[0]
     source.open()
@@ -262,7 +281,12 @@ describe('SSEConnectionImpl', () => {
 
     await vi.advanceTimersByTimeAsync(1_000)
 
-    expect(received).toEqual([])
+    expect(received).toEqual([
+      expect.objectContaining({
+        type: 'progress_structured',
+        progress: { phase: 'done' },
+      }),
+    ])
     expect(progressSnapshotCache.has('chat-a')).toBe(false)
     connection.dispose()
   })

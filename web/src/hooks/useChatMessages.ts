@@ -28,7 +28,7 @@ import {
 } from '@/components/agent/api'
 import { normalizeWebIteration } from '@/components/agent/normalize'
 import { dedupMessages } from '@/components/agent/progressStore'
-import { messagesCache } from '@/lib/webCache'
+import { getProgressGeneration, messagesCache } from '@/lib/webCache'
 import type { WSConnection } from '@/types/ws'
 import type { ChatMessage, WebIteration } from '@/types/shared'
 import type { WSMessage } from '@/types/shared'
@@ -258,6 +258,7 @@ export function useChatMessages({
   const reload = useCallback(async () => {
     const gen = ++reloadGenRef.current
     const mutationGen = messageMutationGenRef.current
+    const progressGen = chatID ? getProgressGeneration(chatID) : null
     const globalSeq = ++globalReloadSeq
     const requestIsStale = () => (
       gen !== reloadGenRef.current || mutationGen !== messageMutationGenRef.current
@@ -338,14 +339,22 @@ export function useChatMessages({
       if (requestIsStale()) return
       // Store last_seq for SSE deduplication and reconnect replay.
       const cursorChatID = data.chat_id ?? chatID
-      if (data.last_seq && cursorChatID) ws.setLastSeq(cursorChatID, data.last_seq)
+      const progressChanged = Boolean(
+        cursorChatID &&
+        progressGen !== null &&
+        cursorChatID === chatID &&
+        getProgressGeneration(cursorChatID) !== progressGen,
+      )
+      if (data.last_seq && cursorChatID && !progressChanged) {
+        ws.setLastSeq(cursorChatID, data.last_seq)
+      }
       const rows = data.messages ?? []
       const parsed = parseHistoryMessages(rows)
       if (shouldKeepVisibleRowsOnRefresh(parsed, sameTarget, messagesRef.current)) return
       if (!commitMessageCache(reloadKey, parsed, globalSeq)) return
       loadedMessageKeys.add(reloadKey)
       setMessages(parsed)
-      setInitialProgress(data.active_progress ?? null)
+      setInitialProgress(progressChanged ? null : (data.active_progress ?? null))
       if (data.chat_id) setResolvedChatID(data.chat_id)
     } catch (e) {
       if (requestIsStale()) return

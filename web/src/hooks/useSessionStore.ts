@@ -19,7 +19,7 @@
  *   POST   /api/chats/{id}/rename {label}    → { ok }
  *   POST   /api/chats/{id}/delete            → { ok, data: {} }
  *   POST   /api/rpc set_cwd                  → set working directory
- *   GET    /api/sse?chat_id=...              → server events
+ *   GET    /api/sse?chat_id=...&channel=...  → server events
  */
 import { createElement, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { toast } from 'sonner'

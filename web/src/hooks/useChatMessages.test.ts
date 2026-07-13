@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useChatMessages } from './useChatMessages'
 import type { WSConnection } from '@/types/ws'
-import { messagesCache } from '@/lib/webCache'
+import { bumpProgressGeneration, clearWebCaches, messagesCache } from '@/lib/webCache'
 
 function makeWS(responses: unknown[]): WSConnection {
   vi.stubGlobal('fetch', vi.fn(async () => {
@@ -32,7 +32,7 @@ function deferred<T>() {
 
 describe('useChatMessages', () => {
   beforeEach(() => {
-    messagesCache.clear()
+    clearWebCaches()
   })
   it('keeps cached rows visible during same-session background reloads', async () => {
     const ws = makeWS([
@@ -234,6 +234,38 @@ describe('useChatMessages', () => {
 
     expect(result.current.messages.map((message) => message.content)).toEqual(['new message with attachment'])
     expect(messagesCache.get('slow-chat')?.map((message) => message.content)).toEqual(['new message with attachment'])
+    expect(ws.setLastSeq).not.toHaveBeenCalled()
+  })
+
+  it('does not publish delayed active progress after a newer live progress event', async () => {
+    const history = deferred<{
+      messages: never[]
+      chat_id: string
+      active_progress: { phase: string; stream_content: string }
+    }>()
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      const data = await history.promise
+      return new Response(JSON.stringify({ ok: true, data, error: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }))
+    const ws = makeWS([])
+    const { result } = renderHook(() => useChatMessages({ chatID: 'progress-chat', channel: 'web', ws }))
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+
+    bumpProgressGeneration('progress-chat')
+    await act(async () => {
+      history.resolve({
+        messages: [],
+        chat_id: 'progress-chat',
+        active_progress: { phase: 'thinking', stream_content: 'stale progress' },
+      })
+      await history.promise
+    })
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    expect(result.current.initialProgress).toBeNull()
     expect(ws.setLastSeq).not.toHaveBeenCalled()
   })
 

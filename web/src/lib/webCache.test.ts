@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  bumpProgressGeneration,
   clearWebCaches,
+  getProgressGeneration,
   lastSeqCache,
   loadSessionTreeCache,
   messagesCache,
@@ -49,6 +51,7 @@ describe('web caches', () => {
     messagesCache.set('chat-1', [])
     lastSeqCache.set('chat-1', 4)
     progressSnapshotCache.set('chat-1', { phase: 'tool' })
+    bumpProgressGeneration('chat-1')
 
     clearWebCaches()
 
@@ -56,5 +59,6 @@ describe('web caches', () => {
     expect(messagesCache.size).toBe(0)
     expect(lastSeqCache.size).toBe(0)
     expect(progressSnapshotCache.size).toBe(0)
+    expect(getProgressGeneration('chat-1')).toBe(0)
   })
 })

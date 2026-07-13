@@ -42,7 +42,7 @@ import type {
 import { EMPTY_PROGRESS_SNAPSHOT } from '@/types/shared'
 import type { HistProgress } from '@/components/agent/api'
 import type { WSMessage } from '@/types/shared'
-import { progressSnapshotCache } from '@/lib/webCache'
+import { clearProgressSnapshot, progressSnapshotCache } from '@/lib/webCache'
 
 interface UseProgressStreamOptions {
   /** Chat ID this stream tracks (events for other chats are ignored). */
@@ -149,6 +149,7 @@ export function useProgressStream({
 
   // Switch immediately to this chat's in-memory snapshot while history refreshes.
   useEffect(() => {
+    finalizedRef.current = false
     store.reset()
     if (disabled) {
       return
@@ -165,7 +166,14 @@ export function useProgressStream({
   // session's data triggers hydration (Spec 5 §2.7).
   useEffect(() => {
     if (disabled) return
-    if (!initialProgress || !initialProgress.phase || initialProgress.phase === 'done') return
+    if (!initialProgress || !initialProgress.phase || initialProgress.phase === 'done') {
+      if (initialProgress?.phase === 'done') {
+        if (chatID) clearProgressSnapshot(chatID)
+        finalizedRef.current = true
+        if (hasVisibleProgress(store.getSnapshot())) store.reset()
+      }
+      return
+    }
     const live = historyProgressToLive(initialProgress)
     // Only hydrate if we got something meaningful (non-empty snapshot)
     if (live.phase) {
@@ -189,6 +197,9 @@ export function useProgressStream({
       // 3-layer chatID filtering.
       if (chatIDRef.current && !matchesChatID(msg, chatIDRef.current, channel)) {
         return
+      }
+      if (chatIDRef.current && isTerminalProgressMessage(msg)) {
+        clearProgressSnapshot(chatIDRef.current)
       }
       handleProgressMessage(msg, store, completeRef, compactedRef, resetRef, finalizedRef)
     })
@@ -270,6 +281,12 @@ function handleProgressMessage(
     case 'sync_progress': {
       const p = msg.progress
       if (!p) return
+      if (p.phase === 'done') {
+        if (finalizedRef) finalizedRef.current = true
+        store.reset()
+        return
+      }
+      if (finalizedRef && p.phase !== 'done') finalizedRef.current = false
       if (p.history_compacted) {
         store.reset()
         compactedRef.current?.()
@@ -343,6 +360,12 @@ function handleProgressMessage(
     case 'session': {
       const action = msg.session?.action
 
+      if (action === 'busy') {
+        if (finalizedRef) finalizedRef.current = false
+        store.reset()
+        return
+      }
+
       // HistoryCompacted: reset store and trigger reload
       if (action === 'HistoryCompacted') {
         store.reset()
@@ -353,7 +376,10 @@ function handleProgressMessage(
       // On idle, if we had accumulated stream content without a closing text,
       // finalize defensively. Skip if already finalized (text event arrived first).
       if (action === 'idle') {
-        if (finalizedRef?.current) return  // already finalized by text event
+        if (finalizedRef?.current) {
+          store.reset()
+          return
+        }
         const snap = store.getSnapshot()
         if (hasVisibleProgress(snap)) {
           if (finalizedRef) finalizedRef.current = true
@@ -361,6 +387,8 @@ function handleProgressMessage(
           const iters = snap.iterationHistory
           store.reset()
           completeRef.current?.(text, iters)
+        } else {
+          store.reset()
         }
       }
       return
@@ -369,4 +397,11 @@ function handleProgressMessage(
     default:
       return
   }
+}
+
+function isTerminalProgressMessage(msg: WSMessage): boolean {
+  if (msg.type === 'text') return true
+  if (msg.progress?.phase === 'done') return true
+  if (msg.type !== 'session') return false
+  return ['busy', 'idle', 'deleted', 'HistoryCompacted'].includes(msg.session?.action ?? '')
 }

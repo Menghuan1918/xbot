@@ -15,6 +15,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { ProgressEvent, WSMessage } from '@/types/shared'
 import type { WSConnection } from '@/types/ws'
+import { clearWebCaches, progressSnapshotCache } from '@/lib/webCache'
 
 // --- stub WS connection ----------------------------------------------------
 
@@ -49,6 +50,7 @@ let currentWS: FakeWS
 let rafCbs: Array<() => void>
 
 beforeEach(() => {
+  clearWebCaches()
   currentWS = makeFakeWS()
   rafCbs = []
   vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
@@ -96,6 +98,65 @@ describe('useProgressStream event dispatch', () => {
       progress_history: '[{"iteration":1,"tools":[{"name":"Read","status":"done"}]}]',
     })
     expect(complete).toHaveBeenCalledTimes(1)
+    expect(result.current.liveMessage).toBeNull()
+    expect(result.current.isStreaming).toBe(false)
+  })
+
+  it('clears terminal cache so A to B to A cannot restore completed progress', () => {
+    progressSnapshotCache.set('c1', { phase: 'tool', completed_tools: [{ name: 'Read', status: 'done' }] })
+    const complete = vi.fn()
+    const { result, rerender } = renderHook(
+      ({ chatID }) => useProgressStream({ chatID, onAssistantComplete: complete, ws: currentWS as unknown as WSConnection }),
+      { initialProps: { chatID: 'c1' } },
+    )
+    act(() => {
+      rafCbs.splice(0, rafCbs.length).forEach((cb) => cb())
+    })
+    expect(result.current.isStreaming).toBe(true)
+
+    emitAndFlush({ type: 'text', chat_id: 'c1', content: 'done' })
+    expect(progressSnapshotCache.has('c1')).toBe(false)
+
+    rerender({ chatID: 'c2' })
+    rerender({ chatID: 'c1' })
+    act(() => {
+      rafCbs.splice(0, rafCbs.length).forEach((cb) => cb())
+    })
+    expect(result.current.liveMessage).toBeNull()
+    expect(result.current.isStreaming).toBe(false)
+  })
+
+  it('resets finalization when a later turn begins with structured tool progress', () => {
+    const complete = vi.fn()
+    renderHook(() =>
+      useProgressStream({ chatID: 'c1', onAssistantComplete: complete, ws: currentWS as unknown as WSConnection }),
+    )
+
+    emitAndFlush({ type: 'text', chat_id: 'c1', content: 'first' })
+    emitAndFlush({
+      type: 'progress_structured',
+      chat_id: 'c1',
+      progress: {
+        phase: 'tool',
+        iteration: 1,
+        completed_tools: [{ name: 'Read', status: 'done' }],
+      },
+    })
+    emitAndFlush({ type: 'text', chat_id: 'c1', content: 'second' })
+
+    expect(complete).toHaveBeenCalledTimes(2)
+    expect(complete.mock.calls.map((call) => call[0])).toEqual(['first', 'second'])
+  })
+
+  it('resets visible progress when recovery reports a terminal phase', () => {
+    const { result } = renderHook(() =>
+      useProgressStream({ chatID: 'c1', ws: currentWS as unknown as WSConnection }),
+    )
+    emitAndFlush({ type: 'stream_content', progress: { stream_content: 'stale' } })
+    expect(result.current.isStreaming).toBe(true)
+
+    emitAndFlush({ type: 'progress_structured', progress: { phase: 'done' } })
+
     expect(result.current.liveMessage).toBeNull()
     expect(result.current.isStreaming).toBe(false)
   })

@@ -1,5 +1,7 @@
 import { postAPI } from '@/lib/api'
 import {
+  bumpProgressGeneration,
+  clearProgressSnapshot,
   getLastSeq,
   progressSnapshotCache,
   resetLastSeq,
@@ -133,7 +135,7 @@ export class SSEConnectionImpl implements WSConnection {
     const chatID = this._chatID
     if (this.disposed || !chatID || typeof EventSource === 'undefined') return
 
-    const params = new URLSearchParams({ chat_id: chatID })
+    const params = new URLSearchParams({ chat_id: chatID, channel: this._channel })
     const lastSeq = getLastSeq(chatID)
     if (lastSeq > 0) params.set('last_event_id', String(lastSeq))
 
@@ -195,13 +197,18 @@ export class SSEConnectionImpl implements WSConnection {
     }
     this.eventsSinceOpen += 1
     this.stateVersion += 1
+    if (chatID && isProgressLifecycleEvent(msg)) bumpProgressGeneration(chatID)
     this.dispatch(msg)
     if (chatID && replayGap) void this.restoreActiveProgress(chatID)
   }
 
   private dispatch(msg: WSMessage): void {
-    if (msg.type === 'progress_structured' && msg.progress && this._chatID) {
-      progressSnapshotCache.set(this._chatID, msg.progress)
+    if (this._chatID) {
+      if (isTerminalProgressEvent(msg)) {
+        clearProgressSnapshot(this._chatID)
+      } else if (msg.type === 'progress_structured' && msg.progress) {
+        progressSnapshotCache.set(this._chatID, msg.progress)
+      }
     }
     if (msg.type === 'session' && msg.session) {
       this.sessionHandlers.forEach((handler) => handler(msg.session!))
@@ -250,12 +257,19 @@ export class SSEConnectionImpl implements WSConnection {
         chat_id: chatID,
       })
       if (
-        !progress ||
-        progress.phase === 'done' ||
         this._chatID !== chatID ||
         this.stateVersion !== stateVersion
       ) return
+      bumpProgressGeneration(chatID)
       this.stateVersion += 1
+      if (!progress || progress.phase === 'done') {
+        this.dispatch({
+          type: 'progress_structured',
+          chat_id: chatID,
+          progress: { phase: 'done' },
+        })
+        return
+      }
       this.dispatch({
         type: 'progress_structured',
         chat_id: chatID,
@@ -320,4 +334,19 @@ function parseSequence(raw: string): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isProgressLifecycleEvent(msg: WSMessage): boolean {
+  return msg.type === 'stream_content' ||
+    msg.type === 'progress_structured' ||
+    msg.type === 'sync_progress' ||
+    msg.type === 'text' ||
+    msg.type === 'session'
+}
+
+function isTerminalProgressEvent(msg: WSMessage): boolean {
+  if (msg.type === 'text') return true
+  if (msg.progress?.phase === 'done') return true
+  if (msg.type !== 'session') return false
+  return ['busy', 'idle', 'deleted', 'HistoryCompacted'].includes(msg.session?.action ?? '')
 }
