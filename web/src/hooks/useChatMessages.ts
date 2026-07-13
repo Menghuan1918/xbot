@@ -456,17 +456,21 @@ export function useChatMessages({
   useEffect(() => {
     if (!liveEventsEnabled) return
     if (!chatID) return
+    const listenerChatID = chatID
+    const listenerCacheKey = activeMessageCacheKey
     const off = ws.onMessage((msg: WSMessage) => {
-      if (chatIDRef.current && !matchesChatID(msg, chatIDRef.current, channel)) return
+      if (activeMessageCacheKeyRef.current !== listenerCacheKey) return
+      if (!matchesChatID(msg, listenerChatID, channel)) return
       if (msg.type !== 'user_echo' && msg.type !== 'inject_user') return
       const content = msg.content ?? msg.original_content ?? ''
       if (!content) return
-      messageMutationGenRef.current += 1
       const requestID = msg.id
       const id = `echo-${msg.ts ?? Date.now()}-${echoSeq++}`
       const ts = msg.ts ? new Date(msg.ts * 1000).toISOString() : new Date().toISOString()
       const now = Date.now()
       setMessages((prev) => {
+        if (activeMessageCacheKeyRef.current !== listenerCacheKey) return prev
+        messageMutationGenRef.current += 1
         // A replayed echo finds the already-replaced row by requestID, so it
         // updates in place instead of appending a duplicate.
         const lastUserIdx = msg.type === 'user_echo' ? prev.findLastIndex((m) => {
@@ -491,17 +495,17 @@ export function useChatMessages({
           const copy = [...prev]
           copy[lastUserIdx] = newMsg
           messagesRef.current = copy
-          cacheCurrentMessages(copy)
+          commitMessageCache(listenerCacheKey, copy)
           return copy
         }
         const next = [...prev, newMsg]
         messagesRef.current = next
-        cacheCurrentMessages(next)
+        commitMessageCache(listenerCacheKey, next)
         return next
       })
     })
     return off
-  }, [ws, chatID, channel, cacheCurrentMessages, liveEventsEnabled])
+  }, [ws, chatID, channel, activeMessageCacheKey, liveEventsEnabled])
 
   const sendMessage = useCallback(
     (content: string, attachments?: Attachments) => {

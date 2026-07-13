@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -1908,6 +1909,46 @@ func TestAgentRPCsCheckGeneratedWebChatOwner(t *testing.T) {
 		if _, err := table.Dispatch(ctx, method, collidingCLI); err == nil {
 			t.Fatalf("%s for foreign CLI self-ID collision should be denied", method)
 		}
+		emptyCollidingCLI, _ := json.Marshal(map[string]string{
+			"channel": "cli",
+			"chat_id": "",
+			"role":    "review",
+		})
+		if _, err := table.Dispatch(ctx, method, emptyCollidingCLI); err == nil || !strings.Contains(err.Error(), "access denied") {
+			t.Fatalf("%s empty chat ID should default then deny foreign CLI collision, got %v", method, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{method: "clear_memory", params: map[string]any{"target_type": "all"}},
+		{method: "get_memory_stats", params: map[string]any{}},
+		{method: "count_interactive_sessions", params: map[string]any{}},
+		{method: "list_interactive_sessions", params: map[string]any{}},
+		{method: "inspect_interactive_session", params: map[string]any{"role": "review"}},
+		{method: "get_history", params: map[string]any{}},
+		{method: "delete_chat", params: map[string]any{}},
+		{method: "rename_chat", params: map[string]any{"new_name": "forbidden"}},
+		{method: "get_token_state", params: map[string]any{}},
+		{method: "trim_history", params: map[string]any{"cutoff": int64(0)}},
+		{method: "is_processing", params: map[string]any{}},
+		{method: "get_active_progress", params: map[string]any{}},
+		{method: "get_pending_ask_user", params: map[string]any{}},
+		{method: "get_todos", params: map[string]any{}},
+	} {
+		t.Run("deny CLI self-ID collision/"+tc.method, func(t *testing.T) {
+			tc.params["channel"] = "cli"
+			tc.params["chat_id"] = "web-2"
+			params, err := json.Marshal(tc.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := table.Dispatch(ctx, tc.method, params); err == nil || !strings.Contains(err.Error(), "access denied") {
+				t.Fatalf("foreign CLI self-ID collision should be denied, got %v", err)
+			}
+		})
 	}
 
 	ownedCLIChild, _ := json.Marshal(map[string]string{"full_key": "cli:owned-cli/review:1"})

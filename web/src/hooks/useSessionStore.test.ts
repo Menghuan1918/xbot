@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { normalizeCanonicalSessionTree, normalizeSessionTree, useSessionStoreImpl } from './useSessionStore'
 import { SESSION_TREE_CACHE_KEY } from '@/lib/webCache'
+import type { WSMessage } from '@/types/shared'
 
 let sessionHandler: ((event: { channel?: string; chat_id?: string; action?: string; role?: string; instance?: string; parent_id?: string }) => void) | null = null
+let messageHandler: ((event: WSMessage) => void) | null = null
 
 vi.mock('@/hooks/useWSConnection', () => ({
   useWSConnection: () => ({
@@ -16,7 +18,12 @@ vi.mock('@/hooks/useWSConnection', () => ({
       sessionHandler = handler
       return vi.fn()
     }),
-    onMessage: vi.fn(() => vi.fn()),
+    onMessage: vi.fn((handler) => {
+      messageHandler = handler
+      return vi.fn()
+    }),
+    chatID: null,
+    channel: null,
   }),
 }))
 
@@ -52,6 +59,7 @@ vi.mock('@/lib/api', () => ({
 
 beforeEach(() => {
   sessionHandler = null
+  messageHandler = null
   const store = new Map<string, string>()
   vi.stubGlobal('localStorage', {
     getItem: vi.fn((key: string) => store.get(key) ?? null),
@@ -580,6 +588,51 @@ describe('normalizeSessionTree', () => {
     expect(tree.mainSessions).toHaveLength(1)
     expect(tree.mainSessions[0].label).toBe('Agent-warm-stone')
     expect(tree.agents).toEqual([])
+  })
+
+  it('stores structured questions from a live CLI AskUser event', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats') {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            sessions: [{
+              chat_id: '/repo',
+              channel: 'cli',
+              label: 'repo',
+              last_active: '2026-07-08T00:00:00Z',
+              is_current: true,
+            }],
+          }),
+        } as Response
+      }
+      if (url === '/api/subagents') {
+        return { ok: true, json: async () => ({ ok: true, subagents: [] }) } as Response
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+    const { result } = renderHook(() => useSessionStoreImpl())
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1))
+
+    act(() => {
+      messageHandler?.({
+        type: 'ask_user',
+        channel: 'cli',
+        chat_id: '/repo',
+        progress: {
+          request_id: 'request-1',
+          questions: [{ question: 'Continue?', options: ['yes', 'no'] }],
+        },
+      })
+    })
+
+    expect(result.current.sessions[0].status).toBe('waiting_input')
+    expect(result.current.askUserPrompts.get('cli:/repo')).toEqual({
+      requestId: 'request-1',
+      questions: [{ question: 'Continue?', options: ['yes', 'no'] }],
+    })
   })
 
   it('uses /api/chats as the authoritative SubAgent tree source', async () => {

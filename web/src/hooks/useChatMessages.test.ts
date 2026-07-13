@@ -86,6 +86,38 @@ describe('useChatMessages', () => {
     expect(messagesCache.get(sessionCacheKey('cli', 'shared'))?.map((message) => message.content)).toEqual(['from cli'])
   })
 
+  it('ignores an old-channel listener after switching the same raw chat ID', async () => {
+    const handlers: Array<(message: WSMessage) => void> = []
+    const ws = makeWS([
+      { messages: [{ role: 'user', content: 'from web', timestamp: '2026-07-08T00:00:00Z' }] },
+      { messages: [{ role: 'user', content: 'from cli', timestamp: '2026-07-08T00:00:01Z' }] },
+    ])
+    vi.mocked(ws.onMessage).mockImplementation((handler) => {
+      handlers.push(handler)
+      return vi.fn()
+    })
+    const { result, rerender } = renderHook(
+      ({ channel }) => useChatMessages({ chatID: 'shared-listener', channel, ws }),
+      { initialProps: { channel: 'web' } },
+    )
+    await waitFor(() => expect(result.current.messages.map((message) => message.content)).toEqual(['from web']))
+    const staleWebHandler = handlers[0]
+
+    rerender({ channel: 'cli' })
+    await waitFor(() => expect(result.current.messages.map((message) => message.content)).toEqual(['from cli']))
+    act(() => {
+      staleWebHandler({
+        type: 'inject_user',
+        chat_id: 'web:shared-listener',
+        content: 'stale web event',
+      })
+    })
+
+    expect(result.current.messages.map((message) => message.content)).toEqual(['from cli'])
+    expect(messagesCache.get(sessionCacheKey('web', 'shared-listener'))?.map((message) => message.content)).toEqual(['from web'])
+    expect(messagesCache.get(sessionCacheKey('cli', 'shared-listener'))?.map((message) => message.content)).toEqual(['from cli'])
+  })
+
   it('reuses cached rows across hook remounts without a loading flash', async () => {
     const pendingSecond = deferred<{ messages: { role: string; content: string; timestamp: string }[] }>()
     const ws = makeWS([

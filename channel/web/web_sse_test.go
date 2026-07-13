@@ -580,6 +580,46 @@ func TestWebSendSkipsAskUserAfterPendingCleared(t *testing.T) {
 	}
 }
 
+func TestRemoteCLISendPublishesStructuredAskUserLive(t *testing.T) {
+	wc, _ := newTestWebChannel(t, nil)
+	chatID := "/repo"
+	client := &Client{
+		connType:       clientConnTypeSSE,
+		sendCh:         make(chan protocol.WSMessage, 2),
+		done:           make(chan struct{}),
+		chatID:         chatID,
+		sessionChannel: "cli",
+		id:             "remote-cli-ask-user",
+	}
+	wc.hub.addClient(client.id, client)
+	wc.hub.subscribe(client.id, sessionRouteKey("cli", chatID))
+	remoteCLI := NewRemoteCLIChannel(wc.hub)
+
+	if _, err := remoteCLI.Send(ch.OutboundMsg{
+		Channel:     "cli",
+		ChatID:      chatID,
+		WaitingUser: true,
+		Metadata: map[string]string{
+			"request_id":    "request-1",
+			"ask_questions": `[{"question":"Continue?","options":["yes","no"]}]`,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	<-client.sendCh // ordinary text envelope
+	ask := <-client.sendCh
+	if ask.Type != protocol.MsgTypeAskUser || ask.Channel != "cli" || ask.ChatID != chatID {
+		t.Fatalf("AskUser envelope = %#v", ask)
+	}
+	if ask.Progress == nil || ask.Progress.RequestID != "request-1" {
+		t.Fatalf("AskUser progress = %#v", ask.Progress)
+	}
+	if len(ask.Progress.Questions) != 1 || ask.Progress.Questions[0].Question != "Continue?" {
+		t.Fatalf("AskUser questions = %#v", ask.Progress.Questions)
+	}
+}
+
 func TestWSWriteBoundarySkipsLiveAskUserClearedAfterEnqueue(t *testing.T) {
 	wc, _ := newTestWebChannel(t, nil)
 	chatID := "web-1"
