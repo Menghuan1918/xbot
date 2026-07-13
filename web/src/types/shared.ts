@@ -336,4 +336,6 @@ export interface ChatMessage {
   persisted?: boolean
   /** SSE sequence for live committed rows, used to reconcile them with history. */
   eventSeq?: number
+  /** Stable logical-send ID used to correlate optimistic rows with echoes. */
+  requestID?: string
 }

@@ -1852,6 +1852,27 @@ func TestAgentRPCsCheckGeneratedWebChatOwner(t *testing.T) {
 	if _, err := table.Dispatch(ctx, "get_agent_session_dump_by_full_key", foreignDump); err == nil {
 		t.Fatal("foreign agent dump should be denied")
 	}
+
+	for _, method := range []string{"get_session_messages", "get_agent_session_dump"} {
+		ownedParent, _ := json.Marshal(map[string]string{
+			"channel":  "web",
+			"chat_id":  "owned-chat",
+			"role":     "review",
+			"instance": "1",
+		})
+		if _, err := table.Dispatch(ctx, method, ownedParent); err != nil {
+			t.Fatalf("%s for owned generated parent: %v", method, err)
+		}
+		foreignParent, _ := json.Marshal(map[string]string{
+			"channel":  "web",
+			"chat_id":  "foreign-chat",
+			"role":     "review",
+			"instance": "1",
+		})
+		if _, err := table.Dispatch(ctx, method, foreignParent); err == nil {
+			t.Fatalf("%s for foreign generated parent should be denied", method)
+		}
+	}
 }
 
 // TestSetDefaultSubscription_GlobalSwitch_PreservesPerSession verifies that a global

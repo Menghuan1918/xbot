@@ -204,6 +204,11 @@ describe('SSEConnectionImpl', () => {
       chat_id: 'chat-a',
       content: 'hello',
     }))
+    const requestIDs = postAPIMock.mock.calls.map(([, body]) => (
+      body as { id?: string }
+    ).id)
+    expect(requestIDs[0]).toBeTruthy()
+    expect(new Set(requestIDs).size).toBe(1)
     connection.dispose()
   })
 

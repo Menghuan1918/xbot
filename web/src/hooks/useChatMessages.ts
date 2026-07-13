@@ -148,6 +148,11 @@ function parseHistoryMessages(rows: HistMsg[]): ChatMessage[] {
 
 let echoSeq = 0
 
+function newMessageRequestID(): string {
+  const id = globalThis.crypto?.randomUUID?.()
+  return id ? id.replaceAll('-', '') : `web-${Date.now()}-${echoSeq++}`
+}
+
 /** SubAgent message from get_session_messages RPC (agent.SessionMessage). */
 interface SubAgentMsg {
   role: string
@@ -429,9 +434,8 @@ export function useChatMessages({
   // optimistic message we inserted in `sendMessage` rather than appending a
   // duplicate.
   //
-  // Spec 5 §2.4 — match by chatID first, then find the optimistic message
-  // using a 5-second freshness window to avoid replacing an older user message
-  // when echoes arrive out of order.
+  // Spec 5 §2.4 — match by chatID and stable request ID. Legacy echoes without
+  // an ID fall back to exact original content within a 5-second window.
   useEffect(() => {
     if (!liveEventsEnabled) return
     if (!chatID) return
@@ -441,18 +445,18 @@ export function useChatMessages({
       const content = msg.content ?? msg.original_content ?? ''
       if (!content) return
       messageMutationGenRef.current += 1
+      const requestID = msg.id
       const id = `echo-${msg.ts ?? Date.now()}-${echoSeq++}`
       const ts = msg.ts ? new Date(msg.ts * 1000).toISOString() : new Date().toISOString()
       const now = Date.now()
       setMessages((prev) => {
-        // Replace the most recent optimistic user message (id starts with
-        // 'user-') that was created within 5 seconds — prevents replacing an
-        // older user message when echoes arrive out of order.
+        // A replayed echo finds the already-replaced row by requestID, so it
+        // updates in place instead of appending a duplicate.
         const lastUserIdx = msg.type === 'user_echo' ? prev.findLastIndex((m) => {
-          if (!m.id.startsWith('user-')) return false
+          if (requestID) return m.requestID === requestID
+          if (!m.id.startsWith('user-') || m.content !== msg.original_content) return false
           const match = m.id.match(/^user-(\d+)-/)
-          if (!match) return false
-          return now - parseInt(match[1], 10) < 5000
+          return Boolean(match && now - parseInt(match[1], 10) < 5000)
         }) : -1
         const newMsg: ChatMessage = {
           id,
@@ -464,6 +468,7 @@ export function useChatMessages({
           turnID: 0,
           persisted: false,
           eventSeq: msg.seq,
+          requestID,
         }
         if (lastUserIdx >= 0) {
           const copy = [...prev]
@@ -485,6 +490,7 @@ export function useChatMessages({
     (content: string, attachments?: Attachments) => {
       const text = content.trim()
       if (!text && !attachments?.uploadKeys.length) return
+      const requestID = newMessageRequestID()
       const resetCommand = text === '/new' && !attachments?.uploadKeys.length
       let optimisticID: string | null = null
       if (!resetCommand) {
@@ -502,6 +508,7 @@ export function useChatMessages({
           isPartial: false,
           turnID: 0,
           persisted: false,
+          requestID,
         }
         messageMutationGenRef.current += 1
         setMessages((prev) => {
@@ -514,6 +521,7 @@ export function useChatMessages({
       const sendCacheKey = lastReloadKeyRef.current
       void ws.send({
         type: 'message',
+        id: requestID,
         channel,
         chat_id: chatIDRef.current ?? undefined,
         content: text,

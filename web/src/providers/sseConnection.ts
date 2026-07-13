@@ -234,7 +234,9 @@ export class SSEConnectionImpl implements WSConnection {
   }
 
   private async sendMessageWithRetry(msg: WSClientMessage): Promise<void> {
+    const requestID = msg.id || newMessageRequestID()
     const body = {
+      id: requestID,
       content: msg.content ?? '',
       file_ids: msg.file_ids,
       file_names: msg.file_names,
@@ -348,6 +350,11 @@ function parseSequence(raw: string): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function newMessageRequestID(): string {
+  const id = globalThis.crypto?.randomUUID?.()
+  return id ? id.replaceAll('-', '') : `web-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
 function isProgressLifecycleEvent(msg: WSMessage): boolean {

@@ -840,11 +840,13 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		Role     string `json:"role"`
 		Instance string `json:"instance"`
 	}) (any, error) {
-		chatID, err := resolveChatID(ctx, p.ChatID)
-		if err != nil {
-			return nil, err
+		if !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
+			return nil, fmt.Errorf("access denied")
 		}
-		msgs, _ := h.Ag.GetSessionMessages(p.Channel, chatID, p.Role, p.Instance)
+		if p.ChatID == "" {
+			p.ChatID = rpcBizID(ctx)
+		}
+		msgs, _ := h.Ag.GetSessionMessages(p.Channel, p.ChatID, p.Role, p.Instance)
 		if msgs == nil {
 			msgs = []agent.SessionMessage{}
 		}
@@ -856,11 +858,13 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		Role     string `json:"role"`
 		Instance string `json:"instance"`
 	}) (any, error) {
-		chatID, err := resolveChatID(ctx, p.ChatID)
-		if err != nil {
-			return nil, err
+		if !h.ownOrAdmin(ctx, p.Channel, p.ChatID) {
+			return nil, fmt.Errorf("access denied")
 		}
-		dump, _ := h.Ag.GetAgentSessionDump(p.Channel, chatID, p.Role, p.Instance)
+		if p.ChatID == "" {
+			p.ChatID = rpcBizID(ctx)
+		}
+		dump, _ := h.Ag.GetAgentSessionDump(p.Channel, p.ChatID, p.Role, p.Instance)
 		if dump == nil {
 			dump = &agent.AgentSessionDump{}
 		}

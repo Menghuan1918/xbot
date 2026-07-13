@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,15 @@ type fixedIdentityResolver struct {
 	userID int64
 	role   string
 }
+
+type fixedOSSProvider struct{}
+
+func (fixedOSSProvider) Upload(string, []byte) error { return nil }
+func (fixedOSSProvider) GetDownloadURL(string) (string, error) {
+	return "https://files.example/test.txt", nil
+}
+func (fixedOSSProvider) Name() string   { return "fixed" }
+func (fixedOSSProvider) Domain() string { return "https://files.example" }
 
 func (r fixedIdentityResolver) Resolve(channel, channelUserID string) (int64, string, error) {
 	return r.userID, r.role, nil
@@ -124,6 +134,105 @@ func TestRESTMessageCancelAndAskUserReuseInboundPath(t *testing.T) {
 	answer := <-msgBus.Inbound
 	if recorder.Code != http.StatusOK || answer.Content != "Qq1: yes" || answer.Metadata["ask_user_answered"] != "true" {
 		t.Fatalf("unexpected AskUser result: status=%d message=%#v", recorder.Code, answer)
+	}
+}
+
+func TestRESTMessageRetriesAreIdempotent(t *testing.T) {
+	db := newTestDB(t)
+	msgBus := bus.NewMessageBus()
+	wc := NewWebChannel(WebChannelConfig{DB: db}, msgBus)
+	wc.SetOSSProvider(fixedOSSProvider{})
+	setTestCurrentSession(wc, SessionSelector{Channel: "web", ChatID: "web-1"})
+	client := &Client{
+		connType: clientConnTypeSSE,
+		sendCh:   make(chan protocol.WSMessage, 4),
+		done:     make(chan struct{}),
+		id:       "retry-client",
+	}
+	wc.hub.addClient(client.id, client)
+	wc.hub.subscribe(client.id, "web-1")
+
+	for _, tc := range []struct {
+		name      string
+		requestID string
+		content   string
+	}{
+		{name: "message", requestID: "request-message", content: "hello"},
+		{name: "command", requestID: "request-command", content: "/new"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"id":          tc.requestID,
+				"content":     tc.content,
+				"upload_keys": []string{"upload-key"},
+				"file_names":  []string{"test.txt"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				recorder := httptest.NewRecorder()
+				wc.handleMessage(recorder, authedAPIRequest(http.MethodPost, "/api/message", body))
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("attempt %d status = %d: %s", attempt+1, recorder.Code, recorder.Body.String())
+				}
+			}
+
+			inbound := <-msgBus.Inbound
+			if inbound.RequestID != tc.requestID || !strings.Contains(inbound.Content, "<file") {
+				t.Fatalf("inbound = %#v", inbound)
+			}
+			select {
+			case duplicate := <-msgBus.Inbound:
+				t.Fatalf("duplicate inbound: %#v", duplicate)
+			default:
+			}
+			echo := <-client.sendCh
+			if echo.Type != protocol.MsgTypeUserEcho || echo.ID != tc.requestID || echo.OriginalContent != tc.content {
+				t.Fatalf("echo = %#v", echo)
+			}
+			select {
+			case duplicate := <-client.sendCh:
+				t.Fatalf("duplicate echo: %#v", duplicate)
+			default:
+			}
+		})
+	}
+}
+
+func TestRESTMessageEnqueueFailureLeavesNoEchoOrHistory(t *testing.T) {
+	db := newTestDB(t)
+	wc := NewWebChannel(WebChannelConfig{DB: db}, nil)
+	wc.SetOSSProvider(fixedOSSProvider{})
+	setTestCurrentSession(wc, SessionSelector{Channel: "web", ChatID: "web-1"})
+	client := &Client{
+		connType: clientConnTypeSSE,
+		sendCh:   make(chan protocol.WSMessage, 1),
+		done:     make(chan struct{}),
+		id:       "failed-client",
+	}
+	wc.hub.addClient(client.id, client)
+	wc.hub.subscribe(client.id, "web-1")
+	body := []byte(`{"id":"failed-request","content":"/new","upload_keys":["upload-key"],"file_names":["test.txt"]}`)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		recorder := httptest.NewRecorder()
+		wc.handleMessage(recorder, authedAPIRequest(http.MethodPost, "/api/message", body))
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("attempt %d status = %d: %s", attempt+1, recorder.Code, recorder.Body.String())
+		}
+	}
+	select {
+	case echo := <-client.sendCh:
+		t.Fatalf("unexpected echo after failed enqueue: %#v", echo)
+	default:
+	}
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM session_messages").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("session_messages count = %d, want 0", count)
 	}
 }
 

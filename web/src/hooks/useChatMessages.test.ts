@@ -212,12 +212,15 @@ describe('useChatMessages', () => {
       result.current.sendMessage('new message')
     })
     expect(result.current.messages.map((message) => message.content)).toEqual(['new message'])
+    const sentMessage = vi.mocked(ws.send).mock.calls[0][0]
 
     act(() => {
       messageHandler?.({
         type: 'user_echo',
+        id: sentMessage.id,
         chat_id: 'slow-chat',
         content: 'new message with attachment',
+        original_content: 'new message',
         ts: 1_786_000_000,
       })
     })
@@ -362,6 +365,71 @@ describe('useChatMessages', () => {
     })
     expect(messagesCache.get('missing-echo-chat')).toHaveLength(1)
     expect(ws.setLastSeq).not.toHaveBeenCalled()
+  })
+
+  it('correlates reversed and repeated attachment echoes by request ID', async () => {
+    let messageHandler: ((message: WSMessage) => void) | null = null
+    const ws = {
+      rpc: vi.fn(),
+      send: vi.fn(async () => undefined),
+      setLastSeq: vi.fn(),
+      onMessage: vi.fn((handler) => {
+        messageHandler = handler
+        return vi.fn()
+      }),
+    } as unknown as WSConnection
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: { messages: [] },
+      error: null,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })))
+    const { result } = renderHook(() => (
+      useChatMessages({ chatID: 'echo-order-chat', channel: 'web', ws })
+    ))
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    act(() => result.current.sendMessage('first'))
+    act(() => result.current.sendMessage('second'))
+    const sent = vi.mocked(ws.send).mock.calls.map(([message]) => message)
+    expect(sent[0].id).toBeTruthy()
+    expect(sent[1].id).toBeTruthy()
+    expect(sent[0].id).not.toBe(sent[1].id)
+
+    const secondEcho: WSMessage = {
+      type: 'user_echo',
+      id: sent[1].id,
+      chat_id: 'echo-order-chat',
+      content: 'second + attachment',
+      original_content: 'second',
+      ts: 1_786_000_002,
+      seq: 2,
+    }
+    const firstEcho: WSMessage = {
+      type: 'user_echo',
+      id: sent[0].id,
+      chat_id: 'echo-order-chat',
+      content: 'first + attachment',
+      original_content: 'first',
+      ts: 1_786_000_001,
+      seq: 1,
+    }
+    act(() => {
+      messageHandler?.(secondEcho)
+      messageHandler?.(firstEcho)
+      messageHandler?.(firstEcho)
+    })
+
+    expect(result.current.messages.map((message) => message.content)).toEqual([
+      'first + attachment',
+      'second + attachment',
+    ])
+    expect(result.current.messages.map((message) => message.requestID)).toEqual([
+      sent[0].id,
+      sent[1].id,
+    ])
   })
 
   it('restores initial history when an optimistic send fails during loading', async () => {
