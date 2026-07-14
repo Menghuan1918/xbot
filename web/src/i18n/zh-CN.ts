@@ -194,7 +194,7 @@ const zhCN = {
     navPrevUser: '上一个用户消息',
     navNextUser: '下一个用户消息',
     navToBottom: '回到最下方',
-    newContent: '条新内容',
+    newContent: '新内容',
   },
   settings: {
     title: '设置',

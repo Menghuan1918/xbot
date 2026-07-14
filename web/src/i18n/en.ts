@@ -197,7 +197,7 @@ const en: Translations = {
     navPrevUser: 'Previous user message',
     navNextUser: 'Next user message',
     navToBottom: 'Scroll to bottom',
-    newContent: 'new',
+    newContent: 'New content',
   },
   settings: {
     title: 'Settings',
