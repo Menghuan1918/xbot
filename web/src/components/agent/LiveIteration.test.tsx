@@ -29,6 +29,7 @@ function makeSnapshot(overrides: Partial<ProgressSnapshot> = {}): ProgressSnapsh
     lastReasoning: '',
     todos: [],
     subAgents: [],
+    tokenUsage: null,
     ...overrides,
   }
 }

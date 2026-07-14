@@ -295,6 +295,15 @@ export interface ProgressSnapshot {
   todos: TodoItem[]
   /** Structured SubAgent progress tree, carried forward while active. */
   subAgents: WebSubAgentProgress[]
+  /** Token usage from the last LLM API response (mirrors protocol.TokenUsage). */
+  tokenUsage: TokenUsageInfo | null
+}
+
+/** Token usage info (mirrors protocol.TokenUsage). */
+export interface TokenUsageInfo {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
 }
 
 /** Empty snapshot — the idle state. */
@@ -312,6 +321,7 @@ export const EMPTY_PROGRESS_SNAPSHOT: ProgressSnapshot = {
   lastReasoning: '',
   todos: [],
   subAgents: [],
+  tokenUsage: null,
 }
 
 /** Chat message role. */
