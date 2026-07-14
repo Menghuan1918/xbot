@@ -336,6 +336,9 @@ type Agent struct {
 	// key: "channel:chatID" -> chan struct{} (buffered, cap=1)
 	chatCancelCh sync.Map
 
+	// cancelStateMu serializes cancel interception with AskUser state mutations.
+	cancelStateMu sync.Mutex
+
 	// pendingCancel: 当 /cancel 到达时 cancelCh 尚未注册（消息还在排队或等信号量），
 	// 先记录 pending，chatProcessLoop 注册 cancelCh 后立即消费。
 	// key: "channel:chatID" -> bool
@@ -464,6 +467,11 @@ type Agent struct {
 	// so they survive across multiple requests and only stop when the parent Agent process exits.
 	agentCtx    context.Context
 	agentCancel context.CancelFunc
+}
+
+type pendingAskUserEntry struct {
+	mu      sync.RWMutex
+	pending *protocol.ProgressEvent
 }
 
 // SetRegistryManager sets the RegistryManager (for external injection or override).
@@ -677,6 +685,9 @@ func setSubFieldValue(sub *sqlite.LLMSubscription, key, value string) error {
 // LLMFactory returns the Agent's LLMFactory (for external injection of callbacks).
 func (a *Agent) LLMFactory() *LLMFactory { return a.llmFactory }
 
+// SetBgTaskManager replaces the background task manager (used in tests).
+func (a *Agent) SetBgTaskManager(manager *tools.BackgroundTaskManager) { a.bgTaskMgr = manager }
+
 // SetLLMFactory sets the LLM factory (used in tests).
 func (a *Agent) SetLLMFactory(f *LLMFactory) { a.llmFactory = f }
 
@@ -867,36 +878,102 @@ func (a *Agent) IsProcessing(senderID string) bool {
 // the page doesn't lose the prompt.
 // Searches by chatID only (chatID is globally unique across channels).
 func (a *Agent) GetPendingAskUser(ch, chatID string) *protocol.ProgressEvent {
-	// Try exact key first (channel:chatID)
-	key := ch + ":" + chatID
-	if v, ok := a.waitingUserSessions.Load(key); ok {
-		snapshot := v.(*protocol.ProgressEvent)
-		result := *snapshot
-		return &result
+	_, entry := a.loadPendingAskUserEntry(ch, chatID)
+	if entry == nil {
+		return nil
 	}
-	// Fallback: search by chatID suffix (any channel)
-	var found *protocol.ProgressEvent
+	entry.mu.RLock()
+	defer entry.mu.RUnlock()
+	if entry.pending == nil {
+		return nil
+	}
+	return clonePendingAskUser(entry.pending)
+}
+
+// WithPendingAskUser invokes fn with a snapshot while preventing the pending
+// prompt from being cleared. Callers can use this to make publication or
+// delivery admission linearizable with an AskUser answer. fn must stay bounded,
+// must not perform network I/O, and must not mutate pending AskUser state.
+func (a *Agent) WithPendingAskUser(ch, chatID string, fn func(*protocol.ProgressEvent) bool) bool {
+	if fn == nil {
+		return false
+	}
+	for {
+		key, entry := a.loadPendingAskUserEntry(ch, chatID)
+		if entry == nil {
+			return false
+		}
+
+		entry.mu.RLock()
+		current, ok := a.waitingUserSessions.Load(key)
+		if !ok || current != entry || entry.pending == nil {
+			entry.mu.RUnlock()
+			continue
+		}
+		snapshot := clonePendingAskUser(entry.pending)
+		result := func() bool {
+			defer entry.mu.RUnlock()
+			return fn(snapshot)
+		}()
+		return result
+	}
+}
+
+func (a *Agent) loadPendingAskUserEntry(ch, chatID string) (string, *pendingAskUserEntry) {
+	key := ch + ":" + chatID
+	if value, ok := a.waitingUserSessions.Load(key); ok {
+		return key, value.(*pendingAskUserEntry)
+	}
+	var foundKey string
+	var found *pendingAskUserEntry
 	a.waitingUserSessions.Range(func(k, v any) bool {
 		if s, ok := k.(string); ok && strings.HasSuffix(s, ":"+chatID) {
-			snapshot := v.(*protocol.ProgressEvent)
-			result := *snapshot
-			found = &result
+			foundKey = s
+			found = v.(*pendingAskUserEntry)
 			return false
 		}
 		return true
 	})
-	return found
+	return foundKey, found
+}
+
+func (a *Agent) setPendingAskUser(ch, chatID string, pending *protocol.ProgressEvent) {
+	if pending == nil {
+		a.clearPendingAskUser(ch, chatID)
+		return
+	}
+	key := ch + ":" + chatID
+	for {
+		fresh := &pendingAskUserEntry{pending: clonePendingAskUser(pending)}
+		value, loaded := a.waitingUserSessions.LoadOrStore(key, fresh)
+		if !loaded {
+			return
+		}
+		entry := value.(*pendingAskUserEntry)
+		entry.mu.Lock()
+		current, ok := a.waitingUserSessions.Load(key)
+		if !ok || current != entry {
+			entry.mu.Unlock()
+			continue
+		}
+		entry.pending = clonePendingAskUser(pending)
+		entry.mu.Unlock()
+		return
+	}
 }
 
 // ClearPendingAskUser removes the pending AskUser prompt for a chat.
 // Called when the user answers or cancels.
 // Searches by chatID only (chatID is globally unique across channels).
 func (a *Agent) ClearPendingAskUser(ch, chatID string) {
+	a.clearPendingAskUser(ch, chatID)
+}
+
+func (a *Agent) clearPendingAskUser(ch, chatID string) bool {
 	// Try exact key first
 	key := ch + ":" + chatID
-	if _, ok := a.waitingUserSessions.Load(key); ok {
-		a.waitingUserSessions.Delete(key)
-		return
+	if a.clearPendingAskUserKey(key) {
+		return true
 	}
 	// Fallback: search by chatID suffix
 	var keysToDelete []string
@@ -906,9 +983,136 @@ func (a *Agent) ClearPendingAskUser(ch, chatID string) {
 		}
 		return true
 	})
+	cleared := false
 	for _, k := range keysToDelete {
-		a.waitingUserSessions.Delete(k)
+		cleared = a.clearPendingAskUserKey(k) || cleared
 	}
+	return cleared
+}
+
+func (a *Agent) clearPendingAskUserKey(key string) bool {
+	for {
+		value, ok := a.waitingUserSessions.Load(key)
+		if !ok {
+			return false
+		}
+		entry := value.(*pendingAskUserEntry)
+		entry.mu.Lock()
+		current, ok := a.waitingUserSessions.Load(key)
+		if !ok || current != entry {
+			entry.mu.Unlock()
+			continue
+		}
+		cleared := entry.pending != nil
+		entry.pending = nil
+		a.waitingUserSessions.CompareAndDelete(key, entry)
+		entry.mu.Unlock()
+		return cleared
+	}
+}
+
+func clonePendingAskUser(pending *protocol.ProgressEvent) *protocol.ProgressEvent {
+	if pending == nil {
+		return nil
+	}
+	result := *pending
+	result.Questions = append([]protocol.AskUserQuestion(nil), pending.Questions...)
+	for i := range result.Questions {
+		result.Questions[i].Options = append([]string(nil), pending.Questions[i].Options...)
+	}
+	return &result
+}
+
+func (a *Agent) sendPendingAskUserCancelAck(msg bus.InboundMessage) {
+	if err := a.sendMessage(msg.Channel, msg.ChatID, "", map[string]string{
+		"cancelled": "true",
+		"no_patch":  "true",
+	}); err != nil {
+		log.WithError(err).Warn("Failed to send pending AskUser cancel ack")
+	}
+}
+
+func (a *Agent) pendingAskUserMatches(ch, chatID, requestID string) bool {
+	if requestID == "" {
+		return false
+	}
+	return a.WithPendingAskUser(ch, chatID, func(pending *protocol.ProgressEvent) bool {
+		return pending.RequestID == requestID
+	})
+}
+
+func (a *Agent) clearPendingAskUserForEnqueuedAnswer(msg bus.InboundMessage) {
+	if msg.Metadata != nil && msg.Metadata["ask_user_answered"] == "true" {
+		a.ClearPendingAskUser(msg.Channel, msg.ChatID)
+	}
+}
+
+func (a *Agent) interceptCancel(msg bus.InboundMessage) {
+	cancelKey := msg.Channel + ":" + msg.ChatID
+	log.WithField("cancel_key", cancelKey).Info("Received /cancel request")
+	a.cancelStateMu.Lock()
+	if ch, ok := a.chatCancelCh.Load(cancelKey); ok {
+		// Record the request synchronously. The cancel listener may not consume
+		// the channel before teardown snapshots reqCtx.
+		a.pendingCancel.Store(cancelKey, true)
+		sent := false
+		select {
+		case ch.(chan struct{}) <- struct{}{}:
+			sent = true
+		default:
+			log.WithField("cancel_key", cancelKey).Warn("Cancel signal already sent (buffer full)")
+		}
+		// A prompt may have been stored just before the active Run returned.
+		// Clear it, but never replace the active cancellation with an early ack.
+		a.clearPendingAskUser(msg.Channel, msg.ChatID)
+		a.cancelStateMu.Unlock()
+		if sent {
+			log.Info("Cancel signal sent to processing goroutine")
+			if existingID, ok := a.sessionMsgIDs.Load(qualifyChatID(msg.Channel, msg.ChatID)); ok {
+				if id, ok := existingID.(string); ok {
+					a.addReactionToMessage(msg.Channel, msg.ChatID, id, "CrossMark")
+				}
+			}
+		}
+		return
+	}
+	if a.clearPendingAskUser(msg.Channel, msg.ChatID) {
+		a.pendingCancel.Delete(cancelKey)
+		a.cancelStateMu.Unlock()
+		a.sendPendingAskUserCancelAck(msg)
+		log.WithField("cancel_key", cancelKey).Info("Cancelled pending AskUser prompt")
+		return
+	}
+
+	// The request is queued or waiting for a semaphore. Its worker consumes
+	// this marker before processMessage starts and sends the acknowledgement
+	// only after the cancellation has completed.
+	a.pendingCancel.Store(cancelKey, true)
+	a.cancelStateMu.Unlock()
+	log.WithField("cancel_key", cancelKey).Info("Cancel pending: request not yet active, will cancel when it starts")
+}
+
+func (a *Agent) registerActiveCancelState(cancelKey string, cancelCh chan struct{}, reqCancel context.CancelFunc) bool {
+	a.cancelStateMu.Lock()
+	defer a.cancelStateMu.Unlock()
+	a.chatCancelCh.Store(cancelKey, cancelCh)
+	_, pending := a.pendingCancel.LoadAndDelete(cancelKey)
+	if pending {
+		reqCancel()
+	}
+	return pending
+}
+
+func (a *Agent) finishActiveCancelState(cancelKey string, reqCtx context.Context, reqCancel context.CancelFunc) bool {
+	a.cancelStateMu.Lock()
+	defer a.cancelStateMu.Unlock()
+	if _, pending := a.pendingCancel.LoadAndDelete(cancelKey); pending {
+		reqCancel()
+	}
+	wasCancelled := reqCtx.Err() == context.Canceled
+	a.chatCancelCh.Delete(cancelKey)
+	reqCancel()
+	return wasCancelled
 }
 
 // SetProxyLLM injects a ProxyLLM for a user (when their active runner has local LLM).

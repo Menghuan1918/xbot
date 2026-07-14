@@ -1,6 +1,7 @@
 package web
 
 import (
+	"net/http"
 	"sync"
 	"sync/atomic"
 
@@ -23,6 +24,11 @@ type Hub struct {
 	offline map[string]*ringBuffer     // chatID → offline message buffer
 	offMu   sync.Mutex
 
+	// seqMu guards the sequence-high-water selection + subscribe transaction in
+	// handleSSE. It prevents a race where an event arrives between reading
+	// lastSeq and subscribing, causing the event to be missed.
+	seqMu sync.Mutex
+
 	tuiRespFn func(id string, payload *protocol.TUIControlPayload) // set by RemoteCLIChannel
 }
 
@@ -36,10 +42,16 @@ func newHub() *Hub {
 
 // addClient registers a WS connection for lifecycle management.
 // Use subscribe() to register it for message routing.
-func (h *Hub) addClient(clientID string, c *Client) {
+// Returns false if a client with the same ID already exists.
+func (h *Hub) addClient(clientID string, c *Client) bool {
 	h.mu.Lock()
+	if _, exists := h.conns[clientID]; exists {
+		h.mu.Unlock()
+		return false
+	}
 	h.conns[clientID] = c
 	h.mu.Unlock()
+	return true
 }
 
 // removeClient removes a WS connection and all its subscriptions.
@@ -58,7 +70,8 @@ func (h *Hub) removeClient(clientID string) {
 // subscribe registers a client to receive messages for a given chatID.
 // Idempotent — safe to call on every message from the client.
 // Removes any previous subscription for this client (single-chat-per-connection model).
-func (h *Hub) subscribe(clientID, chatID string) {
+// Returns true on success.
+func (h *Hub) subscribe(clientID, chatID string) bool {
 	h.mu.Lock()
 	// Remove old subscription(s) for this client (single active chat per WS connection).
 	// Without this, the client accumulates subscriptions to multiple chatIDs and
@@ -92,6 +105,7 @@ func (h *Hub) subscribe(clientID, chatID string) {
 	}
 	h.subs[chatID][clientID] = true
 	h.mu.Unlock()
+	return true
 }
 
 // sendToClient sends a message to all clients subscribed to a chatID.
@@ -287,6 +301,15 @@ type Client struct {
 	statelessMu  sync.Mutex
 	statelessMap map[string]*protocol.WSMessage // msg type → latest message
 	statelessSig chan struct{}                  // cap-1 signal: writePump checks slot
+
+	// SSE-specific fields. Only populated when connType == clientConnTypeSSE.
+	connType        clientConnType // connection type (WS or SSE)
+	w               http.ResponseWriter
+	flusher         http.Flusher
+	chatID          string    // SSE: the chatID this client is subscribed to
+	sessionChannel  string    // SSE: the channel name (e.g. "web", "cli")
+	lastSentSeq     uint64    // SSE: last sequence number written to the client
+	sseWriteCanceled atomic.Bool // SSE: set by watchSSEWriteCancellation to abort writes
 }
 
 // ---------------------------------------------------------------------------
@@ -368,4 +391,47 @@ func (rb *ringBuffer) flush() []protocol.WSMessage {
 	rb.head = 0
 	rb.tail = 0
 	return result
+}
+
+// sendToSession sends a message to all clients subscribed to a chatID.
+func (h *Hub) sendToSession(channelName, chatID string, msg protocol.WSMessage) bool {
+	return h.sendToClient(sessionRouteKey(channelName, chatID), msg)
+}
+
+// broadcastSessionState sends a session state event to subscribers of the
+// given channel+chatID. WebSocket clients get it via sendToSession; SSE
+// clients are subscribed to the same routeKey so they receive it too.
+func (h *Hub) broadcastSessionState(channelName, chatID string, msg protocol.WSMessage) {
+	h.sendToClient(sessionRouteKey(channelName, chatID), msg)
+}
+
+// sendSSEEventIf conditionally sends a message to all clients subscribed to a
+// routeKey. The fn callback decides whether the message should be sent; if it
+// returns true, the stamped message is delivered. Used by SSE fallback logic
+// to avoid duplicate delivery of events already in the replay buffer.
+func (h *Hub) sendSSEEventIf(routeKey string, fn func() (protocol.WSMessage, bool)) bool {
+	msg, ok := fn()
+	if !ok {
+		return false
+	}
+	return h.sendToClient(routeKey, msg)
+}
+
+// ---------------------------------------------------------------------------
+// sessionRouteKey + connection type constants
+// ---------------------------------------------------------------------------
+
+// clientConnType distinguishes WebSocket and SSE connections.
+type clientConnType int
+
+const (
+	clientConnTypeWS  clientConnType = iota // standard WebSocket
+	clientConnTypeSSE                       // Server-Sent Events
+)
+
+// sessionRouteKey builds the routing key for the event stream and Hub
+// subscription map. Combines channel + chatID so events from different
+// channels with the same chatID don't collide.
+func sessionRouteKey(channel, chatID string) string {
+	return channel + ":" + chatID
 }

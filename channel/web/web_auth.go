@@ -632,8 +632,9 @@ func (wc *WebChannel) isSecureCookie() bool {
 type contextKey string
 
 const (
-	senderIDKey contextKey = "sender_id"
-	userIDKey   contextKey = "user_id"
+	senderIDKey   contextKey = "sender_id"
+	userIDKey     contextKey = "user_id"
+	webSessionKey contextKey = "web_session"
 )
 
 func contextWithSenderID(ctx context.Context, id string) context.Context {
@@ -656,6 +657,15 @@ func userIDFromContext(ctx context.Context) int {
 		return id
 	}
 	return 0
+}
+
+func contextWithWebSession(ctx context.Context, si sessionInfo) context.Context {
+	return context.WithValue(ctx, webSessionKey, si)
+}
+
+func webSessionFromContext(ctx context.Context) (sessionInfo, bool) {
+	si, ok := ctx.Value(webSessionKey).(sessionInfo)
+	return si, ok
 }
 
 // ---------------------------------------------------------------------------

@@ -186,10 +186,11 @@ func (wc *WebChannel) handleRPC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(result) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": map[string]any{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	// Wrap RPC result in {ok,data} envelope — postAPI on the frontend expects this format.
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "data": json.RawMessage(result)})
 }
 
 func (wc *WebChannel) rpcIdentityFromRequest(r *http.Request) RPCIdentity {

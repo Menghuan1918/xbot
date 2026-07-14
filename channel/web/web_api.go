@@ -1843,6 +1843,18 @@ func (wc *WebChannel) GetCurrentSession(senderID string) SessionSelector {
 	return SessionSelector{Channel: "web", ChatID: senderID}
 }
 
+// inferAPISessionChannel infers the channel name for a chatID when the client
+// only provides chatID (no explicit channel). If the user's active session
+// matches the given chatID, that session's channel is used; otherwise it falls
+// back to "web".
+func (wc *WebChannel) inferAPISessionChannel(senderID, chatID string) string {
+	sel := wc.GetCurrentSession(senderID)
+	if sel.ChatID == chatID && sel.Channel != "" {
+		return sel.Channel
+	}
+	return "web"
+}
+
 // isAdmin returns true if the user is an admin.
 // Uses IdentityResolver when available (canonical role), falls back to
 // senderID == "admin" and web user ID == 1 for backward compat.

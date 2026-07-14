@@ -57,6 +57,12 @@ func startTestServer(t *testing.T, wc *WebChannel) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wc.handleWS)
+	mux.HandleFunc("/api/sse", wc.authMiddleware(wc.handleSSE))
+	mux.HandleFunc("/api/rpc", wc.authMiddleware(limitBodySize(wc.handleRPC)))
+	mux.HandleFunc("/api/message", wc.authMiddleware(limitBodySize(wc.handleMessage)))
+	mux.HandleFunc("/api/cancel", wc.authMiddleware(limitBodySize(wc.handleCancel)))
+	mux.HandleFunc("/api/ask_user/respond", wc.authMiddleware(limitBodySize(wc.handleAskUserRespond)))
+	mux.HandleFunc("/api/session/status", wc.authMiddleware(limitBodySize(wc.handleSessionStatus)))
 	mux.HandleFunc("/api/auth/register", wc.handleRegister)
 	mux.HandleFunc("/api/auth/login", wc.handleLogin)
 	mux.HandleFunc("/api/auth/logout", wc.handleLogout)
@@ -1250,7 +1256,7 @@ func TestRPCNonBlocking(t *testing.T) {
 	server := startTestServer(t, wc)
 
 	// Custom RPCHandler: "slow_method" sleeps 300ms, "fast_method" returns immediately.
-	wc.SetRPCHandler(func(method string, params json.RawMessage, senderID string) (json.RawMessage, error) {
+	wc.SetRPCHandler(func(method string, params json.RawMessage, identity RPCIdentity) (json.RawMessage, error) {
 		switch method {
 		case "slow_method":
 			time.Sleep(300 * time.Millisecond)
