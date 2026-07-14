@@ -36,7 +36,14 @@ interface MessageListProps {
   mergeTools?: boolean
   loading: boolean
   error: string | null
-  onRewind?: (message: ChatMessage) => void
+  /** Rewind callback — receives the edited content string. */
+  onRewind?: (editedContent: string, originalMessage: ChatMessage) => void
+  /** ID of the message currently being edited, or null. */
+  editingMessageId?: string | null
+  /** Callback to start editing a message. */
+  onStartEdit?: (messageId: string) => void
+  /** Callback to end editing (cancel or confirm). */
+  onEndEdit?: () => void
   /** Optional footer rendered after the message list (e.g. AskUserPanel). */
   footer?: ReactNode
 }
@@ -68,6 +75,9 @@ export function MessageList({
   loading,
   error,
   onRewind,
+  editingMessageId,
+  onStartEdit,
+  onEndEdit,
   footer,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -304,6 +314,9 @@ export function MessageList({
             {virtualizer.getVirtualItems().map((item) => {
               const row = rows[item.index]
               if (!row) return null
+              const canRewind = canRewindMessage(row, item.index, compactBoundaryIndex)
+              const isEditing = editingMessageId === row.id
+              const editDisabled = editingMessageId !== null && editingMessageId !== row.id
               return (
                 <div
                   key={item.key}
@@ -323,7 +336,11 @@ export function MessageList({
                     liveProgress={row.id === liveId ? liveProgress : null}
                     collapseLevel={collapseLevel}
                     mergeTools={mergeTools}
-                    onRewind={canRewindMessage(row, item.index, compactBoundaryIndex) ? onRewind : undefined}
+                    onRewind={canRewind && onRewind ? (editedContent: string) => onRewind(editedContent, row) : undefined}
+                    isEditing={isEditing}
+                    onStartEdit={canRewind && onStartEdit ? () => onStartEdit(row.id) : undefined}
+                    onEndEdit={onEndEdit}
+                    editDisabled={editDisabled}
                   />
                 </div>
               )
