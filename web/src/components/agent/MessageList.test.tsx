@@ -127,7 +127,7 @@ function contentElement(container: HTMLElement): Element {
 }
 
 describe('MessageList virtualization', () => {
-  it('does not re-adjust measured history rows while scrolling backward', () => {
+  it('keeps resized history rows anchored while scrolling backward', () => {
     const scrollElement = document.createElement('div')
     const corrections: number[] = []
     const offsetCallbacks: Array<(offset: number, isScrolling: boolean) => void> = []
@@ -164,10 +164,10 @@ describe('MessageList virtualization', () => {
       expect(corrections).toEqual([780])
 
       corrections.length = 0
-      // Re-measuring an already-known row during upward scrolling must not
-      // start another correction cascade.
+      // Rich Markdown can resize repeatedly as images and fonts settle. Every
+      // above-viewport change must preserve the visible anchor, even on up-scroll.
       for (const size of [960, 840, 1_020]) virtualizer.resizeItem(20, size)
-      expect(corrections).toEqual([])
+      expect(corrections).toHaveLength(3)
     } finally {
       cleanup()
     }
@@ -208,6 +208,22 @@ describe('MessageList virtualization', () => {
     const sizing = container.querySelector('[style*="height"]')
     expect(sizing).not.toBeNull()
     expect(sizing!.getAttribute('style')).toContain('18000px')
+  })
+
+  it('disables native scroll anchoring so the virtualizer owns size corrections', () => {
+    const { container } = renderWithProviders(
+      <MessageList
+        messages={makeMessages(60)}
+        liveMessage={null}
+        liveProgress={null}
+        collapseLevel="all"
+        loading={false}
+        error={null}
+      />,
+    )
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement
+
+    expect(scroller.style.overflowAnchor).toBe('none')
   })
 
   it('forwards a live streaming message through the row list without throwing', () => {

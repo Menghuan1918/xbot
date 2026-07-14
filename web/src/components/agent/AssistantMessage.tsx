@@ -64,7 +64,7 @@ function AssistantMessageImpl({ message, progress, collapseLevel, mergeTools = t
     const lastText = finalContent || lastIteration?.thinking || ''
 
     return (
-      <div className="agent-msg-card px-1">
+      <div className="px-1">
         {showSummary && (
           <FoldedLine
             title={t('agent.processed', { iterations: iterations.length, tools: totalTools })}
@@ -96,7 +96,7 @@ function AssistantMessageImpl({ message, progress, collapseLevel, mergeTools = t
 
   // 'minimal'/'none' level or streaming: render full TurnBody.
   return (
-    <div className="agent-msg-card px-1">
+    <div className="px-1">
       <TurnBody
         iterations={iterations}
         liveProgress={liveProgress}

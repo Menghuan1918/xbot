@@ -405,11 +405,6 @@
 /* KaTeX display blocks stay scrollable on narrow widths. */
 .markdown-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.25em 0; }
 
-/* content-visibility: skip rendering offscreen Agent message cards (Spec 4 perf).
- * The virtualizer already keeps the DOM light, but this protects the live
- * streaming card and any non-virtualized fallback from layout thrash. */
-.agent-msg-card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
-
 /* ── Dockview theme override — follow app light/dark palette ────────────────
  * dockview's `.dockview-theme-vs` hardcodes dark background variables (#1e1e1e
  * etc), ignoring the app's `.dark` class. We override these CSS variables to

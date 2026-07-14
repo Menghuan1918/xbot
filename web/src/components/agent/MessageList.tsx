@@ -286,6 +286,7 @@ export function MessageList({
         }}
         onKeyDown={onKeyDown}
         tabIndex={0}
+        style={{ overflowAnchor: 'none' }}
         className="h-full overflow-y-auto overflow-x-hidden px-3 py-4"
       >
         {loading && rows.length === 0 && (
