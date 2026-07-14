@@ -9,7 +9,7 @@ export type Theme = 'dark' | 'light'
 export type Locale = 'zh-CN' | 'en'
 export type TabType = 'agent' | 'file' | 'terminal' | 'background'
 export type SessionStatus = 'running' | 'waiting_input' | 'pending' | 'idle' | 'unread' | 'error'
-export type SessionCategory = 'all' | 'time' | 'status'
+export type SessionCategory = 'time' | 'status' | 'path'
 
 /**
  * How Agent intermediate steps (tool calls / reasoning) are shown.
