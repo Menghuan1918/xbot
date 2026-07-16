@@ -41,6 +41,11 @@ func (s *TenantSession) AppendMessage(msg llm.ChatMessage) (int64, error) {
 	return s.sessionSvc.AppendMessage(s.tenantID, msg)
 }
 
+// AppendMessages atomically appends a related message batch.
+func (s *TenantSession) AppendMessages(messages []llm.ChatMessage) ([]int64, error) {
+	return s.sessionSvc.AppendMessages(s.tenantID, messages)
+}
+
 func (s *TenantSession) AppendControl(recordType sqlite.HistoryRecordType, targetHistoryID int64, data any) (int64, error) {
 	return s.sessionSvc.AppendControl(s.tenantID, recordType, targetHistoryID, data)
 }

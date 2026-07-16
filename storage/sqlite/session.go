@@ -31,7 +31,7 @@ func (s *SessionService) conn() (*sql.DB, error) {
 
 // AddMessage adds a message to a tenant's session
 func (s *SessionService) AddMessage(tenantID int64, msg llm.ChatMessage) error {
-	_, err := s.appendMessage(tenantID, msg)
+	_, err := s.AppendMessage(tenantID, msg)
 	return err
 }
 
@@ -44,11 +44,13 @@ func (s *SessionService) AddMessage(tenantID int64, msg llm.ChatMessage) error {
 //
 // Returns sql.ErrNoRows if no matching message exists.
 func (s *SessionService) ReplaceToolMessage(tenantID int64, toolName, toolCallID, content string) error {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	if toolName == "AskUser" {
-		_, err := s.AppendAskAnswer(tenantID, content)
+		_, err := s.appendAskAnswerLocked(tenantID, content)
 		return err
 	}
-	replay, err := s.Replay(tenantID)
+	replay, err := s.replayLocked(tenantID)
 	if err != nil {
 		return err
 	}
@@ -62,7 +64,7 @@ func (s *SessionService) ReplaceToolMessage(tenantID int64, toolName, toolCallID
 					occurrence++
 				}
 			}
-			_, err := s.AppendControl(tenantID, HistoryRecordContextEdit, msg.HistoryID, MessageMutations{Mutations: []MessageMutation{{TargetHistoryID: msg.HistoryID, TargetOccurrence: occurrence, Message: msg}}})
+			_, err := s.appendControlLocked(tenantID, HistoryRecordContextEdit, msg.HistoryID, MessageMutations{Mutations: []MessageMutation{{TargetHistoryID: msg.HistoryID, TargetOccurrence: occurrence, Message: msg}}})
 			return err
 		}
 	}
@@ -139,6 +141,8 @@ func (s *SessionService) GetUserMessageCount(tenantID int64) (int, error) {
 
 // Clear removes all messages for a tenant
 func (s *SessionService) Clear(tenantID int64) error {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	conn, err := s.conn()
 	if err != nil {
 		return err
@@ -170,6 +174,8 @@ func (s *SessionService) PurgeNewerThanOrEqual(tenantID int64, cutoff time.Time)
 	if cutoff.IsZero() {
 		return 0, nil
 	}
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	conn, err := s.conn()
 	if err != nil {
 		return 0, err
@@ -202,6 +208,8 @@ func (s *SessionService) PurgeNewerThan(tenantID int64, cutoff time.Time) (int64
 	if cutoff.IsZero() {
 		return 0, nil
 	}
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	conn, err := s.conn()
 	if err != nil {
 		return 0, err
@@ -237,7 +245,9 @@ func (s *SessionService) UpdateMessageContent(tenantID int64, messageIndex int, 
 // The index corresponds to the ordering used by GetAllMessages (which excludes display_only messages).
 // Used by context_edit persistence to sync in-memory edits back to the database.
 func (s *SessionService) UpdateMessageContentNonDisplayOnly(tenantID int64, messageIndex int, content string) error {
-	replay, err := s.Replay(tenantID)
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
+	replay, err := s.replayLocked(tenantID)
 	if err != nil {
 		return err
 	}
@@ -252,7 +262,7 @@ func (s *SessionService) UpdateMessageContentNonDisplayOnly(tenantID int64, mess
 			occurrence++
 		}
 	}
-	_, err = s.AppendControl(tenantID, HistoryRecordContextEdit, msg.HistoryID, MessageMutations{Mutations: []MessageMutation{{TargetHistoryID: msg.HistoryID, TargetOccurrence: occurrence, Message: msg}}})
+	_, err = s.appendControlLocked(tenantID, HistoryRecordContextEdit, msg.HistoryID, MessageMutations{Mutations: []MessageMutation{{TargetHistoryID: msg.HistoryID, TargetOccurrence: occurrence, Message: msg}}})
 	return err
 }
 
@@ -260,6 +270,8 @@ func (s *SessionService) UpdateMessageContentNonDisplayOnly(tenantID int64, mess
 // user-role message for a tenant. This records the exact API prompt_tokens at the
 // time that user message was sent, enabling precise token accounting for rewind.
 func (s *SessionService) UpdateUserMessageContextTokens(tenantID int64, promptTokens int64) error {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	conn, err := s.conn()
 	if err != nil {
 		return err
@@ -286,6 +298,8 @@ ORDER BY id DESC LIMIT 1
 // non-display-only user message for a tenant. Used by rewind to restore accurate
 // token state. Returns (0, nil) if no user message or context_tokens is 0.
 func (s *SessionService) GetLastUserMessageContextTokens(tenantID int64) (int64, error) {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	conn, err := s.conn()
 	if err != nil {
 		return 0, err

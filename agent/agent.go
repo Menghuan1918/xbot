@@ -1462,7 +1462,7 @@ func initServices(a *Agent, cfg Config, multiSession *session.MultiTenantSession
 	editStore := NewContextEditStore(100)
 	contextEditor := NewContextEditor(editStore)
 	a.contextEditor = contextEditor
-	registry.RegisterCore(&tools.ContextEditTool{Handler: contextEditor})
+	registry.RegisterCore(&tools.ContextEditTool{})
 
 	// 初始化并注册 TODO 管理工具
 	todoMgr := tools.NewTodoManager()

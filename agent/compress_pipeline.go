@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 
 	"xbot/llm"
 )
@@ -94,11 +93,16 @@ func ApplyCompress(ctx context.Context, params CompressPipelineParams) (*Compres
 				persistView = append(persistView, msg)
 			}
 		}
-		if ok, persistErr := params.Persistence.RewriteAfterCompress(persistView, len(newMessages)); !ok {
-			if persistErr == nil {
-				persistErr = fmt.Errorf("compression history append failed")
-			}
+		historyID, persistErr := params.Persistence.RewriteAfterCompress(persistView, len(newMessages))
+		if persistErr != nil {
 			return nil, persistErr
+		}
+		if historyID != 0 {
+			for i := range newMessages {
+				if newMessages[i].Role != "system" && !newMessages[i].DisplayOnly && newMessages[i].HistoryID == 0 {
+					newMessages[i].HistoryID = historyID
+				}
+			}
 		}
 	}
 	if params.SyncMessages != nil {

@@ -41,6 +41,8 @@ func (b *PersistenceBridge) IncrementalPersist(messages []llm.ChatMessage) error
 	if b.session == nil || len(messages) <= b.lastPersistedCount {
 		return nil
 	}
+	pending := make([]llm.ChatMessage, 0, len(messages)-b.lastPersistedCount)
+	indices := make([]int, 0, len(messages)-b.lastPersistedCount)
 	for idx := b.lastPersistedCount; idx < len(messages); idx++ {
 		msg := messages[idx]
 		if msg.Role == "system" {
@@ -53,12 +55,16 @@ func (b *PersistenceBridge) IncrementalPersist(messages []llm.ChatMessage) error
 		if strings.Contains(persistMsg.Content, "<dynamic-context>") {
 			persistMsg.Content = dynamicContextRe.ReplaceAllString(persistMsg.Content, "")
 		}
-		historyID, err := b.session.AppendMessage(persistMsg)
-		if err != nil {
-			log.WithError(err).Error("Failed to persist message to session")
-			return fmt.Errorf("persist message %d: %w", idx, err)
-		}
-		messages[idx].HistoryID = historyID
+		pending = append(pending, persistMsg)
+		indices = append(indices, idx)
+	}
+	historyIDs, err := b.session.AppendMessages(pending)
+	if err != nil {
+		log.WithError(err).Error("Failed to persist messages to session")
+		return fmt.Errorf("persist message batch: %w", err)
+	}
+	for i, historyID := range historyIDs {
+		messages[indices[i]].HistoryID = historyID
 	}
 	b.lastPersistedCount = len(messages)
 	return nil
@@ -69,10 +75,10 @@ func (b *PersistenceBridge) IncrementalPersist(messages []llm.ChatMessage) error
 // Strips <system-reminder> and <dynamic-context> blocks before writing to prevent
 // transient injection artifacts from being persisted.
 // Updates lastPersistedCount to totalMsgCount on success.
-// Returns (true, nil) on success, (false, err) on partial/total failure.
-func (b *PersistenceBridge) RewriteAfterCompress(sessionView []llm.ChatMessage, totalMsgCount int) (bool, error) {
+// Returns the compression history ID. A zero ID means persistence is disabled.
+func (b *PersistenceBridge) RewriteAfterCompress(sessionView []llm.ChatMessage, totalMsgCount int) (int64, error) {
 	if b.session == nil {
-		return true, nil
+		return 0, nil
 	}
 	clean := make([]llm.ChatMessage, 0, len(sessionView))
 	for _, msg := range sessionView {
@@ -89,12 +95,13 @@ func (b *PersistenceBridge) RewriteAfterCompress(sessionView []llm.ChatMessage, 
 		}
 		clean = append(clean, persistMsg)
 	}
-	if _, err := b.session.AppendContextSnapshot(sqlite.HistoryRecordCompress, clean); err != nil {
+	historyID, err := b.session.AppendContextSnapshot(sqlite.HistoryRecordCompress, clean)
+	if err != nil {
 		log.WithError(err).Error("Failed to append compression history record")
-		return false, err
+		return 0, err
 	}
 	b.lastPersistedCount = totalMsgCount
-	return true, nil
+	return historyID, nil
 }
 
 // AppendPrune records an aggressive context truncation without deleting history.

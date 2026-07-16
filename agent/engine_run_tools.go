@@ -107,6 +107,7 @@ func (s *runState) execOneTool(ctx context.Context, entry toolCallEntry, batch *
 	if s.autoNotify {
 		s.notifyProgress("")
 	}
+	execCtx = tools.WithContextEditHandler(execCtx, s.cfg.ContextEditor)
 	result, execErr := s.toolExecutor(execCtx, tc)
 	elapsed := time.Since(start)
 	cancel()

@@ -1041,10 +1041,14 @@ func buildToolContext(ctx context.Context, cfg *RunConfig) *tools.ToolContext {
 		InjectInbound: cfg.InjectInbound,
 
 		// 工具注册表
-		Registry: cfg.Tools,
+		Registry:           cfg.Tools,
+		ContextEditHandler: cfg.ContextEditor,
 
 		// 流式设置继承
 		Stream: cfg.Stream,
+	}
+	if handler := tools.ContextEditHandlerFromContext(ctx); handler != nil {
+		tc.ContextEditHandler = handler
 	}
 
 	// 注入 SpawnAgent（包装为 SubAgentManager 接口）

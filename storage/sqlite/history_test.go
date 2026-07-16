@@ -186,6 +186,49 @@ func TestReplayRejectsCorruptControlWithHistoryID(t *testing.T) {
 	}
 }
 
+func TestReplayRejectsSnapshotFutureReference(t *testing.T) {
+	db, svc, tenantID := newHistoryTestService(t)
+	const futureID = int64(1000)
+	payload := fmt.Sprintf(`{"messages":[{"role":"user","content":"from future"}],"history_ids":[%d]}`, futureID)
+	result, err := db.Conn().Exec(`INSERT INTO session_messages
+		(tenant_id, role, content, display_only, record_type, record_data)
+		VALUES (?, 'control', '', 1, 'compress', ?)`, tenantID, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlID, _ := result.LastInsertId()
+	if _, err := db.Conn().Exec(`INSERT INTO session_messages
+		(id, tenant_id, role, content, display_only, record_type) VALUES (?, ?, 'user', 'future', 0, 'message')`, futureID, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.Replay(tenantID)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("history_id %d", controlID)) || !strings.Contains(err.Error(), "unknown history_id") {
+		t.Fatalf("future reference replay error=%v", err)
+	}
+}
+
+func TestReplayRejectsStructurallyInvalidControlData(t *testing.T) {
+	for _, recordType := range []HistoryRecordType{
+		HistoryRecordCompress, HistoryRecordPrune, HistoryRecordContextEdit,
+		HistoryRecordMask, HistoryRecordAskQuestion, HistoryRecordAskAnswer,
+	} {
+		t.Run(string(recordType), func(t *testing.T) {
+			db, svc, tenantID := newHistoryTestService(t)
+			result, err := db.Conn().Exec(`INSERT INTO session_messages
+				(tenant_id, role, content, display_only, record_type, record_data)
+				VALUES (?, 'control', '', 1, ?, '{}')`, tenantID, recordType)
+			if err != nil {
+				t.Fatal(err)
+			}
+			historyID, _ := result.LastInsertId()
+			_, err = svc.Replay(tenantID)
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("history_id %d", historyID)) {
+				t.Fatalf("invalid %s replay error=%v", recordType, err)
+			}
+		})
+	}
+}
+
 func TestReplayTargetsSyntheticSnapshotMessageByOccurrence(t *testing.T) {
 	_, svc, tenantID := newHistoryTestService(t)
 	if _, err := svc.AppendMessage(tenantID, llm.NewUserMessage("baseline")); err != nil {
@@ -317,5 +360,67 @@ func TestAppendMasksIsAtomicWhenTargetMissing(t *testing.T) {
 	}
 	if len(records) != 1 {
 		t.Fatalf("partial mask append: %+v", records)
+	}
+}
+
+func TestAppendContextSnapshotRejectsUnknownOrInactiveHistoryID(t *testing.T) {
+	_, svc, tenantID := newHistoryTestService(t)
+	first, _ := svc.AppendMessage(tenantID, llm.NewUserMessage("first"))
+	second, _ := svc.AppendMessage(tenantID, llm.NewUserMessage("second"))
+	if _, err := svc.AppendContextSnapshot(tenantID, HistoryRecordPrune, []llm.ChatMessage{
+		{HistoryID: second + 999, Role: "user", Content: "unknown"},
+	}); err == nil {
+		t.Fatal("snapshot accepted unknown history ID")
+	}
+	if _, err := svc.AppendContextSnapshot(tenantID, HistoryRecordPrune, []llm.ChatMessage{
+		{HistoryID: second, Role: "user", Content: "second"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AppendContextSnapshot(tenantID, HistoryRecordPrune, []llm.ChatMessage{
+		{HistoryID: first, Role: "user", Content: "stale"},
+	}); err == nil {
+		t.Fatal("snapshot accepted inactive history ID")
+	}
+	if _, err := svc.Replay(tenantID); err != nil {
+		t.Fatalf("replay corrupted after rejected snapshots: %v", err)
+	}
+}
+
+func TestConcurrentSnapshotAndMutationsRemainReplayable(t *testing.T) {
+	db, _, _ := newHistoryTestService(t)
+	const iterations = 40
+	for i := 0; i < iterations; i++ {
+		tenantID, err := NewTenantService(db).GetOrCreateTenantID("race", fmt.Sprintf("chat-%d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writerA, writerB := NewSessionService(db), NewSessionService(db)
+		oldID, _ := writerA.AppendMessage(tenantID, llm.NewUserMessage("old"))
+		keepID, _ := writerA.AppendMessage(tenantID, llm.NewUserMessage("keep"))
+		start := make(chan struct{})
+		errs := make(chan error, 2)
+		go func(iteration int) {
+			<-start
+			if iteration%2 == 0 {
+				_, err := writerA.AppendControl(tenantID, HistoryRecordContextEdit, oldID, MessageMutations{Mutations: []MessageMutation{{TargetHistoryID: oldID, Message: llm.ChatMessage{Role: "user", Content: "edited"}}}})
+				errs <- err
+				return
+			}
+			errs <- writerA.AppendMasks(tenantID, []MaskMutation{{TargetHistoryID: oldID, Content: "masked"}})
+		}(i)
+		go func() {
+			<-start
+			_, err := writerB.AppendContextSnapshot(tenantID, HistoryRecordPrune, []llm.ChatMessage{{HistoryID: keepID, Role: "user", Content: "keep"}})
+			errs <- err
+		}()
+		close(start)
+		firstErr, secondErr := <-errs, <-errs
+		if firstErr != nil && secondErr != nil {
+			t.Fatalf("iteration %d: both serialized operations failed: %v / %v", i, firstErr, secondErr)
+		}
+		if _, err := writerA.Replay(tenantID); err != nil {
+			t.Fatalf("iteration %d: concurrent append corrupted replay: %v", i, err)
+		}
 	}
 }

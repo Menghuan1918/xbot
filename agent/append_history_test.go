@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 
 	"xbot/bus"
 	"xbot/llm"
 	"xbot/session"
 	"xbot/storage/sqlite"
+	"xbot/tools"
 )
 
 func newAgentHistorySession(t *testing.T) (*session.MultiTenantSession, *session.TenantSession) {
@@ -39,9 +41,9 @@ func TestPersistenceBridgeCompressionAppendsAndReplays(t *testing.T) {
 		t.Fatal(err)
 	}
 	bridge := NewPersistenceBridge(sess, len(loaded))
-	ok, err := bridge.RewriteAfterCompress([]llm.ChatMessage{{Role: "user", Content: "summary"}}, 1)
-	if err != nil || !ok {
-		t.Fatalf("rewrite ok=%v err=%v", ok, err)
+	historyID, err := bridge.RewriteAfterCompress([]llm.ChatMessage{{Role: "user", Content: "summary"}}, 1)
+	if err != nil || historyID == 0 {
+		t.Fatalf("rewrite historyID=%d err=%v", historyID, err)
 	}
 	active, err := sess.GetMessages()
 	if err != nil {
@@ -56,6 +58,154 @@ func TestPersistenceBridgeCompressionAppendsAndReplays(t *testing.T) {
 	}
 	if len(records) != 3 || records[0].Message.Content != "raw user" || records[1].Message.Content != "raw answer" || records[2].Type != sqlite.HistoryRecordCompress {
 		t.Fatalf("full history=%+v", records)
+	}
+}
+
+func TestApplyCompressAssignsSyntheticHistoryIDForSameRunEdit(t *testing.T) {
+	_, sess := newAgentHistorySession(t)
+	for _, content := range []string{"old-0", "old-1", "old-2", "old-3"} {
+		if _, err := sess.AppendMessage(llm.NewUserMessage(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, err := sess.GetMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := &mockContextManager{compressFn: func(context.Context, []llm.ChatMessage, llm.LLM, string) (*CompressResult, error) {
+		view := []llm.ChatMessage{{Role: "system", Content: "system"}, {Role: "user", Content: "synthetic summary that can be truncated"}}
+		view = append(view, loaded...)
+		return &CompressResult{LLMView: view, CompressedTokens: 10}, nil
+	}}
+	editor := NewContextEditor(NewContextEditStore(10))
+	editor.BindSession(sess)
+	compressed, err := ApplyCompress(context.Background(), CompressPipelineParams{
+		CM: cm, Messages: loaded, LLMClient: &mockLLM{}, Model: "test",
+		Persistence: NewPersistenceBridge(sess, len(loaded)), SyncMessages: func(messages []llm.ChatMessage) []llm.ChatMessage {
+			editor.SetMessages(messages)
+			return messages
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compressed.NewMessages[1].HistoryID == 0 {
+		t.Fatalf("synthetic summary has no history ID: %+v", compressed.NewMessages)
+	}
+	if _, err := editor.HandleRequest("truncate", map[string]any{
+		"message_idx": float64(0), "max_chars": float64(9), "reason": "same run",
+	}); err != nil {
+		t.Fatalf("same-run context edit failed: %v", err)
+	}
+	replayed, err := sess.GetMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed[0].HistoryID != compressed.NewMessages[1].HistoryID || replayed[0].Content == "synthetic summary that can be truncated" {
+		t.Fatalf("same-run edit was not replayed: %+v", replayed[0])
+	}
+}
+
+func TestContextEditToolUsesRunScopedHandlerConcurrently(t *testing.T) {
+	tool := &tools.ContextEditTool{}
+	newEditor := func(prefix string) *ContextEditor {
+		messages := []llm.ChatMessage{{Role: "user", Content: prefix + "-0123456789"}}
+		for i := 0; i < 4; i++ {
+			messages = append(messages, llm.NewUserMessage(fmt.Sprintf("%s-protected-%d", prefix, i)))
+		}
+		editor := NewContextEditor(NewContextEditStore(10))
+		editor.SetMessages(messages)
+		return editor
+	}
+	editors := []*ContextEditor{newEditor("chat-a"), newEditor("chat-b")}
+	var wg sync.WaitGroup
+	for _, editor := range editors {
+		editor := editor
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := tools.WithContextEditHandler(context.Background(), editor)
+			toolCtx := &tools.ToolContext{Ctx: ctx}
+			if _, err := tool.Execute(toolCtx, `{"action":"truncate","message_idx":0,"max_chars":6}`); err != nil {
+				t.Errorf("run-scoped edit failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := editors[0].messages[0].Content; len(got) < 6 || got[:6] != "chat-a" {
+		t.Fatalf("chat A edited through wrong handler: %q", got)
+	}
+	if got := editors[1].messages[0].Content; len(got) < 6 || got[:6] != "chat-b" {
+		t.Fatalf("chat B edited through wrong handler: %q", got)
+	}
+}
+
+func TestIncrementalPersistBatchFailureRetriesWithoutDuplicates(t *testing.T) {
+	mt, sess := newAgentHistorySession(t)
+	if _, err := mt.DB().Conn().Exec(`
+		CREATE TRIGGER fail_history_message BEFORE INSERT ON session_messages
+		WHEN NEW.content = 'fail' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	messages := []llm.ChatMessage{
+		llm.NewUserMessage("first"), llm.NewAssistantMessage("fail"), llm.NewUserMessage("third"),
+	}
+	bridge := NewPersistenceBridge(sess, 0)
+	if err := bridge.IncrementalPersist(messages); err == nil {
+		t.Fatal("expected injected batch failure")
+	}
+	records, err := sess.GetFullHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 || bridge.LastPersistedCount() != 0 {
+		t.Fatalf("failed batch partially persisted: records=%+v watermark=%d", records, bridge.LastPersistedCount())
+	}
+	if _, err := mt.DB().Conn().Exec(`DROP TRIGGER fail_history_message`); err != nil {
+		t.Fatal(err)
+	}
+	if err := bridge.IncrementalPersist(messages); err != nil {
+		t.Fatal(err)
+	}
+	records, err = sess.GetFullHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 3 || bridge.LastPersistedCount() != 3 {
+		t.Fatalf("retry result: records=%+v watermark=%d", records, bridge.LastPersistedCount())
+	}
+	for i, msg := range messages {
+		if msg.HistoryID == 0 || records[i].HistoryID != msg.HistoryID {
+			t.Fatalf("message %d ID mismatch: msg=%+v record=%+v", i, msg, records[i])
+		}
+	}
+}
+
+func TestSyntheticToolPairAppendIsAtomic(t *testing.T) {
+	mt, sess := newAgentHistorySession(t)
+	if _, err := mt.DB().Conn().Exec(`
+		CREATE TRIGGER fail_synthetic_tool BEFORE INSERT ON session_messages
+		WHEN NEW.role = 'tool' AND NEW.tool_name = 'synthetic' BEGIN SELECT RAISE(ABORT, 'injected failure'); END;
+	`); err != nil {
+		t.Fatal(err)
+	}
+	state := &runState{
+		cfg: RunConfig{Session: sess}, persistence: NewPersistenceBridge(sess, 0),
+	}
+	state.injectSyntheticToolPair(context.Background(), 1, "synthetic", "call-1", "assistant", "tool", "synthetic", 0)
+	if state.persistenceErr == nil {
+		t.Fatal("expected synthetic pair persistence failure")
+	}
+	if len(state.messages) != 0 {
+		t.Fatalf("failed synthetic pair leaked into memory: %+v", state.messages)
+	}
+	records, err := sess.GetFullHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("failed synthetic pair partially persisted: %+v", records)
 	}
 }
 

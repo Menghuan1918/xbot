@@ -390,7 +390,9 @@ func (a *Agent) buildMainRunConfig(
 	}
 
 	// ContextEditor — Context Editing（精确编辑上下文）
-	cfg.ContextEditor = a.contextEditor
+	if a.contextEditor != nil {
+		cfg.ContextEditor = NewContextEditor(a.contextEditor.Store)
+	}
 
 	// TodoManager — TODO 状态查询
 	if a.todoManager != nil {

@@ -17,9 +17,10 @@ import (
 
 // DB wraps a SQLite database connection with schema management
 type DB struct {
-	conn *sql.DB
-	path string
-	mu   sync.RWMutex
+	conn      *sql.DB
+	path      string
+	mu        sync.RWMutex
+	historyMu sync.Mutex
 }
 
 const schemaVersion = 47

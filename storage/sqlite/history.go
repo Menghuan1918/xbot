@@ -67,8 +67,9 @@ type AskAnswerRecord struct {
 }
 
 type PendingAskUser struct {
-	HistoryID int64
-	Metadata  map[string]string
+	HistoryID     int64
+	ToolHistoryID int64
+	Metadata      map[string]string
 }
 
 type ReplayResult struct {
@@ -86,11 +87,11 @@ func isControlRecordType(recordType HistoryRecordType) bool {
 	}
 }
 
-func (s *SessionService) appendMessage(tenantID int64, msg llm.ChatMessage) (int64, error) {
-	conn, err := s.conn()
-	if err != nil {
-		return 0, err
-	}
+type messageExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func appendMessageWith(execer messageExecer, tenantID int64, msg llm.ChatMessage) (int64, error) {
 	var toolCallsJSON sql.NullString
 	if len(msg.ToolCalls) > 0 {
 		data, err := json.Marshal(msg.ToolCalls)
@@ -107,7 +108,7 @@ func (s *SessionService) appendMessage(tenantID int64, msg llm.ChatMessage) (int
 	if msg.DisplayOnly {
 		displayOnly = 1
 	}
-	result, err := conn.Exec(`
+	result, err := execer.Exec(`
 		INSERT INTO session_messages
 		(tenant_id, role, content, tool_call_id, tool_name, tool_arguments, tool_calls,
 		 detail, display_only, reasoning_content, record_type, created_at)
@@ -124,15 +125,58 @@ func (s *SessionService) appendMessage(tenantID int64, msg llm.ChatMessage) (int
 	return historyID, nil
 }
 
+func (s *SessionService) appendMessage(tenantID int64, msg llm.ChatMessage) (int64, error) {
+	conn, err := s.conn()
+	if err != nil {
+		return 0, err
+	}
+	return appendMessageWith(conn, tenantID, msg)
+}
+
 func (s *SessionService) AppendMessage(tenantID int64, msg llm.ChatMessage) (int64, error) {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	return s.appendMessage(tenantID, msg)
 }
 
+// AppendMessages atomically appends a related message batch.
+func (s *SessionService) AppendMessages(tenantID int64, messages []llm.ChatMessage) ([]int64, error) {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
+	conn, err := s.conn()
+	if err != nil {
+		return nil, err
+	}
+	tx, err := conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin message batch: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	ids := make([]int64, len(messages))
+	for i, msg := range messages {
+		ids[i], err = appendMessageWith(tx, tenantID, msg)
+		if err != nil {
+			return nil, fmt.Errorf("append message batch item %d: %w", i, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit message batch: %w", err)
+	}
+	return ids, nil
+}
+
 func (s *SessionService) AppendControl(tenantID int64, recordType HistoryRecordType, targetHistoryID int64, data any) (int64, error) {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
+	return s.appendControlLocked(tenantID, recordType, targetHistoryID, data)
+}
+
+func (s *SessionService) appendControlLocked(tenantID int64, recordType HistoryRecordType, targetHistoryID int64, data any) (int64, error) {
 	if !isControlRecordType(recordType) {
 		return 0, fmt.Errorf("unknown history record type %q", recordType)
 	}
-	if recordType == HistoryRecordAskQuestion || recordType == HistoryRecordAskAnswer || recordType == HistoryRecordMask {
+	if recordType == HistoryRecordCompress || recordType == HistoryRecordPrune ||
+		recordType == HistoryRecordAskQuestion || recordType == HistoryRecordAskAnswer || recordType == HistoryRecordMask {
 		return 0, fmt.Errorf("history record type %q requires its atomic append method", recordType)
 	}
 	conn, err := s.conn()
@@ -160,7 +204,7 @@ func (s *SessionService) AppendControl(tenantID int64, recordType HistoryRecordT
 		if len(mutations.Mutations) == 0 {
 			return 0, fmt.Errorf("context edit has no mutations")
 		}
-		replay, err := s.Replay(tenantID)
+		replay, err := s.replayLocked(tenantID)
 		if err != nil {
 			return 0, err
 		}
@@ -196,22 +240,69 @@ func (s *SessionService) AppendControl(tenantID int64, recordType HistoryRecordT
 }
 
 func (s *SessionService) AppendContextSnapshot(tenantID int64, recordType HistoryRecordType, messages []llm.ChatMessage) (int64, error) {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	if recordType != HistoryRecordCompress && recordType != HistoryRecordPrune {
 		return 0, fmt.Errorf("record type %q does not accept a context snapshot", recordType)
 	}
+	replay, err := s.replayLocked(tenantID)
+	if err != nil {
+		return 0, err
+	}
 	active := make([]llm.ChatMessage, 0, len(messages))
 	historyIDs := make([]int64, 0, len(messages))
+	occurrences := make(map[int64]int)
 	for _, msg := range messages {
 		if msg.Role != "system" && !msg.DisplayOnly {
+			if msg.HistoryID != 0 {
+				occurrence := occurrences[msg.HistoryID]
+				if activeMessageIndexOccurrence(replay.Messages, msg.HistoryID, occurrence) < 0 {
+					return 0, fmt.Errorf("%s snapshot history_id %d occurrence %d is not active", recordType, msg.HistoryID, occurrence)
+				}
+				occurrences[msg.HistoryID] = occurrence + 1
+			}
 			active = append(active, msg)
 			historyIDs = append(historyIDs, msg.HistoryID)
 		}
 	}
-	return s.AppendControl(tenantID, recordType, 0, ContextSnapshot{Messages: active, HistoryIDs: historyIDs})
+	if replay.PendingAskUser != nil && activeMessageIndex(active, replay.PendingAskUser.ToolHistoryID) < 0 {
+		return 0, fmt.Errorf("%s snapshot removes pending AskUser tool target %d", recordType, replay.PendingAskUser.ToolHistoryID)
+	}
+	return s.appendSnapshotLocked(tenantID, recordType, ContextSnapshot{Messages: active, HistoryIDs: historyIDs})
+}
+
+func (s *SessionService) appendSnapshotLocked(tenantID int64, recordType HistoryRecordType, snapshot ContextSnapshot) (int64, error) {
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return 0, fmt.Errorf("marshal %s history data: %w", recordType, err)
+	}
+	conn, err := s.conn()
+	if err != nil {
+		return 0, err
+	}
+	result, err := conn.Exec(`
+		INSERT INTO session_messages
+		(tenant_id, role, content, display_only, record_type, record_data, created_at)
+		VALUES (?, 'control', '', 1, ?, ?, ?)
+	`, tenantID, recordType, string(raw), time.Now().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, fmt.Errorf("append %s history record: %w", recordType, err)
+	}
+	historyID, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("read inserted history id: %w", err)
+	}
+	return historyID, nil
 }
 
 func (s *SessionService) AppendAskQuestion(tenantID int64, metadata map[string]string) (int64, error) {
-	replay, err := s.Replay(tenantID)
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
+	return s.appendAskQuestionLocked(tenantID, metadata)
+}
+
+func (s *SessionService) appendAskQuestionLocked(tenantID int64, metadata map[string]string) (int64, error) {
+	replay, err := s.replayLocked(tenantID)
 	if err != nil {
 		return 0, err
 	}
@@ -268,6 +359,8 @@ func (s *SessionService) AppendAskQuestion(tenantID int64, metadata map[string]s
 }
 
 func (s *SessionService) AppendMasks(tenantID int64, mutations []MaskMutation) error {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
 	if len(mutations) == 0 {
 		return nil
 	}
@@ -280,7 +373,7 @@ func (s *SessionService) AppendMasks(tenantID int64, mutations []MaskMutation) e
 			return fmt.Errorf("mask target has no history_id")
 		}
 	}
-	replay, err := s.Replay(tenantID)
+	replay, err := s.replayLocked(tenantID)
 	if err != nil {
 		return err
 	}
@@ -319,14 +412,20 @@ func (s *SessionService) AppendMasks(tenantID int64, mutations []MaskMutation) e
 }
 
 func (s *SessionService) AppendAskAnswer(tenantID int64, answer string) (int64, error) {
-	replay, err := s.Replay(tenantID)
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
+	return s.appendAskAnswerLocked(tenantID, answer)
+}
+
+func (s *SessionService) appendAskAnswerLocked(tenantID int64, answer string) (int64, error) {
+	replay, err := s.replayLocked(tenantID)
 	if err != nil {
 		return 0, err
 	}
 	if replay.PendingAskUser == nil {
 		return 0, fmt.Errorf("AskUser question is no longer pending")
 	}
-	records, err := s.GetFullHistory(tenantID)
+	records, err := s.getFullHistoryLocked(tenantID)
 	if err != nil {
 		return 0, err
 	}
@@ -389,6 +488,12 @@ func (s *SessionService) AppendAskAnswer(tenantID int64, answer string) (int64, 
 }
 
 func (s *SessionService) GetFullHistory(tenantID int64) ([]HistoryRecord, error) {
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
+	return s.getFullHistoryLocked(tenantID)
+}
+
+func (s *SessionService) getFullHistoryLocked(tenantID int64) ([]HistoryRecord, error) {
 	conn, err := s.conn()
 	if err != nil {
 		return nil, err
@@ -449,14 +554,19 @@ func (s *SessionService) GetFullHistory(tenantID int64) ([]HistoryRecord, error)
 }
 
 func (s *SessionService) Replay(tenantID int64) (*ReplayResult, error) {
-	records, err := s.GetFullHistory(tenantID)
+	s.db.historyMu.Lock()
+	defer s.db.historyMu.Unlock()
+	return s.replayLocked(tenantID)
+}
+
+func (s *SessionService) replayLocked(tenantID int64) (*ReplayResult, error) {
+	records, err := s.getFullHistoryLocked(tenantID)
 	if err != nil {
 		return nil, err
 	}
 	result := &ReplayResult{}
 	known := make(map[int64]struct{}, len(records))
 	for _, record := range records {
-		known[record.HistoryID] = struct{}{}
 		switch record.Type {
 		case HistoryRecordMessage:
 			if !record.Message.DisplayOnly {
@@ -467,24 +577,39 @@ func (s *SessionService) Replay(tenantID int64) (*ReplayResult, error) {
 			if err := decodeHistoryData(record, &snapshot); err != nil {
 				return nil, err
 			}
+			if snapshot.Messages == nil || snapshot.HistoryIDs == nil || len(snapshot.HistoryIDs) != len(snapshot.Messages) {
+				return nil, fmt.Errorf("history_id %d: invalid %s snapshot shape", record.HistoryID, record.Type)
+			}
+			previousMessages := result.Messages
 			result.Messages = append([]llm.ChatMessage(nil), snapshot.Messages...)
+			occurrences := make(map[int64]int)
 			for i := range result.Messages {
-				if len(snapshot.HistoryIDs) != 0 {
-					if len(snapshot.HistoryIDs) != len(result.Messages) {
-						return nil, fmt.Errorf("history_id %d: snapshot history_ids length mismatch", record.HistoryID)
-					}
-					result.Messages[i].HistoryID = snapshot.HistoryIDs[i]
-				}
+				result.Messages[i].HistoryID = snapshot.HistoryIDs[i]
 				if result.Messages[i].HistoryID == 0 {
 					result.Messages[i].HistoryID = record.HistoryID
 				} else if _, ok := known[result.Messages[i].HistoryID]; !ok {
 					return nil, fmt.Errorf("history_id %d: snapshot references unknown history_id %d", record.HistoryID, result.Messages[i].HistoryID)
+				} else {
+					occurrence := occurrences[result.Messages[i].HistoryID]
+					if activeMessageIndexOccurrence(previousMessages, result.Messages[i].HistoryID, occurrence) < 0 {
+						return nil, fmt.Errorf("history_id %d: snapshot references inactive history_id %d occurrence %d", record.HistoryID, result.Messages[i].HistoryID, occurrence)
+					}
+					occurrences[result.Messages[i].HistoryID] = occurrence + 1
 				}
+			}
+			if result.PendingAskUser != nil && activeMessageIndex(result.Messages, result.PendingAskUser.ToolHistoryID) < 0 {
+				return nil, fmt.Errorf("history_id %d: snapshot removes pending AskUser tool target %d", record.HistoryID, result.PendingAskUser.ToolHistoryID)
 			}
 		case HistoryRecordContextEdit:
 			var mutations MessageMutations
 			if err := decodeHistoryData(record, &mutations); err != nil {
 				return nil, err
+			}
+			if len(mutations.Mutations) == 0 {
+				return nil, fmt.Errorf("history_id %d: context edit has no mutations", record.HistoryID)
+			}
+			if record.TargetHistoryID == 0 || record.TargetHistoryID != mutations.Mutations[0].TargetHistoryID {
+				return nil, fmt.Errorf("history_id %d: context edit target metadata mismatch", record.HistoryID)
 			}
 			for _, mutation := range mutations.Mutations {
 				if _, ok := known[mutation.TargetHistoryID]; !ok {
@@ -502,6 +627,9 @@ func (s *SessionService) Replay(tenantID int64) (*ReplayResult, error) {
 			if err := decodeHistoryData(record, &mutations); err != nil {
 				return nil, err
 			}
+			if len(mutations.Mutations) == 0 {
+				return nil, fmt.Errorf("history_id %d: mask has no mutations", record.HistoryID)
+			}
 			for _, mutation := range mutations.Mutations {
 				idx := activeMessageIndexOccurrence(result.Messages, mutation.TargetHistoryID, mutation.TargetOccurrence)
 				if idx < 0 {
@@ -514,14 +642,27 @@ func (s *SessionService) Replay(tenantID int64) (*ReplayResult, error) {
 			if err := decodeHistoryData(record, &question); err != nil {
 				return nil, err
 			}
-			if activeMessageIndex(result.Messages, question.ToolHistoryID) < 0 {
+			if result.PendingAskUser != nil {
+				return nil, fmt.Errorf("history_id %d: another AskUser question %d is still pending", record.HistoryID, result.PendingAskUser.HistoryID)
+			}
+			if record.TargetHistoryID == 0 || record.TargetHistoryID != question.ToolHistoryID {
+				return nil, fmt.Errorf("history_id %d: AskUser question target metadata mismatch", record.HistoryID)
+			}
+			idx := activeMessageIndex(result.Messages, question.ToolHistoryID)
+			if idx < 0 {
 				return nil, fmt.Errorf("history_id %d: AskUser tool target %d is not active", record.HistoryID, question.ToolHistoryID)
 			}
-			result.PendingAskUser = &PendingAskUser{HistoryID: record.HistoryID, Metadata: question.Metadata}
+			if result.Messages[idx].Role != "tool" || result.Messages[idx].ToolName != "AskUser" {
+				return nil, fmt.Errorf("history_id %d: AskUser target %d is not an AskUser tool result", record.HistoryID, question.ToolHistoryID)
+			}
+			result.PendingAskUser = &PendingAskUser{HistoryID: record.HistoryID, ToolHistoryID: question.ToolHistoryID, Metadata: question.Metadata}
 		case HistoryRecordAskAnswer:
 			var answer AskAnswerRecord
 			if err := decodeHistoryData(record, &answer); err != nil {
 				return nil, err
+			}
+			if answer.ToolHistoryID == 0 {
+				return nil, fmt.Errorf("history_id %d: AskUser answer has no tool target", record.HistoryID)
 			}
 			if result.PendingAskUser == nil || result.PendingAskUser.HistoryID != record.TargetHistoryID {
 				return nil, fmt.Errorf("history_id %d: AskUser answer targets non-pending question %d", record.HistoryID, record.TargetHistoryID)
@@ -535,6 +676,7 @@ func (s *SessionService) Replay(tenantID int64) (*ReplayResult, error) {
 		default:
 			return nil, fmt.Errorf("history_id %d: unknown history record type %q", record.HistoryID, record.Type)
 		}
+		known[record.HistoryID] = struct{}{}
 	}
 	return result, nil
 }

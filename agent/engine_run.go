@@ -1588,25 +1588,18 @@ func (s *runState) injectSyntheticToolPair(
 	}
 
 	toolMsg := llm.NewToolMessage(toolName, toolID, "", content)
-	s.messages = s.syncMessages(append(s.messages, assistantMsg, toolMsg))
 
 	if s.cfg.Session != nil {
-		assistantHistoryID, err := s.cfg.Session.AppendMessage(assistantMsg)
+		historyIDs, err := s.cfg.Session.AppendMessages([]llm.ChatMessage{assistantMsg, toolMsg})
 		if err != nil {
-			s.persistenceErr = fmt.Errorf("persist synthetic assistant message: %w", err)
+			s.persistenceErr = fmt.Errorf("persist synthetic tool pair: %w", err)
 			return
 		}
-		if len(s.messages) >= 2 {
-			s.messages[len(s.messages)-2].HistoryID = assistantHistoryID
-		}
-		toolHistoryID, err := s.cfg.Session.AppendMessage(toolMsg)
-		if err != nil {
-			s.persistenceErr = fmt.Errorf("persist synthetic tool message: %w", err)
-			return
-		}
-		if len(s.messages) >= 1 {
-			s.messages[len(s.messages)-1].HistoryID = toolHistoryID
-		}
+		assistantMsg.HistoryID = historyIDs[0]
+		toolMsg.HistoryID = historyIDs[1]
+	}
+	s.messages = s.syncMessages(append(s.messages, assistantMsg, toolMsg))
+	if s.cfg.Session != nil && s.persistence != nil {
 		s.persistence.MarkAllPersisted(len(s.messages))
 	}
 
