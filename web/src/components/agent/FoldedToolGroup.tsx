@@ -1,27 +1,43 @@
 /**
- * FoldedToolGroup — consecutive tool calls merged into a borderless fold (Spec 4 §3.3).
+ * FoldedToolGroup — consecutive tool calls merged into a borderless fold (Spec A §3).
  *
- * 'none' level or single tool: each tool renders as its own FoldedLine.
- * 'minimal'/'all' level with 2+ tools: merged into one line
- *   "▸ C1 · C2 (N 个工具)" — expand to reveal individual FoldedLine per tool.
+ * Tool display is controlled by two orthogonal parameters:
+ *   - `level` (CollapseLevel): 'all'/'minimal' → folded rows; 'none' → expanded
+ *   - `mergeTools` (boolean): when true AND level is 'all'/'minimal' AND 2+ tools,
+ *     consecutive tools merge into one icon-group row "▸ [icons] N 次调用".
+ *     When false, each tool shows its own title row (still folded).
+ *     At 'none' level mergeTools is ignored — tools always expand.
  *
- * Tool status indicators:
- *   generating: ◒ (spinner)
- *   running:    ◑ (in-progress)
- *   done:       ✓ (completed)
- *   error:      ✗ (failed)
+ * Single-tool title format (Spec B §3):
+ *   [Lucide icon] [status dot] ToolName: param  elapsed
+ *
+ * Merged row format (Spec B §4):
+ *   ▸ [icon1] [icon2] [icon3] +N  N 次调用
+ *
+ * Tool status indicators use CSS status dot classes:
+ *   generating: .tool-status-generating (blue blink)
+ *   running:    .tool-status-running (blue pulse)
+ *   done:       .tool-status-done (gray static)
+ *   error:      .tool-status-error (red static)
  */
 import { memo, useState, type ReactNode } from 'react'
 
 import { FoldedLine } from './FoldedLine'
 import { ToolRender } from './ToolRender'
+import { getToolIcon } from './toolIcons'
 import { useI18n } from '@/providers/i18n'
 import type { CollapseLevel } from '@/types/agent'
 import type { WebToolProgress } from '@/types/shared'
+import { cn } from '@/lib/utils'
+
+/** Maximum icons to show in a merged row before collapsing to "+N". */
+const MAX_MERGED_ICONS = 5
 
 interface FoldedToolGroupProps {
   tools: WebToolProgress[]
   level: CollapseLevel
+  /** Merge consecutive tools into one row. Ignored at 'none' level. */
+  mergeTools?: boolean
 }
 
 /** Extract display name from a tool (prefers label over name). */
@@ -29,32 +45,26 @@ function toolName(tool: WebToolProgress): string {
   return tool.label || tool.name || 'tool'
 }
 
-/** Status icon for a single tool. */
-function statusIcon(status: string): string {
-  switch (status) {
-    case 'generating':
-      return '◒'
-    case 'running':
-      return '◑'
-    case 'done':
-      return '✓'
-    case 'error':
-      return '✗'
-    default:
-      return '·'
-  }
+/** Extract a short parameter hint from the tool label (text after ": "). */
+function toolParam(tool: WebToolProgress): string {
+  const label = tool.label || ''
+  const idx = label.indexOf(': ')
+  return idx >= 0 ? label.slice(idx + 2) : ''
 }
 
-/** Status color CSS variable for a tool status. */
-function statusColor(status: string): string {
+/** CSS class for a tool's status dot. */
+function statusDotClass(status: string): string {
   switch (status) {
-    case 'error':
-      return 'var(--status-error)'
-    case 'running':
     case 'generating':
-      return 'var(--status-running)'
+      return 'tool-status-generating'
+    case 'running':
+      return 'tool-status-running'
+    case 'done':
+      return 'tool-status-done'
+    case 'error':
+      return 'tool-status-error'
     default:
-      return 'var(--text-muted)'
+      return 'tool-status-pending'
   }
 }
 
@@ -69,40 +79,84 @@ function formatElapsed(ms: number): string {
   return `${m}m${rem}s`
 }
 
-/** Format a single tool's title for its FoldedLine. */
+/** Render a single Lucide tool icon at 16px. */
+function ToolIcon({ name, className }: { name: string; className?: string }) {
+  const Icon = getToolIcon(name)
+  return <Icon className={cn('tool-icon-single', className)} />
+}
+
+/**
+ * Format a single tool's title: [icon] [dot] name: param  elapsed
+ */
 function formatToolTitle(
   tool: WebToolProgress,
   t: (key: string, params?: Record<string, string | number>) => string,
 ): ReactNode {
-  const name = toolName(tool)
-  const icon = statusIcon(tool.status)
-  const color = statusColor(tool.status)
+  const name = tool.name || 'tool'
+  const label = tool.label || name
+  const dotClass = statusDotClass(tool.status)
   let suffix = ''
   if (tool.status === 'generating') suffix = t('agent.toolGenerating')
   else if (tool.status === 'running') suffix = t('agent.statusRunning')
   const elapsed = formatElapsed(tool.elapsedMs)
+  // Extract param from label: "ToolName: param" → "param"
+  const param = toolParam(tool)
+  // Display name: prefer the label's prefix (before ": ") or the raw name
+  const displayName = label.includes(': ') ? label.slice(0, label.indexOf(': ')) : name
+
   return (
-    <span className="flex items-center gap-1.5">
-      <span style={{ color }}>{icon}</span>
-      <span className="font-mono">{name}</span>
-      {suffix && <span className="text-text-muted">{suffix}</span>}
-      {elapsed && !suffix && <span className="text-text-muted tabular-nums">{elapsed}</span>}
+    <span className="flex items-center gap-1.5 min-w-0">
+      <ToolIcon name={name} />
+      <span className={cn('tool-status-dot', dotClass)} aria-hidden />
+      <span className="font-mono shrink-0">{displayName}</span>
+      {param && (
+        <span className="font-mono text-text-muted truncate">{param}</span>
+      )}
+      {suffix && <span className="text-text-muted shrink-0">{suffix}</span>}
+      {elapsed && !suffix && <span className="text-text-muted tabular-nums shrink-0">{elapsed}</span>}
     </span>
   )
 }
 
-/** Build the merged title: "C1 · C2 (N 个工具)". */
+/**
+ * Build the merged title: [icon1] [icon2] ... +N  N 次调用
+ * Shows up to MAX_MERGED_ICONS icons, then "+N" for the remainder.
+ */
 function formatMergedTitle(
   tools: WebToolProgress[],
   t: (key: string, params?: Record<string, string | number>) => string,
 ): ReactNode {
-  const names = tools.map(toolName)
-  const joined = names.join(' · ')
+  // Use the worst status among all tools for the merged dot
+  const worstStatus = tools.some((tool) => tool.status === 'error')
+    ? 'error'
+    : tools.some((tool) => tool.status === 'running' || tool.status === 'generating')
+      ? 'running'
+      : 'done'
+
+  // Deduplicate tool icons by name — 3 Read calls should show 1 FileText icon
+  const seenNames = new Set<string>()
+  const uniqueIcons: ReactNode[] = []
+  for (const tool of tools) {
+    if (seenNames.has(tool.name)) continue
+    seenNames.add(tool.name)
+    if (uniqueIcons.length >= MAX_MERGED_ICONS) break
+    const Icon = getToolIcon(tool.name)
+    uniqueIcons.push(<Icon key={`${tool.name}-${uniqueIcons.length}`} className="tool-icon" />)
+  }
+  const remainingUnique = seenNames.size - MAX_MERGED_ICONS
+  const remaining = remainingUnique > 0 ? remainingUnique : 0
+
   return (
     <span className="flex items-center gap-1.5">
-      <span className="font-mono text-text-secondary">{joined}</span>
-      <span className="text-text-muted">
-        ({t('agent.toolGroup', { count: tools.length })})
+      <span className={cn('tool-status-dot', statusDotClass(worstStatus))} aria-hidden />
+      <span className="tool-icon-group">
+        {uniqueIcons}
+        {remaining > 0 && (
+          <span className="text-text-muted text-[11px] shrink-0">+{remaining}</span>
+        )}
+      </span>
+      <span className="text-text-muted shrink-0">
+        {t('agent.toolGroup', { count: tools.length })}
       </span>
     </span>
   )
@@ -111,14 +165,17 @@ function formatMergedTitle(
 export const FoldedToolGroup = memo(function FoldedToolGroup({
   tools,
   level,
+  mergeTools = true,
 }: FoldedToolGroupProps) {
   const { t } = useI18n()
   const [expanded, setExpanded] = useState(false)
 
   if (!tools.length) return null
 
-  // 'none' level or single tool: each tool is an independent FoldedLine.
-  if (level === 'none' || tools.length === 1) {
+  // 'none' level or single tool or mergeTools disabled: each tool is an independent FoldedLine.
+  const shouldMerge = level !== 'none' && mergeTools && tools.length > 1
+
+  if (!shouldMerge) {
     return (
       <div className="flex flex-col">
         {tools.map((tool, i) => (
@@ -134,7 +191,7 @@ export const FoldedToolGroup = memo(function FoldedToolGroup({
     )
   }
 
-  // 'minimal'/'all' level with 2+ tools: merged into one foldable line.
+  // 'minimal'/'all' level with mergeTools=true and 2+ tools: merged into one foldable line.
   return (
     <div>
       <button

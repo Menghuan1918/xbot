@@ -228,7 +228,10 @@ export function useProgressStream({
   return {
     progressSnapshot: progressSnapshot ?? EMPTY_PROGRESS_SNAPSHOT,
     liveMessage,
-    isStreaming: hasVisibleProgress(progressSnapshot),
+    // isStreaming is false in the finalizing state — the agent is not actively
+    // streaming, just waiting for the final text event. The snapshot stays
+    // visible (via liveMessage) but the UI should not show a "busy" indicator.
+    isStreaming: hasVisibleProgress(progressSnapshot) && progressSnapshot.phase !== 'finalizing',
   }
 }
 
@@ -257,8 +260,10 @@ function handleProgressMessage(
 ): void {
   switch (msg.type) {
     case 'stream_content': {
-      // New streaming content arriving → reset the finalize guard for the new turn.
-      if (finalizedRef) finalizedRef.current = false
+      // NOTE: finalizedRef is NOT reset here. It is only reset when a new turn
+      // begins (session(busy)). Resetting on stream_content causes the guard
+      // to be cleared after a text event finalizes, so a subsequent
+      // session(idle) event triggers a duplicate onAssistantComplete call.
 
       // stream_content carries content deltas in progress.stream_content /
       // progress.reasoning_stream_content (channel/web/web.go SendStreamContent).
@@ -285,11 +290,20 @@ function handleProgressMessage(
       const p = msg.progress
       if (!p) return
       if (p.phase === 'done') {
-        if (finalizedRef) finalizedRef.current = false
-        store.reset()
+        // PhaseDone: enter finalizing state instead of immediate reset.
+        // The store keeps the progress snapshot visible (tools marked done,
+        // no pulse animation) while waiting for the `text` event to arrive.
+        // A 3s timeout in the store guards against missing text events.
+        // finalizedRef is NOT reset here (Spec A fix: prevents duplicate
+        // onAssistantComplete calls). It will be reset when the next turn
+        // begins (session(busy) or a new structured event with active progress).
+        store.setStructuredTools({ phase: 'done' })
         return
       }
-      if (finalizedRef && p.phase !== 'done') finalizedRef.current = false
+      // A non-done structured event indicates active work — reset the finalize
+      // guard so a subsequent text event can complete. This covers turns where
+      // progress_structured arrives before session(busy).
+      if (finalizedRef) finalizedRef.current = false
       if (p.history_compacted) {
         store.reset()
         compactedRef.current?.()
