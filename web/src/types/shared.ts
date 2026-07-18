@@ -60,6 +60,8 @@ export interface SessionInfo {
   chatID: string
   channel: string
   label: string
+  /** Current persisted working directory returned by the session API. */
+  workDir?: string
   lastActive: string
   preview: string
   status: SessionStatus
@@ -93,6 +95,18 @@ export interface SessionInfo {
 export interface SessionSelector {
   channel: string
   chatID: string
+}
+
+/** Authoritative context-usage snapshot returned by get_context_usage. */
+export interface ContextUsage {
+  available: boolean
+  prompt_tokens: number
+  completion_tokens: number
+  max_context_tokens: number
+  usage_percent: number | null
+  model: string
+  subscription_id: string
+  subscription_name: string
 }
 
 /* ---------------------------------------------------------------------------

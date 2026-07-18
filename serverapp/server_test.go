@@ -16,6 +16,7 @@ import (
 	"xbot/channel/web"
 	"xbot/config"
 	llm "xbot/llm"
+	"xbot/protocol"
 	"xbot/storage/sqlite"
 	"xbot/tools"
 )
@@ -1669,6 +1670,125 @@ func TestSelectModelRPC_UsesRequestedChannel(t *testing.T) {
 	}
 	if cliSubID != "sub-cli" || cliModel != "old-cli-model" {
 		t.Fatalf("cli tenant was changed to (%q,%q), want original (sub-cli,old-cli-model)", cliSubID, cliModel)
+	}
+}
+
+func TestGetContextUsageRPC_ExactSnapshotFallbackAndAuthorization(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XBOT_HOME", dir)
+	ag, err := agent.New(agent.Config{
+		LLM:            &llm.MockLLM{},
+		Model:          "default-model",
+		WorkDir:        dir,
+		DBPath:         dir + "/xbot.db",
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	defer ag.Close()
+
+	db := ag.MultiSession().DB()
+	subSvc := ag.LLMFactory().GetSubscriptionSvc()
+	tenantSvc := sqlite.NewTenantService(db)
+	sub := &sqlite.LLMSubscription{
+		ID: "sub-context", SenderID: "cli_user", Name: "Context Sub", Provider: "openai",
+		BaseURL: "https://api.example/v1", APIKey: "sk-test", Model: "context-model",
+		PerModelConfigs: map[string]sqlite.PerModelConfig{"context-model": {MaxContext: 100000}},
+	}
+	if err := subSvc.Add(sub); err != nil {
+		t.Fatalf("add subscription: %v", err)
+	}
+	if err := tenantSvc.SetTenantSubscription("web", "chat-context", sub.ID, "context-model"); err != nil {
+		t.Fatalf("set tenant subscription: %v", err)
+	}
+	tenantID, err := tenantSvc.GetTenantIDByChannelChatID("web", "chat-context")
+	if err != nil || tenantID == 0 {
+		t.Fatalf("get tenant: id=%d err=%v", tenantID, err)
+	}
+	if _, err := db.Conn().Exec(
+		"INSERT INTO session_messages (tenant_id, role, content, context_tokens) VALUES (?, 'user', 'hello', 120000)",
+		tenantID,
+	); err != nil {
+		t.Fatalf("insert user message: %v", err)
+	}
+	if err := sqlite.NewMemoryService(db).SetTokenState(context.Background(), tenantID, 50000, 1000); err != nil {
+		t.Fatalf("set fallback token state: %v", err)
+	}
+
+	aCfg := &config.Config{Agent: config.AgentConfig{MaxContextTokens: 200000}}
+	table := BuildRPCTable(aCfg, ag, nil, nil, nil)
+	params, _ := json.Marshal(map[string]string{"channel": "web", "chat_id": "chat-context"})
+	raw, err := HandleCLIRPC(table, agent.MethodGetContextUsage, params, "admin")
+	if err != nil {
+		t.Fatalf("get_context_usage: %v", err)
+	}
+	var usage protocol.ContextUsage
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		t.Fatalf("unmarshal usage: %v", err)
+	}
+	if !usage.Available || usage.PromptTokens != 120000 || usage.CompletionTokens != 1000 || usage.MaxContextTokens != 100000 {
+		t.Fatalf("usage=%+v", usage)
+	}
+	if usage.UsagePercent == nil || *usage.UsagePercent != 120 {
+		t.Fatalf("usage percent=%v, want 120", usage.UsagePercent)
+	}
+	if usage.Model != "context-model" || usage.SubscriptionID != sub.ID || usage.SubscriptionName != sub.Name {
+		t.Fatalf("model metadata=%+v", usage)
+	}
+
+	if _, err := db.Conn().Exec("UPDATE session_messages SET context_tokens = 0 WHERE tenant_id = ?", tenantID); err != nil {
+		t.Fatalf("clear message context: %v", err)
+	}
+	raw, err = HandleCLIRPC(table, agent.MethodGetContextUsage, params, "admin")
+	if err != nil {
+		t.Fatalf("get fallback context usage: %v", err)
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		t.Fatalf("unmarshal fallback usage: %v", err)
+	}
+	if usage.PromptTokens != 50000 || usage.CompletionTokens != 1000 {
+		t.Fatalf("fallback usage=%+v", usage)
+	}
+
+	if err := tenantSvc.SetTenantSubscription("web", "chat-context", sub.ID, "unconfigured-model"); err != nil {
+		t.Fatalf("switch to unconfigured model: %v", err)
+	}
+	raw, err = HandleCLIRPC(table, agent.MethodGetContextUsage, params, "admin")
+	if err != nil {
+		t.Fatalf("get no-data context usage: %v", err)
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		t.Fatalf("unmarshal no-data usage: %v", err)
+	}
+	if usage.Available || usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.UsagePercent != nil {
+		t.Fatalf("no-data usage=%+v", usage)
+	}
+	if usage.Model != "unconfigured-model" || usage.MaxContextTokens != 200000 {
+		t.Fatalf("global context fallback=%+v", usage)
+	}
+
+	if _, err := db.Conn().Exec(
+		"INSERT INTO user_chats (channel, sender_id, chat_id, label, user_id) VALUES ('web', 'web-2', 'chat-context', 'legacy', 0)",
+	); err != nil {
+		t.Fatalf("seed legacy web chat ownership: %v", err)
+	}
+	legacyOwner := WithRPCCtxResolved(context.Background(), "web-2", "web-2", 2, "user")
+	if _, err := table.Dispatch(legacyOwner, agent.MethodGetContextUsage, params); err != nil {
+		t.Fatalf("legacy Web owner get_context_usage: %v", err)
+	}
+
+	unauthorized := WithRPCCtxResolved(context.Background(), "web-3", "web-3", 3, "user")
+	if _, err := table.Dispatch(unauthorized, agent.MethodGetContextUsage, params); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("cross-user get_context_usage error=%v", err)
+	}
+	if err := tenantSvc.SetTenantSubscription("cli", "web-3", sub.ID, "context-model"); err != nil {
+		t.Fatalf("seed same-chat-id cross-channel tenant: %v", err)
+	}
+	crossChannelParams, _ := json.Marshal(map[string]string{"channel": "cli", "chat_id": "web-3"})
+	if _, err := table.Dispatch(unauthorized, agent.MethodGetContextUsage, crossChannelParams); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("cross-channel same-chat-id error=%v", err)
 	}
 }
 

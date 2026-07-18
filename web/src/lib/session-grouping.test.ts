@@ -174,7 +174,7 @@ describe('groupSessions', () => {
 })
 
 describe('path grouping', () => {
-  it('groups CLI sessions by workDir basename', () => {
+  it('groups CLI sessions by full workDir and uses the basename as title', () => {
     const sessions = [
       mk({ chatID: '/home/user/project1:session-a', channel: 'cli' }),
       mk({ chatID: '/home/user/project1:session-b', channel: 'cli' }),
@@ -182,22 +182,22 @@ describe('path grouping', () => {
     ]
     const groups = groupSessions(sessions, 'path', [])
     expect(groups).toHaveLength(2)
-    const project1Group = groups.find((g) => g.key === 'project1')
-    const project2Group = groups.find((g) => g.key === 'project2')
+    const project1Group = groups.find((g) => g.key === '/home/user/project1')
+    const project2Group = groups.find((g) => g.key === '/home/user/project2')
     expect(project1Group).toBeDefined()
     expect(project1Group!.sessions).toHaveLength(2)
     expect(project2Group).toBeDefined()
     expect(project2Group!.sessions).toHaveLength(1)
   })
 
-  it('groups web sessions into __web__ bucket', () => {
+  it('groups sessions without a persisted workDir into the unset bucket', () => {
     const sessions = [
       mk({ chatID: 'web-session-1', channel: 'web' }),
       mk({ chatID: 'web-session-2', channel: 'web' }),
     ]
     const groups = groupSessions(sessions, 'path', [])
     expect(groups).toHaveLength(1)
-    expect(groups[0].key).toBe('__web__')
+    expect(groups[0].key).toBe('__unset__')
   })
 
   it('subAgent sessions inherit parent path group', () => {
@@ -212,7 +212,7 @@ describe('path grouping', () => {
     const groups = groupSessions([parent, child], 'path', [])
     // SubAgents are filtered out of main groups
     expect(groups).toHaveLength(1)
-    expect(groups[0].key).toBe('project1')
+    expect(groups[0].key).toBe('/home/user/project1')
     expect(groups[0].sessions).toHaveLength(1)
     expect(groups[0].sessions[0].chatID).toBe('/home/user/project1:session-a')
   })

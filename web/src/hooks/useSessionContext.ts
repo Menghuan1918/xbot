@@ -1,105 +1,116 @@
 /**
- * useSessionContext — resolves session-level context info (Spec C §1.2).
- *
- * max_context resolution chain (mirrors TUI ResolveEffectiveMaxContext):
- *   1. getSessionSubscription(ws, channel, chatID) → (subID, model)
- *   2. listSubscriptions(ws) → find subscription by subID
- *   3. subscription.per_model_configs[model]?.max_context → if > 0, use it
- *   4. subscription.max_context → if > 0, use it
- *   5. Fallback: 200000 (config default)
- *
- * Also resolves the current model name for display.
- * Caches results per (channel, chatID) — re-fetches on session switch.
+ * Read the backend's authoritative context snapshot for one existing session.
+ * The last successful snapshot survives refreshes and connection interruptions;
+ * switching sessions immediately returns an unknown snapshot.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { getContextUsage } from '@/components/agent/api'
 import { useWSConnection } from '@/hooks/useWSConnection'
-import { getSessionSubscription, listSubscriptions } from '@/components/agent/api'
-import type { Subscription } from '@/types/shared'
-
-const DEFAULT_MAX_CONTEXT = 200000
 
 export interface SessionContextInfo {
-  /** Current model name (from session subscription). */
-  model: string
-  /** Current subscription ID. */
-  subscriptionID: string
-  /** Current subscription name. */
-  subscriptionName: string
-  /** Resolved max context tokens (resolution chain applied). */
+  available: boolean
+  promptTokens: number
+  completionTokens: number
   maxContext: number
-  /** True while loading. */
+  usagePercent: number | null
+  model: string
+  subscriptionID: string
+  subscriptionName: string
   loading: boolean
-  /** Error message if resolution failed. */
   error: string | null
+  refresh: () => Promise<void>
 }
 
-const emptyInfo: SessionContextInfo = {
-  model: '',
-  subscriptionID: '',
-  subscriptionName: '',
-  maxContext: DEFAULT_MAX_CONTEXT,
-  loading: true,
-  error: null,
+type SessionContextState = Omit<SessionContextInfo, 'refresh'> & { key: string }
+
+function emptyInfo(key: string, loading = false): SessionContextState {
+  return {
+    key,
+    available: false,
+    promptTokens: 0,
+    completionTokens: 0,
+    maxContext: 0,
+    usagePercent: null,
+    model: '',
+    subscriptionID: '',
+    subscriptionName: '',
+    loading,
+    error: null,
+  }
+}
+
+function finiteNonNegative(value: number): number {
+  return Number.isFinite(value) && value >= 0 ? value : 0
 }
 
 export function useSessionContext(channel: string, chatID: string | null): SessionContextInfo {
   const ws = useWSConnection()
-  const [info, setInfo] = useState<SessionContextInfo>(emptyInfo)
+  const key = chatID ? `${channel}:${chatID}` : ''
+  const [info, setInfo] = useState<SessionContextState>(() => emptyInfo(key, Boolean(chatID)))
+  const loadSeq = useRef(0)
 
   const load = useCallback(async () => {
-    if (!chatID || !ws.connected) {
-      setInfo({ ...emptyInfo, loading: false })
+    const seq = ++loadSeq.current
+    if (!chatID) {
+      setInfo(emptyInfo('', false))
       return
     }
-    setInfo((prev) => ({ ...prev, loading: true, error: null }))
+    if (!ws.connected) {
+      setInfo((previous) => previous.key === key
+        ? { ...previous, loading: false }
+        : emptyInfo(key, false))
+      return
+    }
+
+    setInfo((previous) => previous.key === key
+      ? { ...previous, loading: true, error: null }
+      : emptyInfo(key, true))
+
     try {
-      const [sessionSub, subs] = await Promise.all([
-        getSessionSubscription(ws, channel, chatID),
-        listSubscriptions(ws),
-      ])
+      const snapshot = await getContextUsage(ws, channel, chatID)
+      if (seq !== loadSeq.current) return
 
-      const subID = sessionSub.subscription_id ?? ''
-      const model = sessionSub.model ?? ''
-      const subsList = Array.isArray(subs) ? subs : []
-      const sub = subsList.find((s: Subscription) => s.id === subID)
-      const subName = sub?.name ?? ''
-
-      // max_context resolution chain
-      let maxContext = DEFAULT_MAX_CONTEXT
-      if (sub) {
-        const perModel = sub.per_model_configs?.[model]
-        if (perModel && perModel.max_context > 0) {
-          maxContext = perModel.max_context
-        } else if (sub.max_context > 0) {
-          maxContext = sub.max_context
-        }
-      }
+      const promptTokens = finiteNonNegative(snapshot.prompt_tokens)
+      const completionTokens = finiteNonNegative(snapshot.completion_tokens)
+      const maxContext = finiteNonNegative(snapshot.max_context_tokens)
+      const usagePercent = typeof snapshot.usage_percent === 'number' && Number.isFinite(snapshot.usage_percent)
+        ? snapshot.usage_percent
+        : null
+      const available = snapshot.available && promptTokens > 0 && maxContext > 0 && usagePercent !== null
 
       setInfo({
-        model,
-        subscriptionID: subID,
-        subscriptionName: subName,
+        key,
+        available,
+        promptTokens: available ? promptTokens : 0,
+        completionTokens: available ? completionTokens : 0,
         maxContext,
+        usagePercent: available ? usagePercent : null,
+        model: snapshot.model ?? '',
+        subscriptionID: snapshot.subscription_id ?? '',
+        subscriptionName: snapshot.subscription_name ?? '',
         loading: false,
         error: null,
       })
-    } catch (e) {
-      setInfo({
-        model: '',
-        subscriptionID: '',
-        subscriptionName: '',
-        maxContext: DEFAULT_MAX_CONTEXT,
+    } catch (error) {
+      if (seq !== loadSeq.current) return
+      setInfo((previous) => ({
+        ...(previous.key === key ? previous : emptyInfo(key)),
         loading: false,
-        error: e instanceof Error ? e.message : String(e),
-      })
+        error: error instanceof Error ? error.message : String(error),
+      }))
     }
-  }, [ws, channel, chatID])
+  }, [ws, channel, chatID, key])
 
   useEffect(() => {
     void load()
+    return () => {
+      loadSeq.current += 1
+    }
   }, [load])
 
-  return info
+  const visibleInfo = info.key === key ? info : emptyInfo(key, Boolean(chatID && ws.connected))
+  const { key: _key, ...result } = visibleInfo
+  return { ...result, refresh: load }
 }
 
 /** Format a token count with K/M suffix (Spec C §1.2 right-side info). */

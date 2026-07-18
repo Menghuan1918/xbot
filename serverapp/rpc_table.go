@@ -197,6 +197,59 @@ func (h *RPCContext) requireMultiSession() error {
 	return nil
 }
 
+// contextUsage returns the latest exact context snapshot without creating a
+// tenant session. The persisted user-message token count is authoritative; the
+// tenant token state is only a fallback for sessions without that value.
+func (h *RPCContext) contextUsage(ctx context.Context, senderID, channelName, chatID string) (protocol.ContextUsage, error) {
+	var usage protocol.ContextUsage
+	defaultMaxContext := 0
+	if h.Cfg != nil {
+		defaultMaxContext = h.Cfg.Agent.MaxContextTokens
+	}
+	if h.Ag != nil && h.Ag.LLMFactory() != nil {
+		usage.SubscriptionID, usage.SubscriptionName, usage.Model, usage.MaxContextTokens =
+			h.Ag.LLMFactory().ResolveContextConfig(senderID, chatID, channelName, defaultMaxContext)
+	} else {
+		usage.MaxContextTokens = defaultMaxContext
+	}
+
+	if h.Ag == nil || h.Ag.MultiSession() == nil || h.Ag.MultiSession().DB() == nil {
+		return usage, nil
+	}
+	db := h.Ag.MultiSession().DB()
+	tenantID, err := sqlite.NewTenantService(db).GetTenantIDByChannelChatID(channelName, chatID)
+	if err != nil {
+		return usage, err
+	}
+	if tenantID == 0 {
+		return usage, nil
+	}
+
+	promptTokens, err := sqlite.NewSessionService(db).GetLastUserMessageContextTokens(tenantID)
+	if err != nil {
+		return usage, err
+	}
+	statePromptTokens, stateCompletionTokens, err := sqlite.NewMemoryService(db).GetTokenState(ctx, tenantID)
+	if err != nil {
+		return usage, err
+	}
+	if promptTokens > 0 {
+		usage.PromptTokens = promptTokens
+	} else if statePromptTokens > 0 {
+		usage.PromptTokens = statePromptTokens
+	}
+	if statePromptTokens > 0 {
+		usage.CompletionTokens = stateCompletionTokens
+	}
+
+	usage.Available = usage.PromptTokens > 0
+	if usage.Available && usage.MaxContextTokens > 0 {
+		percent := float64(usage.PromptTokens) / float64(usage.MaxContextTokens) * 100
+		usage.UsagePercent = &percent
+	}
+	return usage, nil
+}
+
 // BuildRPCTable constructs the complete RPC dispatch table.
 // The table is built once at startup and reused for every request;
 // per-request identity is injected via context, so no authSenderID/bizID is needed here.
@@ -981,7 +1034,18 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		}
 		return map[string]string{"status": "ok"}, nil
 	})
-	t["get_token_state"] = rpc1(func(ctx context.Context, p struct {
+	t[agent.MethodGetContextUsage] = rpc1(func(ctx context.Context, p struct {
+		Channel string `json:"channel"`
+		ChatID  string `json:"chat_id"`
+	}) (any, error) {
+		bizID := rpcBizID(ctx)
+		channelName, chatID, err := h.resolveOwnedSession(ctx, p.Channel, p.ChatID, "web")
+		if err != nil {
+			return nil, err
+		}
+		return h.contextUsage(ctx, bizID, channelName, chatID)
+	})
+	t[agent.MethodGetTokenState] = rpc1(func(ctx context.Context, p struct {
 		Channel string `json:"channel"`
 		ChatID  string `json:"chat_id"`
 	}) (any, error) {
@@ -989,24 +1053,11 @@ func registerSessionHandlers(t RPCTable, h *RPCContext) {
 		if err != nil {
 			return nil, err
 		}
-		p.Channel, p.ChatID = channelName, chatID
-		ms := h.Ag.MultiSession()
-		if ms == nil {
-			return map[string]int64{"prompt_tokens": 0, "completion_tokens": 0}, nil
-		}
-		sess, err := ms.GetOrCreateSession(p.Channel, p.ChatID)
+		usage, err := h.contextUsage(ctx, rpcBizID(ctx), channelName, chatID)
 		if err != nil {
 			return nil, err
 		}
-		memSvc := sess.MemoryService()
-		if memSvc == nil {
-			return map[string]int64{"prompt_tokens": 0, "completion_tokens": 0}, nil
-		}
-		pt, ct, err := memSvc.GetTokenState(ctx, sess.TenantID())
-		if err != nil {
-			return nil, err
-		}
-		return map[string]int64{"prompt_tokens": pt, "completion_tokens": ct}, nil
+		return map[string]int64{"prompt_tokens": usage.PromptTokens, "completion_tokens": usage.CompletionTokens}, nil
 	})
 	t["trim_history"] = rpc1void(func(ctx context.Context, p struct {
 		Channel string `json:"channel"`

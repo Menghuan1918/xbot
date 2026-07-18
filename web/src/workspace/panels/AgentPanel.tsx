@@ -26,10 +26,11 @@ import { useLLMSettings } from '@/hooks/useLLMSettings'
 import { rewindHistory } from '@/components/agent/api'
 
 import { AskUserPanel } from '@/components/agent/AskUserPanel'
+import { ContextRing } from '@/components/agent/ContextRing'
 import { MessageInput } from '@/components/agent/MessageInput'
 import { MessageList } from '@/components/agent/MessageList'
 import { latestCompactBoundaryIndex } from '@/components/agent/MessageList'
-import { ModelStatusBar } from '@/components/agent/ModelStatusBar'
+import { ModelSelector } from '@/components/agent/ModelSelector'
 import { useDockviewContext } from '@/workspace/types'
 import type { PanelProps } from '@/workspace/panels/types'
 import type { ChatMessage } from '@/types/shared'
@@ -101,6 +102,7 @@ export function AgentPanel({ params }: PanelProps) {
     liveEventsEnabled: shouldSubscribe,
   })
   const reloadChat = chat.reload
+  const sessionContext = useSessionContext(messageChannel, isSubAgent ? null : chatID)
 
   useEffect(() => {
     const wasSubscribed = wasSubscribedRef.current
@@ -130,14 +132,17 @@ export function AgentPanel({ params }: PanelProps) {
       // causing the final reply to never appear in the message list.
       chat.appendAssistant(finalText, iterations)
       void chat.reload()
+      void sessionContext.refresh()
     },
     ws,
     onHistoryCompacted: isSubAgent ? undefined : () => {
-      chat.reload()
+      void chat.reload()
+      void sessionContext.refresh()
     },
     onSessionReset: isSubAgent ? undefined : () => {
       chat.clearMessages()
       void chat.reload()
+      void sessionContext.refresh()
     },
     disabled: false, // Always enabled — SSE subscription managed by useActiveSSESubscription
   })
@@ -150,10 +155,27 @@ export function AgentPanel({ params }: PanelProps) {
   // Busy while streaming (live or hydrated from a resumed session).
   const busy = isStreaming && !askUser.prompt
 
-  // Session context info (model, maxContext) for ContextBar
-  const sessionContext = useSessionContext(messageChannel, chatID)
-  const promptTokens = progressSnapshot.tokenUsage?.promptTokens ?? 0
   const llmSettings = useLLMSettings()
+  const progressPromptTokens = progressSnapshot.tokenUsage?.promptTokens
+  const progressTokenRef = useRef<{ key: string; promptTokens: number | null }>({
+    key: '',
+    promptTokens: null,
+  })
+
+  useEffect(() => {
+    if (isSubAgent) return
+    const key = chatID ? `${messageChannel}:${chatID}` : ''
+    const exactPromptTokens = typeof progressPromptTokens === 'number' && progressPromptTokens > 0
+      ? progressPromptTokens
+      : null
+    if (progressTokenRef.current.key !== key) {
+      progressTokenRef.current = { key, promptTokens: null }
+      return
+    }
+    if (exactPromptTokens === null || exactPromptTokens === progressTokenRef.current.promptTokens) return
+    progressTokenRef.current.promptTokens = exactPromptTokens
+    void sessionContext.refresh()
+  }, [chatID, isSubAgent, messageChannel, progressPromptTokens, sessionContext.refresh])
 
   // Keep sendMessageRef before rewindTo so rewindTo can call sendMessage
   // (which increments followResetToken for scroll-follow behavior)
@@ -243,26 +265,34 @@ export function AgentPanel({ params }: PanelProps) {
           onOpenTasks={() => rightSidebar.openPanel('tasks')}
           onUpload={chat.upload}
           todoState={todoState.total > 0 ? todoState : null}
-          model={sessionContext.model}
-          maxContext={sessionContext.maxContext}
-          promptTokens={promptTokens}
+          trailingControls={
+            chatID ? (
+              <>
+                <ContextRing
+                  available={sessionContext.available}
+                  promptTokens={sessionContext.promptTokens}
+                  maxContext={sessionContext.maxContext}
+                  usagePercent={sessionContext.usagePercent}
+                />
+                <ModelSelector
+                  channel={messageChannel}
+                  chatID={chatID}
+                  currentSubID={sessionContext.subscriptionID}
+                  currentModel={sessionContext.model}
+                  subscriptions={llmSettings.data.subscriptions}
+                  modelEntries={llmSettings.data.modelEntries}
+                  thinkingMode={llmSettings.data.thinkingMode}
+                  busy={busy}
+                  saving={llmSettings.saving}
+                  onModelSelected={sessionContext.refresh}
+                  onThinkingModeChange={llmSettings.setThinkingMode}
+                />
+              </>
+            ) : null
+          }
           draft={draft}
           onDraftConsumed={() => setDraft(undefined)}
           sessionKey={`${messageChannel}:${chatID ?? ''}`}
-        />
-      )}
-      {!isSubAgent && chatID && (
-        <ModelStatusBar
-          channel={messageChannel}
-          chatID={chatID}
-          tokenUsage={progressSnapshot.tokenUsage ? {
-            prompt: progressSnapshot.tokenUsage.promptTokens,
-            completion: progressSnapshot.tokenUsage.completionTokens,
-          } : null}
-          thinkingMode={llmSettings.data.thinkingMode}
-          preloadedSubID={sessionContext.subscriptionID || undefined}
-          preloadedModel={sessionContext.model || undefined}
-          preloadedSubs={llmSettings.data.subscriptions.length > 0 ? llmSettings.data.subscriptions : undefined}
         />
       )}
     </div>

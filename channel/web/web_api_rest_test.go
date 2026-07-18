@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,6 +101,103 @@ func TestRESTResponseEnvelope(t *testing.T) {
 	}
 }
 
+func TestProductionRoutesUseWebPOSTContract(t *testing.T) {
+	wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
+	mux := wc.newServeMux()
+
+	for _, path := range []string{
+		"/api/auth/config",
+		"/api/message",
+		"/api/cancel",
+		"/api/ask_user/respond",
+		"/api/rpc",
+		"/api/history",
+		"/api/history/rewind",
+		"/api/search",
+		"/api/settings",
+		"/api/llm-config",
+		"/api/session/status",
+		"/api/runners/list",
+		"/api/runners/create",
+		"/api/runners/active",
+		"/api/runners/runner-a/delete",
+		"/api/files/upload",
+		"/api/fs/list",
+		"/api/fs/read",
+		"/api/fs/search",
+		"/api/chats/list",
+		"/api/chats/create",
+		"/api/chats/chat-a/switch",
+		"/api/chats/chat-a/rename",
+		"/api/chats/chat-a/delete",
+		"/api/session-tree",
+		"/api/account/link-code",
+		"/api/account/link",
+		"/api/account/identities/list",
+		"/api/account/identities/1/delete",
+		"/api/admin/users/list",
+		"/api/admin/users/1/set-role",
+	} {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusMethodNotAllowed {
+			t.Errorf("GET %s status = %d, want 405", path, recorder.Code)
+		}
+	}
+
+	for _, path := range []string{
+		"/api/cwd",
+		"/api/tasks",
+		"/api/background-tasks",
+		"/api/commands",
+		"/api/session-subscription",
+		"/api/runner/token",
+		"/api/runners",
+		"/api/chats",
+		"/api/subagents",
+		"/api/context-info",
+		"/api/channels",
+		"/api/account/identities",
+		"/api/admin/users",
+	} {
+		recorder := httptest.NewRecorder()
+		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
+		if recorder.Code != http.StatusNotFound {
+			t.Errorf("POST %s status = %d, want 404", path, recorder.Code)
+		}
+	}
+}
+
+func TestProductionSessionTreeAcceptsAuthenticatedPOST(t *testing.T) {
+	db := newTestDB(t)
+	wc, _ := newTestWebChannel(t, db)
+	server := httptest.NewServer(wc.newServeMux())
+	t.Cleanup(server.Close)
+	cookie := loginTestAdmin(t, server.URL)
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/session-tree", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(cookie)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("POST /api/session-tree status = %d, want 200", response.StatusCode)
+	}
+	var data struct {
+		Sessions []any `json:"sessions"`
+	}
+	envelope := decodeAPIData(t, response.Body, &data)
+	if !envelope.OK || data.Sessions == nil {
+		t.Fatalf("unexpected session tree response: ok=%v sessions=%#v", envelope.OK, data.Sessions)
+	}
+}
+
 func TestRESTChatCRUDPassesChannelToCallbacks(t *testing.T) {
 	db := newTestDB(t)
 	wc := NewWebChannel(WebChannelConfig{DB: db}, bus.NewMessageBus())
@@ -144,10 +242,10 @@ func TestRESTChatCRUDPassesChannelToCallbacks(t *testing.T) {
 		t.Fatalf("rename selector = %#v", renamed)
 	}
 
-	deleteRequest := authedAPIRequest(http.MethodPost, "/api/chats/shared/delete", []byte(`{"channel":"cli"}`))
+	deleteRequest := authedAPIRequest(http.MethodDelete, "/api/chats/shared?channel=cli", nil)
 	deleteRequest.SetPathValue("chatID", "shared")
 	deleteRecorder := httptest.NewRecorder()
-	wc.handleChatDeletePOST(deleteRecorder, deleteRequest)
+	wc.handleChatDelete(deleteRecorder, deleteRequest)
 	if deleteRecorder.Code != http.StatusOK {
 		t.Fatalf("delete status = %d: %s", deleteRecorder.Code, deleteRecorder.Body.String())
 	}
@@ -180,22 +278,22 @@ func TestRESTChatDeleteAllowsAdminVerifiedLocalCLISession(t *testing.T) {
 	})
 	foreignSwitch := authedAPIRequestFor(
 		http.MethodPost,
-		"/api/chats/local/switch",
-		[]byte(`{"channel":"cli"}`),
+		"/api/chats/local/switch?channel=cli",
+		nil,
 		"web-2",
 		2,
 	)
 	foreignSwitch.SetPathValue("chatID", "/repo/project:local-only")
 	foreignSwitchRecorder := httptest.NewRecorder()
-	wc.handleChatSwitchPOST(foreignSwitchRecorder, foreignSwitch)
+	wc.handleChatSwitch(foreignSwitchRecorder, foreignSwitch)
 	if foreignSwitchRecorder.Code != http.StatusForbidden {
 		t.Fatalf("non-admin local CLI switch status=%d", foreignSwitchRecorder.Code)
 	}
 
-	adminSwitch := authedAPIRequest(http.MethodPost, "/api/chats/local/switch", []byte(`{"channel":"cli"}`))
+	adminSwitch := authedAPIRequest(http.MethodPost, "/api/chats/local/switch?channel=cli", nil)
 	adminSwitch.SetPathValue("chatID", "/repo/project:local-only")
 	adminSwitchRecorder := httptest.NewRecorder()
-	wc.handleChatSwitchPOST(adminSwitchRecorder, adminSwitch)
+	wc.handleChatSwitch(adminSwitchRecorder, adminSwitch)
 	if adminSwitchRecorder.Code != http.StatusOK {
 		t.Fatalf("admin local CLI switch status=%d body=%s", adminSwitchRecorder.Code, adminSwitchRecorder.Body.String())
 	}
@@ -204,23 +302,23 @@ func TestRESTChatDeleteAllowsAdminVerifiedLocalCLISession(t *testing.T) {
 	}
 
 	foreignRequest := authedAPIRequestFor(
-		http.MethodPost,
-		"/api/chats/local/delete",
-		[]byte(`{"channel":"cli"}`),
+		http.MethodDelete,
+		"/api/chats/local?channel=cli",
+		nil,
 		"web-2",
 		2,
 	)
 	foreignRequest.SetPathValue("chatID", "/repo/project:local-only")
 	foreignRecorder := httptest.NewRecorder()
-	wc.handleChatDeletePOST(foreignRecorder, foreignRequest)
+	wc.handleChatDelete(foreignRecorder, foreignRequest)
 	if foreignRecorder.Code != http.StatusForbidden || deleted {
 		t.Fatalf("non-admin local CLI delete status=%d deleted=%v", foreignRecorder.Code, deleted)
 	}
 
-	request := authedAPIRequest(http.MethodPost, "/api/chats/local/delete", []byte(`{"channel":"cli"}`))
+	request := authedAPIRequest(http.MethodDelete, "/api/chats/local?channel=cli", nil)
 	request.SetPathValue("chatID", "/repo/project:local-only")
 	recorder := httptest.NewRecorder()
-	wc.handleChatDeletePOST(recorder, request)
+	wc.handleChatDelete(recorder, request)
 
 	if recorder.Code != http.StatusOK || !deleted {
 		t.Fatalf("local CLI delete status=%d deleted=%v body=%s", recorder.Code, deleted, recorder.Body.String())
@@ -693,12 +791,11 @@ func TestRESTSessionStatusMergesTokenAndTasks(t *testing.T) {
 	setTestCurrentSession(wc, SessionSelector{Channel: "web", ChatID: "web-1"})
 	wc.SetCallbacks(WebCallbacks{
 		RPCHandler: func(method string, params json.RawMessage, identity RPCIdentity) (json.RawMessage, error) {
-			if method != "get_token_state" {
+			if method != "get_context_usage" {
 				t.Fatalf("unexpected RPC method %q", method)
 			}
-			return json.RawMessage(`{"prompt_tokens":250,"completion_tokens":25}`), nil
+			return json.RawMessage(`{"available":true,"prompt_tokens":250,"completion_tokens":25,"max_context_tokens":1000,"usage_percent":25}`), nil
 		},
-		LLMGetMaxContext: func(senderID, subID, model string) int { return 1000 },
 		CronTasks: func(senderID string, sel SessionSelector) (any, error) {
 			return []map[string]any{{"id": "task-1"}}, nil
 		},
@@ -729,12 +826,12 @@ func TestRESTHistoryCursorPrecedesInterleavedEvent(t *testing.T) {
 	})
 
 	recorder := httptest.NewRecorder()
-	wc.handleHistoryPOST(recorder, authedAPIRequest(http.MethodPost, "/api/history", []byte(`{"channel":"web","chat_id":"web-1"}`)))
+	wc.handleHistory(recorder, authedAPIRequest(http.MethodGet, "/api/history?channel=web&chat_id=web-1", nil))
 	_, data := decodeAPIResponse(t, recorder)
 	if recorder.Code != http.StatusOK || data["last_seq"] != float64(0) {
 		t.Fatalf("history status=%d data=%#v", recorder.Code, data)
 	}
-	if got := wc.getEventStream("web-1").lastSeq(); got != 1 {
+	if got := wc.getEventStream(sessionRouteKey("web", "web-1")).lastSeq(); got != 1 {
 		t.Fatalf("event stream last seq=%d, want 1", got)
 	}
 }
@@ -807,8 +904,8 @@ func TestRESTHistoryInfersCurrentOwnedAgentChannelFromChatID(t *testing.T) {
 		},
 	})
 	recorder := httptest.NewRecorder()
-	request := authedAPIRequestFor(http.MethodPost, "/api/history", []byte(`{"chat_id":"`+chatID+`"}`), "web-2", 2)
-	wc.handleHistoryPOST(recorder, request)
+	request := authedAPIRequestFor(http.MethodGet, "/api/history?chat_id="+url.QueryEscape(chatID), nil, "web-2", 2)
+	wc.handleHistory(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("history status = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -826,7 +923,7 @@ func TestRESTRunnersIncludeTokenOnListAndCreate(t *testing.T) {
 	})
 
 	listRecorder := httptest.NewRecorder()
-	wc.handleRunnersListPOST(listRecorder, authedAPIRequest(http.MethodPost, "/api/runners/list", nil))
+	wc.handleRunners(listRecorder, authedAPIRequest(http.MethodGet, "/api/runners", nil))
 	_, listData := decodeAPIResponse(t, listRecorder)
 	runner := listData["runners"].([]any)[0].(map[string]any)
 	if runner["token"] != "secret-token" || runner["llm_api_key"] == "llm-secret" {
@@ -834,14 +931,14 @@ func TestRESTRunnersIncludeTokenOnListAndCreate(t *testing.T) {
 	}
 
 	createRecorder := httptest.NewRecorder()
-	wc.handleRunnersCreatePOST(createRecorder, authedAPIRequest(http.MethodPost, "/api/runners/create", []byte(`{"name":"runner-a","mode":"native"}`)))
+	wc.handleRunners(createRecorder, authedAPIRequest(http.MethodPost, "/api/runners", []byte(`{"name":"runner-a","mode":"native"}`)))
 	_, createData := decodeAPIResponse(t, createRecorder)
 	if createData["token"] != "secret-token" {
 		t.Fatalf("runner create did not return token: %#v", createData)
 	}
 }
 
-func TestRESTLLMConfigMergesModelAndMaxContextActions(t *testing.T) {
+func TestRESTLLMModelAndMaxContextEndpoints(t *testing.T) {
 	wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
 	var selectedModel string
 	var maxContext int
@@ -858,19 +955,19 @@ func TestRESTLLMConfigMergesModelAndMaxContextActions(t *testing.T) {
 	})
 
 	modelRecorder := httptest.NewRecorder()
-	wc.handleLLMConfigPOST(modelRecorder, authedAPIRequest(http.MethodPost, "/api/llm-config", []byte(`{"action":"set_model","sub_id":"sub-a","model":"model-a"}`)))
+	wc.handleLLMModelSet(modelRecorder, authedAPIRequest(http.MethodPost, "/api/llm-config/model", []byte(`{"sub_id":"sub-a","model":"model-a"}`)))
 	if modelRecorder.Code != http.StatusOK || selectedModel != "sub-a:model-a" {
 		t.Fatalf("set_model failed: status=%d selected=%q", modelRecorder.Code, selectedModel)
 	}
 
 	setRecorder := httptest.NewRecorder()
-	wc.handleLLMConfigPOST(setRecorder, authedAPIRequest(http.MethodPost, "/api/llm-config", []byte(`{"action":"set_max_context","max_context":12345}`)))
+	wc.handleLLMMaxContext(setRecorder, authedAPIRequest(http.MethodPost, "/api/llm-max-context", []byte(`{"max_context":12345}`)))
 	if setRecorder.Code != http.StatusOK || maxContext != 12345 {
 		t.Fatalf("set_max_context failed: status=%d value=%d", setRecorder.Code, maxContext)
 	}
 
 	getRecorder := httptest.NewRecorder()
-	wc.handleLLMConfigPOST(getRecorder, authedAPIRequest(http.MethodPost, "/api/llm-config", []byte(`{"action":"get_max_context"}`)))
+	wc.handleLLMMaxContext(getRecorder, authedAPIRequest(http.MethodGet, "/api/llm-max-context", nil))
 	_, getData := decodeAPIResponse(t, getRecorder)
 	if getData["max_context"] != float64(12345) {
 		t.Fatalf("get_max_context failed: %#v", getData)
@@ -891,7 +988,7 @@ func TestRESTFileEndpointsUseJSONBodyAndMergedBehavior(t *testing.T) {
 	wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
 
 	listRecorder := httptest.NewRecorder()
-	wc.handleFsListPOST(listRecorder, authedAPIRequest(http.MethodPost, "/api/fs/list", []byte(`{"path":"`+dir+`"}`)))
+	wc.handleFsList(listRecorder, authedAPIRequest(http.MethodGet, "/api/fs/list?path="+url.QueryEscape(dir), nil))
 	_, listData := decodeAPIResponse(t, listRecorder)
 	entries := listData["entries"].([]any)
 	if len(entries) != 2 || entries[0].(map[string]any)["mode"] == "" {
@@ -899,48 +996,16 @@ func TestRESTFileEndpointsUseJSONBodyAndMergedBehavior(t *testing.T) {
 	}
 
 	readRecorder := httptest.NewRecorder()
-	wc.handleFsReadPOST(readRecorder, authedAPIRequest(http.MethodPost, "/api/fs/read", []byte(`{"path":"`+binaryPath+`"}`)))
+	wc.handleFsRead(readRecorder, authedAPIRequest(http.MethodGet, "/api/fs/read?path="+url.QueryEscape(binaryPath), nil))
 	_, readData := decodeAPIResponse(t, readRecorder)
 	if readData["encoding"] != "base64" || readData["content"] != base64.StdEncoding.EncodeToString(binaryContent) {
 		t.Fatalf("binary read was not base64 encoded: %#v", readData)
 	}
 
 	rawRecorder := httptest.NewRecorder()
-	wc.handleFsReadPOST(rawRecorder, authedAPIRequest(http.MethodPost, "/api/fs/read", []byte(`{"path":"`+textPath+`","raw":true}`)))
+	wc.handleFsRaw(rawRecorder, authedAPIRequest(http.MethodGet, "/api/fs/raw?path="+url.QueryEscape(textPath), nil))
 	if rawRecorder.Code != http.StatusOK || rawRecorder.Body.String() != "hello" || rawRecorder.Header().Get("Content-Type") == "application/json" {
 		t.Fatalf("unexpected raw response: status=%d type=%q body=%q", rawRecorder.Code, rawRecorder.Header().Get("Content-Type"), rawRecorder.Body.String())
-	}
-}
-
-func TestProductionRoutesArePOSTOnlyAndRemovedRoutesReturnNotFound(t *testing.T) {
-	wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
-	mux := wc.newServeMux()
-
-	for _, path := range []string{
-		"/api/message", "/api/cancel", "/api/ask_user/respond", "/api/rpc",
-		"/api/history", "/api/search", "/api/fs/list", "/api/fs/read", "/api/fs/search",
-		"/api/chats/list", "/api/chats/create", "/api/session-tree", "/api/session/status",
-		"/api/runners/list", "/api/runners/create", "/api/runners/active",
-		"/api/account/link-code", "/api/account/identities/list", "/api/admin/users/list",
-	} {
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
-		if recorder.Code != http.StatusMethodNotAllowed {
-			t.Errorf("GET %s status = %d, want 405", path, recorder.Code)
-		}
-	}
-
-	for _, path := range []string{
-		"/api/cwd", "/api/session-subscriptions", "/api/session-subscription", "/api/commands",
-		"/api/channels", "/api/subagents", "/api/fs/raw", "/api/fs/stat", "/api/context-info",
-		"/api/tasks", "/api/background-tasks", "/api/runner/token", "/api/runners",
-		"/api/chats", "/api/account/identities", "/api/admin/users",
-	} {
-		recorder := httptest.NewRecorder()
-		mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
-		if recorder.Code != http.StatusNotFound {
-			t.Errorf("POST %s status = %d, want 404: %s", path, recorder.Code, recorder.Body.String())
-		}
 	}
 }
 

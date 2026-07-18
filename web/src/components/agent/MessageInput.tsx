@@ -2,7 +2,7 @@
  * MessageInput — the Agent panel composer (Spec C §1.1).
  *
  * Redesigned with a VSCode-style compact layout:
- *   - ContextBar above the input (fuses TODO progress + context usage)
+ *   - Inset TODO-only toolbar above the input when tasks exist
  *   - Single rounded container holding: attachment chips, textarea, inline buttons
  *   - Textarea defaults to two rows height, auto-grows to max 200px
  *   - Attach button (left) + Send/Cancel button (right) inside the container
@@ -12,7 +12,7 @@
  * message), and a cancel button shown while the agent is busy (sends a WS
  * `cancel`). Pending uploads show as chips inside the container.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import { Loader2, Paperclip, Send, Square, X } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -22,7 +22,7 @@ import { useCwd } from '@/providers/CwdProvider'
 import { useWSConnection } from '@/hooks/useWSConnection'
 import type { Attachments } from '@/hooks/useChatMessages'
 import { cn } from '@/lib/utils'
-import { ContextBar } from './ContextBar'
+import { TodoPullOut } from './TodoPullOut'
 import { CompletionPopup } from './CompletionPopup'
 import { useCompletion } from '@/hooks/useCompletion'
 import type { TodoState } from '@/hooks/useTodos'
@@ -45,14 +45,10 @@ interface MessageInputProps {
     size?: number
     mime?: string
   }>
-  /** TODO state from the progress snapshot; null hides the ContextBar TODO section. */
+  /** TODO state from the progress snapshot; null hides the inset TODO toolbar. */
   todoState?: TodoState | null
-  /** Current model name (from session subscription). */
-  model?: string
-  /** Max context tokens (from resolution chain). */
-  maxContext?: number
-  /** Current prompt tokens (from SSE tokenUsage). */
-  promptTokens?: number
+  /** Controls rendered immediately before the send/cancel button. */
+  trailingControls?: ReactNode
   draft?: string
   onDraftConsumed?: () => void
   /** Session identifier for localStorage draft persistence. */
@@ -66,7 +62,7 @@ interface PendingAttachment {
   mime: string
 }
 
-export function MessageInput({ busy, onSend, onCancel, onRewindLatest, onOpenTasks, onUpload, todoState, model = '', maxContext = 0, promptTokens = 0, draft, onDraftConsumed, sessionKey }: MessageInputProps) {
+export function MessageInput({ busy, onSend, onCancel, onRewindLatest, onOpenTasks, onUpload, todoState, trailingControls, draft, onDraftConsumed, sessionKey }: MessageInputProps) {
   const { t } = useI18n()
   const ws = useWSConnection()
   const { cwd } = useCwd()
@@ -193,17 +189,12 @@ export function MessageInput({ busy, onSend, onCancel, onRewindLatest, onOpenTas
 
   return (
     <div className="border-t border-border bg-bg-primary px-3 py-2.5">
-      <ContextBar
-        todoState={todoState ?? null}
-        model={model}
-        maxContext={maxContext}
-        promptTokens={promptTokens}
-      />
+      {todoState ? <TodoPullOut todoState={todoState} /> : null}
 
       {/* Input container — single rounded box with chips, textarea, and inline buttons */}
       <div
         className={cn(
-          'rounded-xl border bg-bg-secondary px-3 py-2 transition-all',
+          'rounded-lg border bg-bg-secondary px-3 py-2 transition-[border-color,box-shadow]',
           focused
             ? 'border-accent ring-1 ring-accent/30'
             : 'border-border',
@@ -262,7 +253,7 @@ export function MessageInput({ busy, onSend, onCancel, onRewindLatest, onOpenTas
         </div>
 
         {/* Bottom row: attach button (left) + send/cancel button (right) */}
-        <div className="mt-2 flex items-center justify-between">
+        <div className="mt-2 flex min-w-0 items-center justify-between gap-2">
           <div className="flex items-center gap-1">
             <input
               ref={fileRef}
@@ -287,7 +278,8 @@ export function MessageInput({ busy, onSend, onCancel, onRewindLatest, onOpenTas
             </Button>
           </div>
 
-          <div className="flex items-center gap-1">
+          <div className="flex min-w-0 items-center gap-1">
+            {trailingControls}
             {busy ? (
               <Button
                 type="button"

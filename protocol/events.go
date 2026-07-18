@@ -155,6 +155,20 @@ type PerModelConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
+// ContextUsage is the authoritative context snapshot for one session.
+// UsagePercent is nil until the model API has returned an exact prompt token
+// count. It is intentionally not capped at 100.
+type ContextUsage struct {
+	Available        bool     `json:"available"`
+	PromptTokens     int64    `json:"prompt_tokens"`
+	CompletionTokens int64    `json:"completion_tokens"`
+	MaxContextTokens int      `json:"max_context_tokens"`
+	UsagePercent     *float64 `json:"usage_percent"`
+	Model            string   `json:"model"`
+	SubscriptionID   string   `json:"subscription_id"`
+	SubscriptionName string   `json:"subscription_name"`
+}
+
 // ModelEntry is a selectable model paired with the subscription that provides it.
 // Used by the model picker (ListAllModelEntries) so the UI can show "订阅名 · 模型名"
 // and disambiguate models served by different subscriptions. System-default models

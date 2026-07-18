@@ -189,7 +189,7 @@ func (wc *WebChannel) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{})
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, json.RawMessage(result))
 }
 
 func (wc *WebChannel) rpcIdentityFromRequest(r *http.Request) RPCIdentity {
@@ -224,6 +224,7 @@ var nonAdminRESTRPCMethods = map[string]struct{}{
 	"list_subscriptions":                 {},
 	"get_default_subscription":           {},
 	"get_session_subscription":           {},
+	"get_context_usage":                  {},
 	"add_subscription":                   {},
 	"get_user_token_usage":               {},
 	"get_daily_token_usage":              {},
@@ -649,43 +650,39 @@ func (wc *WebChannel) handleSessionStatus(w http.ResponseWriter, r *http.Request
 }
 
 func (wc *WebChannel) sessionTokenUsage(identity RPCIdentity, sel SessionSelector) (map[string]any, error) {
-	promptTokens := int64(0)
-	completionTokens := int64(0)
+	var usage protocol.ContextUsage
 	if wc.callbacks.RPCHandler != nil {
 		params, _ := json.Marshal(map[string]string{"channel": sel.Channel, "chat_id": sel.ChatID})
-		result, err := wc.callbacks.RPCHandler("get_token_state", params, identity)
+		result, err := wc.callbacks.RPCHandler("get_context_usage", params, identity)
 		if err != nil {
 			return nil, err
 		}
-		var state struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-		}
 		if len(result) > 0 {
-			if err := json.Unmarshal(result, &state); err != nil {
+			if err := json.Unmarshal(result, &usage); err != nil {
 				return nil, err
 			}
 		}
-		promptTokens = state.PromptTokens
-		completionTokens = state.CompletionTokens
-	}
-	maxTokens := 0
-	if sel.Channel == "web" && wc.callbacks.LLMGetMaxContext != nil {
-		maxTokens = wc.callbacks.LLMGetMaxContext(identity.SenderID, "", "")
-	}
-	usagePct := 0.0
-	if maxTokens > 0 && promptTokens > 0 {
-		usagePct = float64(promptTokens) / float64(maxTokens) * 100
 	}
 	source := "none"
-	if promptTokens > 0 {
+	if usage.Available {
 		source = "api"
 	}
+	legacyUsagePercent := 0.0
+	if usage.UsagePercent != nil {
+		legacyUsagePercent = *usage.UsagePercent
+	}
 	return map[string]any{
-		"prompt_tokens":     promptTokens,
-		"completion_tokens": completionTokens,
-		"max_tokens":        maxTokens,
-		"usage_pct":         usagePct,
-		"source":            source,
+		"available":          usage.Available,
+		"prompt_tokens":      usage.PromptTokens,
+		"completion_tokens":  usage.CompletionTokens,
+		"max_context_tokens": usage.MaxContextTokens,
+		"usage_percent":      usage.UsagePercent,
+		"model":              usage.Model,
+		"subscription_id":    usage.SubscriptionID,
+		"subscription_name":  usage.SubscriptionName,
+		// Legacy REST aliases retained for existing API consumers.
+		"max_tokens": usage.MaxContextTokens,
+		"usage_pct":  legacyUsagePercent,
+		"source":     source,
 	}, nil
 }

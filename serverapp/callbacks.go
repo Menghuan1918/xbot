@@ -642,7 +642,7 @@ func applyWebRunningStatuses(ag *agent.Agent, rows []web.UserChatWithPreview) {
 }
 
 func applyWebRunningStatus(ag *agent.Agent, row *web.UserChatWithPreview) {
-	if ag == nil || row == nil {
+	if row == nil {
 		return
 	}
 	ch := row.Channel
@@ -653,11 +653,16 @@ func applyWebRunningStatus(ag *agent.Agent, row *web.UserChatWithPreview) {
 	if row.FullKey != "" && (ch == "agent" || row.Type == "agent") {
 		chatID = row.FullKey
 	}
-	row.Running = ag.IsProcessingByChannel(ch, chatID)
-	if row.Running {
-		row.Status = "running"
-	} else if row.Status == "" {
-		row.Status = "idle"
+	if ch != "agent" && row.Type != "agent" {
+		row.WorkDir = webSessionCWD(ag, ch, chatID)
+	}
+	if ag != nil {
+		row.Running = ag.IsProcessingByChannel(ch, chatID)
+		if row.Running {
+			row.Status = "running"
+		} else if row.Status == "" {
+			row.Status = "idle"
+		}
 	}
 	for i := range row.Children {
 		applyWebRunningStatus(ag, &row.Children[i])

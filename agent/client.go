@@ -582,12 +582,6 @@ func (c *Client) ResetTokenState() {
 	c.callVoid(MethodResetTokenState, struct{}{})
 }
 
-func (c *Client) GetEffectiveMaxContext(senderID, chatID string) int {
-	var r int
-	_ = c.call(MethodGetEffectiveMaxContext, getEffectiveMaxContextReq{SenderID: senderID, ChatID: chatID}, &r)
-	return r
-}
-
 // ---------------------------------------------------------------------------
 // Token usage (via RPC)
 // ---------------------------------------------------------------------------
@@ -611,6 +605,12 @@ func (c *Client) GetTokenState(ch, chatID string) (int64, int64, error) {
 		return 0, 0, err
 	}
 	return r.Prompt, r.Completion, nil
+}
+
+func (c *Client) GetContextUsage(ch, chatID string) (protocol.ContextUsage, error) {
+	var usage protocol.ContextUsage
+	err := c.call(MethodGetContextUsage, getContextUsageReq{Channel: ch, ChatID: chatID}, &usage)
+	return usage, err
 }
 
 // ---------------------------------------------------------------------------

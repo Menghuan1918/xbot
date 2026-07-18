@@ -9,10 +9,11 @@
  *   - Tab separator: 1px right border between tabs
  *   - No bottom border on tabs; the tab bar has a 1px bottom border
  */
-import type { CSSProperties, ComponentType, SVGProps } from 'react'
+import type { ComponentType, SVGProps } from 'react'
 import { X, Bot, FileText, SquareTerminal, ListVideo } from 'lucide-react'
 import type { DockviewPanelApi } from 'dockview'
 import type { PanelParams } from '@/types/tab'
+import { cn } from '@/lib/utils'
 
 type IconComponent = ComponentType<SVGProps<SVGSVGElement> & { size?: number | string }>
 
@@ -39,68 +40,21 @@ export interface TabHeaderProps {
 
 export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps) {
   const Icon = (params.icon ? ICONS[params.icon] : null) ?? TYPE_ICONS[params.type]
-
-  const tabStyle: CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '6px',
-    padding: '0 10px',
-    height: '35px',
-    cursor: 'pointer',
-    // VSCode: active tab has accent top border, inactive has transparent
-    borderTop: isActive ? '1px solid var(--accent)' : '1px solid transparent',
-    borderRight: '1px solid var(--border)',
-    // Active tab matches content area; inactive matches tab bar
-    backgroundColor: isActive
-      ? 'var(--bg-primary)'
-      : 'var(--bg-secondary)',
-    color: 'var(--text-primary)',
-    opacity: isActive ? 1 : 0.7,
-    transition: 'opacity 0.12s, background-color 0.12s',
-    userSelect: 'none',
-    whiteSpace: 'nowrap',
-    position: 'relative',
-    maxWidth: '200px',
-    minWidth: '40px',
-  }
-
-  const iconStyle: CSSProperties = {
-    color: 'var(--text-secondary)',
-    flexShrink: 0,
-    width: '14px',
-    height: '14px',
-  }
-
-  const titleStyle: CSSProperties = {
-    color: 'var(--text-primary)',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    whiteSpace: 'nowrap',
-    fontSize: '13px',
-    lineHeight: '35px',
-  }
-
-  const closeBtnStyle: CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '18px',
-    height: '18px',
-    flexShrink: 0,
-    border: 'none',
-    borderRadius: '4px',
-    background: 'transparent',
-    cursor: 'pointer',
-    // Active tab: always show close button. Inactive: show on hover.
-    opacity: isActive ? 0.6 : 0,
-    transition: 'opacity 0.12s, background-color 0.12s',
-    color: 'var(--text-secondary)',
-    marginLeft: '2px',
-  }
+  const fullTitle = params.type === 'file' ? (params.filePath || params.title) : params.title
 
   return (
     <div
-      style={tabStyle}
+      className={cn(
+        'group flex h-[35px] w-full min-w-0 cursor-pointer select-none items-center gap-1.5',
+        'border-r border-t px-2.5 text-[13px] transition-colors duration-100',
+        isActive
+          ? 'border-r-border border-t-accent bg-bg-primary text-text-primary'
+          : 'border-r-border border-t-transparent bg-bg-secondary text-text-secondary hover:bg-bg-tertiary hover:text-text-primary',
+      )}
+      title={fullTitle}
+      role="tab"
+      aria-selected={isActive}
+      tabIndex={isActive ? 0 : -1}
       onMouseDown={(e) => {
         if (e.button === 1) {
           if (params.closable) {
@@ -115,30 +69,6 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
         e.stopPropagation()
         onActivate()
       }}
-      onMouseEnter={(e) => {
-        // Hover: lighten bg for inactive tabs, show close button
-        if (!isActive) {
-          e.currentTarget.style.backgroundColor = 'var(--bg-tertiary)'
-          e.currentTarget.style.opacity = '0.9'
-        }
-        if (params.closable) {
-          const btn = (e.currentTarget as HTMLElement).querySelector('[data-close-btn]')
-          if (btn) (btn as HTMLElement).style.opacity = '1'
-        }
-      }}
-      onMouseLeave={(e) => {
-        if (!isActive) {
-          e.currentTarget.style.backgroundColor = 'var(--bg-secondary)'
-          e.currentTarget.style.opacity = '0.7'
-        }
-        if (params.closable && !isActive) {
-          const btn = (e.currentTarget as HTMLElement).querySelector('[data-close-btn]')
-          if (btn) (btn as HTMLElement).style.opacity = '0'
-        }
-      }}
-      role="tab"
-      aria-selected={isActive}
-      tabIndex={0}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
@@ -146,30 +76,24 @@ export function TabHeader({ params, api, isActive, onActivate }: TabHeaderProps)
         }
       }}
     >
-      <Icon style={iconStyle} size={14} />
-      <span style={titleStyle}>{params.title}</span>
+      <Icon aria-hidden className="size-3.5 shrink-0 text-text-secondary" />
+      <span className="min-w-0 flex-1 truncate leading-none">{params.title}</span>
       {params.closable && (
         <button
           type="button"
           aria-label="Close tab"
-          data-close-btn
-          style={closeBtnStyle}
+          className={cn(
+            'ml-0.5 flex size-[18px] shrink-0 items-center justify-center rounded-sm text-text-secondary',
+            'transition-[color,background-color,opacity] duration-100 hover:bg-accent/15 hover:text-text-primary',
+            'focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent',
+            isActive ? 'opacity-60 hover:opacity-100' : 'opacity-0 group-hover:opacity-60',
+          )}
           onClick={(e) => {
             e.stopPropagation()
             api.close()
           }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.backgroundColor = 'color-mix(in srgb, var(--accent) 20%, transparent)'
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = 'transparent'
-          }}
-          onFocus={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
-          onBlur={(e) => {
-            if (!isActive) (e.currentTarget as HTMLElement).style.opacity = '0'
-          }}
         >
-          <X size={12} />
+          <X aria-hidden className="size-3" />
         </button>
       )}
     </div>

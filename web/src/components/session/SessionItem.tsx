@@ -19,7 +19,6 @@ import { cn } from '@/lib/utils'
 import { useI18n } from '@/providers/i18n'
 import { parseAgentChatID, sessionKey } from '@/lib/session-grouping'
 import type { SessionInfo, SessionStatus } from '@/types/shared'
-import type { TabManager } from '@/hooks/useTabManager'
 
 interface SessionItemProps {
   session: SessionInfo
@@ -29,7 +28,6 @@ interface SessionItemProps {
   /** True for SubAgent items (indented, bot icon, read-only). */
   isSubAgent?: boolean
   depth?: number
-  tabManager: TabManager
   onSelect: (id: string) => void
   onToggleStar: (id: string) => void
   onRename: (session: SessionInfo) => void
@@ -52,7 +50,6 @@ export function SessionItem({
   active,
   isSubAgent,
   depth = isSubAgent ? 1 : 0,
-  tabManager,
   onSelect,
   onToggleStar,
   onRename,
@@ -61,22 +58,13 @@ export function SessionItem({
   const { t } = useI18n()
   const key = sessionKey(session)
   const title = isSubAgent ? subAgentTitle(session) : (session.label || session.chatID)
+  const executing = session.running === true || session.status === 'running' || session.status === 'pending'
 
-  const openInTab = useCallback(() => {
-    tabManager.openTab({
-      type: 'agent',
-      title: isSubAgent ? subAgentTitle(session) : (session.label || session.chatID),
-      icon: 'bot',
-      closable: true,
-      data: {
-        subAgentRole: session.role,
-        subAgentInstance: session.instance,
-        parentChatID: session.parentChatID,
-        parentChannel: session.parentChannel,
-        agentChatID: session.fullKey || session.agentChatID,
-      },
-    })
-  }, [tabManager, session, isSubAgent])
+  const openInBrowserTab = useCallback(() => {
+    const sessionParam = `${session.channel || 'web'}:${session.chatID}`
+    const url = `${window.location.origin}/?session=${encodeURIComponent(sessionParam)}`
+    window.open(url, '_blank')
+  }, [session])
 
   const row = (
     <div
@@ -93,32 +81,31 @@ export function SessionItem({
         }
       }}
       className={cn(
-        'group flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-all',
+        'group flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors',
         active ? 'bg-bg-tertiary' : !session.synthetic && 'hover:bg-bg-tertiary/60 hover:shadow-md',
         session.synthetic && 'cursor-default opacity-80',
       )}
       style={{
         ...(isSubAgent ? { marginLeft: `${depth}rem` } : {}),
-        ...(unread && !isSubAgent ? { borderLeft: '2px solid var(--accent)' } : {}),
+        ...(unread && !isSubAgent && !active ? {
+          backgroundColor: 'color-mix(in srgb, var(--accent) 10%, transparent)',
+          boxShadow: 'inset 2px 0 var(--accent)',
+        } : {}),
       }}
     >
-      {isSubAgent ? (
-        /* SubAgent: Bot icon (colored by running state) */
+      {executing ? (
+        <Loader2
+          className="size-3.5 shrink-0 animate-spin"
+          style={{ color: isSubAgent ? 'var(--accent)' : 'var(--status-running)' }}
+          aria-label={t(`session.status.${session.status === 'pending' ? 'pending' : 'running'}`)}
+        />
+      ) : isSubAgent ? (
         <Bot
           className="size-3.5 shrink-0"
-          style={{ color: session.running ? 'var(--status-running)' : 'var(--text-muted)' }}
+          style={{ color: 'var(--text-muted)' }}
         />
       ) : session.synthetic ? (
         <GitBranch className="size-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
-      ) : session.status === 'running' ? (
-        /* Running: spinning Loader2 icon */
-        <Loader2 className="size-3.5 shrink-0 animate-spin" style={{ color: 'var(--status-running)' }} />
-      ) : session.status === 'waiting_input' ? (
-        /* Waiting for input: slow spinning Loader2 icon */
-        <Loader2
-          className="size-3.5 shrink-0 animate-spin"
-          style={{ color: 'var(--status-waiting)', animationDuration: '2s' }}
-        />
       ) : (
         /* Other statuses: static colored dot */
         <span
@@ -162,15 +149,6 @@ export function SessionItem({
         {title}
       </span>
 
-      {/* Running indicator for SubAgents */}
-      {isSubAgent && session.running && (
-        <span
-          className="size-1.5 shrink-0 animate-pulse rounded-full"
-          style={{ backgroundColor: 'var(--status-running)' }}
-          aria-hidden
-        />
-      )}
-
       {/* Relative time — hidden for SubAgents */}
       {!isSubAgent && !session.synthetic && (
         <span className="shrink-0 text-[10px] tabular-nums" style={{ color: 'var(--text-muted)' }}>
@@ -186,7 +164,7 @@ export function SessionItem({
      <ContextMenu>
        <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
        <ContextMenuContent className="data-[state=open]:animate-none data-[state=closed]:animate-none">
-          <ContextMenuItem onClick={openInTab}>
+          <ContextMenuItem onClick={openInBrowserTab}>
             <ExternalLink className="size-4" />
             {t('session.openInTab')}
           </ContextMenuItem>
@@ -199,7 +177,7 @@ export function SessionItem({
      <ContextMenu>
        <ContextMenuTrigger asChild>{row}</ContextMenuTrigger>
        <ContextMenuContent className="data-[state=open]:animate-none data-[state=closed]:animate-none">
-          <ContextMenuItem onClick={openInTab}>
+          <ContextMenuItem onClick={openInBrowserTab}>
           <ExternalLink className="size-4" />
           {t('session.openInTab')}
         </ContextMenuItem>

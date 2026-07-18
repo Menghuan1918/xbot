@@ -478,3 +478,57 @@ func TestResolveSubContextFor_ReadsFromSubscriptionModels(t *testing.T) {
 		t.Errorf("resolveSubContextFor(unknown) = %d, want 0", mc)
 	}
 }
+func TestResolveContextConfig_UsesSessionThenUserDefaultWithoutSideEffects(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XBOT_HOME", dir)
+	db, err := sqlite.Open(config.DBFilePath())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	subSvc := sqlite.NewLLMSubscriptionService(db)
+	tenantSvc := sqlite.NewTenantService(db)
+	f := NewLLMFactory(&llm.MockLLM{}, "system-model")
+	f.SetSubscriptionSvc(subSvc)
+	f.SetTenantSvc(tenantSvc)
+	f.SetModelContexts(map[string]int{"user-model": 300000})
+
+	userSub := &sqlite.LLMSubscription{
+		ID: "sub-user", SenderID: "user-1", Name: "User Sub", Provider: "openai",
+		BaseURL: "https://user.example/v1", APIKey: "sk-user", Model: "user-model",
+	}
+	sessionSub := &sqlite.LLMSubscription{
+		ID: "sub-session", SenderID: "user-1", Name: "Session Sub", Provider: "openai",
+		BaseURL: "https://session.example/v1", APIKey: "sk-session", Model: "session-model",
+		PerModelConfigs: map[string]sqlite.PerModelConfig{"session-model": {MaxContext: 500000}},
+	}
+	if err := subSvc.Add(userSub); err != nil {
+		t.Fatalf("add user sub: %v", err)
+	}
+	if err := subSvc.Add(sessionSub); err != nil {
+		t.Fatalf("add session sub: %v", err)
+	}
+	if err := subSvc.SetUserDefaultModel("user-1", userSub.ID, "user-model"); err != nil {
+		t.Fatalf("set user default: %v", err)
+	}
+	if err := tenantSvc.SetTenantSubscription("web", "chat-1", sessionSub.ID, "session-model"); err != nil {
+		t.Fatalf("set session model: %v", err)
+	}
+
+	subID, subName, model, maxContext := f.ResolveContextConfig("user-1", "chat-1", "web", 200000)
+	if subID != sessionSub.ID || subName != sessionSub.Name || model != "session-model" || maxContext != 500000 {
+		t.Fatalf("session config=(%q,%q,%q,%d)", subID, subName, model, maxContext)
+	}
+	if len(f.clientCache) != 0 {
+		t.Fatalf("resolver created %d cached clients", len(f.clientCache))
+	}
+
+	subID, subName, model, maxContext = f.ResolveContextConfig("user-1", "missing-chat", "web", 200000)
+	if subID != userSub.ID || subName != userSub.Name || model != "user-model" || maxContext != 300000 {
+		t.Fatalf("user config=(%q,%q,%q,%d)", subID, subName, model, maxContext)
+	}
+	if tenantID, err := tenantSvc.GetTenantIDByChannelChatID("web", "missing-chat"); err != nil || tenantID != 0 {
+		t.Fatalf("resolver created tenant: id=%d err=%v", tenantID, err)
+	}
+}

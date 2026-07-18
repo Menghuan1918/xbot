@@ -12,6 +12,7 @@
 import { memo, useState, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
+import { AnimatedCollapse } from '@/components/ui/animated-collapse'
 
 interface FoldedLineProps {
   /** Clickable label text shown after the arrow. */
@@ -58,11 +59,9 @@ export const FoldedLine = memo(function FoldedLine({
         <span className={cn('fold-arrow shrink-0 text-text-muted select-none', open && 'open')}>▸</span>
         <span className="min-w-0 flex-1 truncate">{title}</span>
       </button>
-      <div className={cn('ml-4 fold-container', open && 'open')}>
-        <div className="fold-content">
-          <div className={contentClassName}>{children}</div>
-        </div>
-      </div>
+      <AnimatedCollapse open={open} lazy className="ml-4" contentClassName={contentClassName}>
+        {children}
+      </AnimatedCollapse>
     </div>
   )
 })

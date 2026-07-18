@@ -1034,15 +1034,6 @@ func (a *Agent) sendPendingAskUserCancelAck(msg bus.InboundMessage) {
 	}
 }
 
-func (a *Agent) pendingAskUserMatches(ch, chatID, requestID string) bool {
-	if requestID == "" {
-		return false
-	}
-	return a.WithPendingAskUser(ch, chatID, func(pending *protocol.ProgressEvent) bool {
-		return pending.RequestID == requestID
-	})
-}
-
 func (a *Agent) clearPendingAskUserForEnqueuedAnswer(msg bus.InboundMessage) {
 	if msg.Metadata != nil && msg.Metadata["ask_user_answered"] == "true" {
 		a.ClearPendingAskUser(msg.Channel, msg.ChatID)
@@ -2639,31 +2630,23 @@ func (a *Agent) chatProcessLoop(ctx context.Context, chatKey string, ch <-chan b
 		}
 		if response != nil {
 			if response.WaitingUser {
-				requestID := ""
-				if response.Metadata != nil {
-					requestID = response.Metadata["request_id"]
+				// WaitingUser response: send directly with WaitingUser flag set.
+				// Bypass sendMessage (which doesn't support WaitingUser) since it applies
+				// Patch/Edit logic incompatible with async user interaction.
+				busMsg := bus.OutboundMessage{
+					Channel:     msg.Channel,
+					ChatID:      msg.ChatID,
+					Content:     response.Content,
+					WaitingUser: true,
+					Metadata:    response.Metadata,
 				}
-				if !a.pendingAskUserMatches(msg.Channel, msg.ChatID, requestID) {
-					log.Ctx(ctx).WithField("request_id", requestID).Info("Skipping cancelled WaitingUser response")
-				} else {
-					// WaitingUser response: send directly with WaitingUser flag set.
-					// Bypass sendMessage (which doesn't support WaitingUser) since it applies
-					// Patch/Edit logic incompatible with async user interaction.
-					busMsg := bus.OutboundMessage{
-						Channel:     msg.Channel,
-						ChatID:      msg.ChatID,
-						Content:     response.Content,
-						WaitingUser: true,
-						Metadata:    response.Metadata,
-					}
-					if busMsg.Metadata == nil {
-						busMsg.Metadata = make(map[string]string)
-					}
-					select {
-					case a.bus.Outbound <- busMsg:
-					default:
-						log.Ctx(ctx).Warn("Message bus outbound channel is full, dropping WaitingUser response")
-					}
+				if busMsg.Metadata == nil {
+					busMsg.Metadata = make(map[string]string)
+				}
+				select {
+				case a.bus.Outbound <- busMsg:
+				default:
+					log.Ctx(ctx).Warn("Message bus outbound channel is full, dropping WaitingUser response")
 				}
 			} else if err := a.sendMessage(msg.Channel, msg.ChatID, response.Content, response.Metadata); err != nil {
 				log.Ctx(ctx).WithError(err).Warn("Failed to dispatch response via sendMessage")

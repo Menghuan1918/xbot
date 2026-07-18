@@ -1,15 +1,16 @@
 /**
  * UserMessage — renders one committed user message (Spec 4 §3.5, Spec C §2).
  *
- * Right-aligned bubble. Content is plain text rendered as Markdown so line
- * breaks and inline code render faithfully.
+ * Right-aligned bubble. Content is rendered through the same MarkdownRenderer
+ * as Agent output (no pre-wrap wrapper), ensuring identical markdown rendering.
  *
  * Rewind is now inline-edit mode (Spec C §2):
  *   - Pencil icon instead of RotateCcw
- *   - Click → message becomes an editable textarea
+ *   - Click → message becomes an editable textarea (full-width, like MessageInput)
  *   - Confirm (Check) → calls onRewind with edited content
  *   - Cancel (X) → restores original message
  *   - Only one message can be edited at a time (editingMessageId prop)
+ *   - Edit container inherits the display height as min-height to prevent jitter
  */
 import { memo, useEffect, useRef, useState } from 'react'
 import { Check, Pencil, X } from 'lucide-react'
@@ -44,6 +45,17 @@ export const UserMessage = memo(function UserMessage({
   const { t } = useI18n()
   const [editValue, setEditValue] = useState(content)
   const editRef = useRef<HTMLTextAreaElement>(null)
+  const displayRef = useRef<HTMLDivElement>(null)
+  const [editMinHeight, setEditMinHeight] = useState<number | null>(null)
+
+  // Capture display height before entering edit mode to prevent height jitter
+  const handleStartEdit = () => {
+    const el = displayRef.current
+    if (el) {
+      setEditMinHeight(el.offsetHeight)
+    }
+    onStartEdit?.()
+  }
 
   // Reset edit value when entering edit mode
   useEffect(() => {
@@ -96,9 +108,12 @@ export const UserMessage = memo(function UserMessage({
 
   if (isEditing) {
     return (
-      <div className="flex justify-end px-1">
-        <div className="flex max-w-[85%] flex-col items-end gap-1">
-          <div className="w-full rounded-lg border border-accent bg-bg-secondary px-3 py-2">
+      <div className="px-1">
+        <div className="flex w-full flex-col items-end gap-1">
+          <div
+            className="w-full rounded-lg border border-accent bg-bg-secondary px-3 py-2"
+            style={{ minHeight: editMinHeight ?? undefined }}
+          >
             <textarea
               ref={editRef}
               value={editValue}
@@ -138,7 +153,10 @@ export const UserMessage = memo(function UserMessage({
   return (
     <div className="flex justify-end px-1">
       <div className="flex max-w-[85%] flex-col items-end gap-1">
-        <div className="rounded-2xl rounded-br-sm bg-accent/15 px-3.5 py-2 text-text-primary" style={{ whiteSpace: 'pre-wrap' }}>
+        <div
+          ref={displayRef}
+          className="rounded-2xl rounded-br-sm bg-accent/15 px-3.5 py-2 text-text-primary"
+        >
           <MarkdownRenderer content={content || ' '} />
         </div>
         {onRewind && onStartEdit && (
@@ -155,7 +173,7 @@ export const UserMessage = memo(function UserMessage({
                 ? 'opacity-20 cursor-not-allowed'
                 : 'opacity-60 hover:opacity-100',
             )}
-            onClick={onStartEdit}
+            onClick={handleStartEdit}
           >
             <Pencil className="size-3.5" />
           </Button>

@@ -308,7 +308,15 @@ export function useChatMessages({
     commitMessageCache(activeMessageCacheKeyRef.current, rows)
   }, [])
 
+  // Hold ws in a ref — its methods delegate to a stable MultiSSEManager instance,
+  // so we don't need ws in the reload deps. Including ws would cause an infinite
+  // loop: connected changes → ws identity changes → reload changes → useEffect
+  // fires → ws.setLastSeq → restartSource → connected changes → ...
+  const wsRef = useRef(ws)
+  wsRef.current = ws
+
   const reload = useCallback(async () => {
+    const w = wsRef.current
     const gen = ++reloadGenRef.current
     const mutationGen = messageMutationGenRef.current
     const destructiveMutationGen = destructiveMutationGenRef.current
@@ -340,7 +348,7 @@ export function useChatMessages({
     try {
       // Live SubAgent mode: TUI renders from the in-memory agent session dump.
       if (agentChatID) {
-        const dump = await ws.rpc<AgentSessionDump>('get_agent_session_dump_by_full_key', {
+        const dump = await w.rpc<AgentSessionDump>('get_agent_session_dump_by_full_key', {
           full_key: agentChatID,
         })
         if (requestIsSuperseded() || requestHasDestructiveMutation()) return
@@ -360,7 +368,7 @@ export function useChatMessages({
       }
       // Live SubAgent mode: same runtime tuple as TUI.
       if (subAgentRole && parentChatID && !agentChatID) {
-        const dump = await ws.rpc<AgentSessionDump>('get_agent_session_dump', {
+        const dump = await w.rpc<AgentSessionDump>('get_agent_session_dump', {
           channel,
           chat_id: parentChatID,
           role: subAgentRole,
@@ -380,7 +388,7 @@ export function useChatMessages({
           setInitialProgress(null)
           return
         }
-        const msgs = await ws.rpc<SubAgentMsg[]>('get_session_messages', {
+        const msgs = await w.rpc<SubAgentMsg[]>('get_session_messages', {
           channel,
           chat_id: parentChatID,
           role: subAgentRole,
@@ -399,7 +407,7 @@ export function useChatMessages({
         return
       }
       // Normal mode: load via Web history snapshot (full history + progress).
-      const data = await fetchHistory(ws, chatID ? { channel, chatID } : null)
+      const data = await fetchHistory(w, chatID ? { channel, chatID } : null)
       if (requestIsSuperseded() || requestHasDestructiveMutation()) return
       const mutated = requestHasMessageMutation()
       // Store last_seq for SSE deduplication and reconnect replay.
@@ -414,7 +422,7 @@ export function useChatMessages({
         getProgressGeneration(cursorCacheKey) !== progressGen,
       )
       if (typeof data.last_seq === 'number' && cursorChatID && !progressChanged && !mutated) {
-        ws.setLastSeq(cursorChatID, data.last_seq, cursorChannel)
+        w.setLastSeq(cursorChatID, data.last_seq, cursorChannel)
       }
       const rows = data.messages ?? []
       const parsed = parseHistoryMessages(rows)
@@ -437,7 +445,7 @@ export function useChatMessages({
     } finally {
       if (gen === reloadGenRef.current) setLoading(false)
     }
-  }, [ws, channel, chatID, subAgentRole, subAgentInstance, parentChatID, agentChatID, activeMessageCacheKey])
+  }, [channel, chatID, subAgentRole, subAgentInstance, parentChatID, agentChatID, activeMessageCacheKey])
 
   // Load history when the chatID changes (or on first enable).
   useLayoutEffect(() => {

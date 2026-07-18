@@ -405,11 +405,6 @@
 /* KaTeX display blocks stay scrollable on narrow widths. */
 .markdown-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.25em 0; }
 
-/* content-visibility: skip rendering offscreen Agent message cards (Spec 4 perf).
- * The virtualizer already keeps the DOM light, but this protects the live
- * streaming card and any non-virtualized fallback from layout thrash. */
-.agent-msg-card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
-
 /* ── Dockview theme override — follow app light/dark palette ────────────────
  * dockview's `.dockview-theme-vs` hardcodes dark background variables (#1e1e1e
  * etc), ignoring the app's `.dark` class. We override these CSS variables to
@@ -441,27 +436,47 @@
   border-top: none !important;
   border-bottom: none !important;
   background-color: transparent !important;
+  box-sizing: border-box;
+  flex: 0 1 180px !important;
+  max-width: 180px !important;
+  min-width: 48px !important;
+  padding: 0 !important;
+}
+
+/* The React tab renderer is the only layout child; keep long titles from
+ * forcing Dockview's outer tab wider than the VSCode-like cap. */
+.dockview-theme-vs .dv-tab > * {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* ── Shimmer color variable — defined for both themes ────────────────────── */
 :root { --shimmer-color: rgba(0, 0, 0, 0.06); }
 .dark { --shimmer-color: rgba(255, 255, 255, 0.08); }
 
-/* ── "正在思考" character sweep effect ───────────────────────────────────────
- * Each character lights up in sequence, then the whole text dims and
- * repeats — a bold, borderless loading indicator.
+/* ── Shared live-status sweep ────────────────────────────────────────────────
+ * A single CSS animation replaces per-character React timers and card-wide
+ * transforms. The text color is supplied by the component through a CSS var.
  */
-@keyframes thinkingCharSweep {
-  0%, 100% { opacity: 0.3; }
-  50%      { opacity: 1; }
+@keyframes sweepText {
+  0% { background-position: 120% 0; }
+  100% { background-position: -20% 0; }
 }
-.thinking-shimmer {
-  font-size: 0.875rem;
-  letter-spacing: 0.05em;
-}
-.thinking-char {
+.sweep-text {
   display: inline-block;
-  animation: thinkingCharSweep 1.5s ease-in-out infinite;
+  color: var(--sweep-color);
+  background-image: linear-gradient(
+    105deg,
+    color-mix(in srgb, var(--sweep-color) 35%, transparent) 0%,
+    var(--sweep-color) 48%,
+    color-mix(in srgb, var(--sweep-color) 35%, transparent) 100%
+  );
+  background-size: 220% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: sweepText 1.5s ease-in-out infinite;
 }
 
 /* ── Fold/expand animation ───────────────────────────────────────────────────
@@ -472,7 +487,7 @@
 .fold-container {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 0.2s ease-out, opacity 0.2s ease-out;
+  transition: grid-template-rows 180ms ease-out, opacity 180ms ease-out;
   opacity: 0;
 }
 .fold-container.open {
@@ -491,6 +506,24 @@
 }
 .fold-arrow.open {
   transform: rotate(90deg);
+}
+
+@keyframes collapsibleOpen {
+  from { height: 0; opacity: 0; }
+  to { height: var(--radix-collapsible-content-height); opacity: 1; }
+}
+@keyframes collapsibleClose {
+  from { height: var(--radix-collapsible-content-height); opacity: 1; }
+  to { height: 0; opacity: 0; }
+}
+.collapsible-motion {
+  overflow: hidden;
+}
+.collapsible-motion[data-state='open'] {
+  animation: collapsibleOpen 180ms ease-out;
+}
+.collapsible-motion[data-state='closed'] {
+  animation: collapsibleClose 180ms ease-out;
 }
 
 /* ── Tool status dot (Spec A §5) ──────────────────────────────────────────────
@@ -589,26 +622,6 @@
   color: var(--text-muted);
 }
 
-/* ── SubAgent card light-sweep animation (Spec A §1) ───────────────────────
- * A subtle accent-colored gradient sweeps across the card while a SubAgent
- * is running. Uses CSS @keyframes (no JS animation loop) per the spec.
- */
-@keyframes subagent-sweep {
-  0%   { background-position: -100% 0; }
-  100% { background-position: 200% 0; }
-}
-.subagent-card--running {
-  background-image: linear-gradient(
-    90deg,
-    transparent 0%,
-    color-mix(in srgb, var(--accent) 8%, transparent) 50%,
-    transparent 100%
-  );
-  background-size: 200% 100%;
-  background-repeat: no-repeat;
-  animation: subagent-sweep 1.5s ease-in-out infinite;
-}
-
 /* ── Inline typewriter cursor (Spec A §2) ─────────────────────────────────
  * The cursor follows the last character of streaming Markdown output.
  * Using ::after on the last child of .streaming-content ensures the cursor
@@ -627,4 +640,22 @@
   margin-left: 2px;
   background-color: var(--accent);
   animation: streaming-cursor-blink 1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sweep-text,
+  .streaming-content > :last-child::after,
+  .tool-status-running,
+  .tool-status-generating,
+  .animate-spin,
+  .animate-pulse {
+    animation: none !important;
+  }
+
+  .fold-container,
+  .fold-arrow,
+  .collapsible-motion {
+    animation: none !important;
+    transition: none !important;
+  }
 }

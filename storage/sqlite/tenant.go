@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -10,6 +11,57 @@ import (
 // TenantService handles tenant CRUD operations
 type TenantService struct {
 	db *DB
+}
+
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func canonicalUserID(q rowQuerier, channel, senderID string) (int64, error) {
+	if channel == "" || senderID == "" {
+		return 0, nil
+	}
+	var userID int64
+	err := q.QueryRow(
+		`SELECT user_id FROM user_identities WHERE channel = ? AND channel_user_id = ?`,
+		channel, senderID,
+	).Scan(&userID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("resolve canonical user: %w", err)
+	}
+	return userID, nil
+}
+
+func backfillSessionOwnership(tx *sql.Tx, channel, chatID string) error {
+	if _, err := tx.Exec(`
+UPDATE user_chats
+SET user_id = COALESCE((
+    SELECT ui.user_id FROM user_identities ui
+    WHERE ui.channel = user_chats.channel
+      AND ui.channel_user_id = user_chats.sender_id
+), 0)
+WHERE channel = ? AND chat_id = ? AND COALESCE(user_id, 0) = 0
+`, channel, chatID); err != nil {
+		return fmt.Errorf("backfill chat owner: %w", err)
+	}
+	if _, err := tx.Exec(`
+UPDATE tenants
+SET owner_user_id = COALESCE(
+    (SELECT NULLIF(uc.user_id, 0) FROM user_chats uc
+     WHERE uc.channel = tenants.channel AND uc.chat_id = tenants.chat_id
+     ORDER BY uc.id LIMIT 1),
+    (SELECT ui.user_id FROM user_identities ui
+     WHERE ui.channel = tenants.channel AND ui.channel_user_id = tenants.chat_id),
+    0
+)
+WHERE channel = ? AND chat_id = ? AND COALESCE(owner_user_id, 0) = 0
+`, channel, chatID); err != nil {
+		return fmt.Errorf("backfill tenant owner: %w", err)
+	}
+	return nil
 }
 
 // NewTenantService creates a new tenant service
@@ -48,6 +100,9 @@ func (s *TenantService) GetOrCreateTenantID(channel, chatID string) (int64, erro
 	).Scan(&tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("select tenant: %w", err)
+	}
+	if err := backfillSessionOwnership(tx, channel, chatID); err != nil {
+		return 0, err
 	}
 
 	// Always update last_active_at to reflect current usage.
@@ -105,8 +160,11 @@ func (s *TenantService) GetTenantIDByChannelChatID(channel, chatID string) (int6
 		"SELECT id FROM tenants WHERE channel = ? AND chat_id = ?",
 		channel, chatID,
 	).Scan(&tenantID)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
 	if err != nil {
-		return 0, nil // not found
+		return 0, fmt.Errorf("get tenant by channel/chat: %w", err)
 	}
 	return tenantID, nil
 }
@@ -163,14 +221,44 @@ type TenantInfo struct {
 // it is auto-created via INSERT OR IGNORE first.
 func (s *TenantService) SetTenantSubscription(channel, chatID, subscriptionID, model string) error {
 	conn := s.db.Conn()
+	tx, err := conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin set tenant subscription: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Ensure tenant row exists (no-op if already present).
-	_, _ = conn.Exec(
+	if _, err := tx.Exec(
 		"INSERT OR IGNORE INTO tenants (channel, chat_id) VALUES (?, ?)",
 		channel, chatID,
-	)
-	result, err := conn.Exec(
-		"UPDATE tenants SET subscription_id = ?, model = ? WHERE channel = ? AND chat_id = ?",
-		subscriptionID, model, channel, chatID,
+	); err != nil {
+		return fmt.Errorf("ensure tenant for subscription: %w", err)
+	}
+
+	var tenantID int64
+	var oldSubscriptionID, oldModel string
+	if err := tx.QueryRow(
+		"SELECT id, COALESCE(subscription_id, ''), COALESCE(model, '') FROM tenants WHERE channel = ? AND chat_id = ?",
+		channel, chatID,
+	).Scan(&tenantID, &oldSubscriptionID, &oldModel); err != nil {
+		return fmt.Errorf("read tenant subscription: %w", err)
+	}
+	if err := backfillSessionOwnership(tx, channel, chatID); err != nil {
+		return err
+	}
+
+	var modelID string
+	if subscriptionID != "" && model != "" {
+		if err := tx.QueryRow(
+			"SELECT id FROM subscription_models WHERE subscription_id = ? AND model = ?",
+			subscriptionID, model,
+		).Scan(&modelID); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("resolve tenant model id: %w", err)
+		}
+	}
+	result, err := tx.Exec(
+		"UPDATE tenants SET subscription_id = ?, model = ?, model_id = ? WHERE id = ?",
+		subscriptionID, model, modelID, tenantID,
 	)
 	if err != nil {
 		return fmt.Errorf("set tenant subscription: %w", err)
@@ -178,18 +266,27 @@ func (s *TenantService) SetTenantSubscription(channel, chatID, subscriptionID, m
 	if n, _ := result.RowsAffected(); n == 0 {
 		return fmt.Errorf("set tenant subscription: tenant %s/%s not found after insert", channel, chatID)
 	}
-	// Also set model_id from subscription_models (v35+)
-	if subscriptionID != "" && model != "" {
-		var modelID string
-		if err := conn.QueryRow(
-			"SELECT id FROM subscription_models WHERE subscription_id = ? AND model = ?",
-			subscriptionID, model,
-		).Scan(&modelID); err == nil && modelID != "" {
-			_, _ = conn.Exec(
-				"UPDATE tenants SET model_id = ? WHERE channel = ? AND chat_id = ?",
-				modelID, channel, chatID,
-			)
+	if oldSubscriptionID != subscriptionID || oldModel != model {
+		if _, err := tx.Exec(
+			"UPDATE tenant_state SET last_prompt_tokens = 0, last_completion_tokens = 0 WHERE tenant_id = ?",
+			tenantID,
+		); err != nil {
+			return fmt.Errorf("clear tenant token state after model change: %w", err)
 		}
+		if _, err := tx.Exec(`
+UPDATE session_messages SET context_tokens = 0
+WHERE id = (
+SELECT id FROM session_messages
+WHERE tenant_id = ? AND role = 'user' AND COALESCE(display_only, 0) = 0
+ORDER BY id DESC LIMIT 1
+)
+`, tenantID); err != nil {
+			return fmt.Errorf("clear latest user context tokens after model change: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit set tenant subscription: %w", err)
 	}
 	return nil
 }
@@ -202,8 +299,11 @@ func (s *TenantService) GetTenantSubscription(channel, chatID string) (subscript
 		"SELECT subscription_id, model FROM tenants WHERE channel = ? AND chat_id = ?",
 		channel, chatID,
 	).Scan(&subscriptionID, &model)
+	if err == sql.ErrNoRows {
+		return "", "", nil
+	}
 	if err != nil {
-		return "", "", nil // not found is not an error
+		return "", "", fmt.Errorf("get tenant subscription: %w", err)
 	}
 	return subscriptionID, model, nil
 }

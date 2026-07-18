@@ -8,7 +8,7 @@
  * LLM subscription/model RPCs (Spec D) go through WSConnection.rpc → POST /api/rpc.
  */
 import type { WSConnection } from '@/types/ws'
-import type { ModelEntry, PerModelConfig, SessionSelector, Subscription } from '@/types/shared'
+import type { ContextUsage, ModelEntry, PerModelConfig, SessionSelector, Subscription } from '@/types/shared'
 import { postAPI } from '@/lib/api'
 
 /** History message row (protocol.HistoryMessage). */
@@ -300,6 +300,17 @@ export async function getSessionSubscription(
   chatID: string,
 ): Promise<{ subscription_id?: string; model?: string }> {
   return ws.rpc<{ subscription_id?: string; model?: string }>('get_session_subscription', {
+    channel,
+    chat_id: chatID,
+  })
+}
+
+export async function getContextUsage(
+  ws: WSConnection,
+  channel: string,
+  chatID: string,
+): Promise<ContextUsage> {
+  return ws.rpc<ContextUsage>('get_context_usage', {
     channel,
     chat_id: chatID,
   })

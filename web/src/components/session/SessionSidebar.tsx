@@ -6,7 +6,7 @@
  * the new-session dialog. Pure presentational composition on top of the store.
  */
 import { useCallback, useMemo, useState } from 'react'
-import { Plus } from 'lucide-react'
+import { Loader2, Plus } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useI18n } from '@/providers/i18n'
@@ -137,7 +137,12 @@ export function SessionSidebar({ tabManager }: SessionSidebarProps) {
 
       {/* List */}
       <div className="min-h-0 flex-1">
-        {filteredSessions.length === 0 && store.activeChannel ? (
+        {store.loading ? (
+          <div className="flex h-full items-center justify-center gap-2 px-4 text-xs text-text-muted">
+            <Loader2 className="size-3.5 animate-spin" />
+            <span>{t('common.loading')}</span>
+          </div>
+        ) : filteredSessions.length === 0 && store.activeChannel ? (
           <div className="flex h-full items-center justify-center px-4 text-center text-xs text-text-muted">
             {t('session.noSessionsForChannel', { channel: store.activeChannel })}
           </div>
@@ -152,7 +157,6 @@ export function SessionSidebar({ tabManager }: SessionSidebarProps) {
           activeSession={store.activeSession}
           search={search}
           subAgents={store.subAgents}
-          tabManager={tabManager}
           onSelect={handleSelect}
           onToggleStar={store.toggleStar}
           onRename={store.renameSession}

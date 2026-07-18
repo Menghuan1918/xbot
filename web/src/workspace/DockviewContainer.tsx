@@ -61,6 +61,7 @@ import { CwdContext } from '@/providers/CwdProvider'
 import { AuthContext } from '@/providers/AuthProvider'
 import { SessionStoreContext } from '@/hooks/useSessionStore'
 import { RightSidebarControlContext, useRightSidebarControl } from '@/components/sidebar/RightSidebarControl'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import type { PanelParams } from '@/types/tab'
 import type { TabManager } from '@/hooks/useTabManager'
 
@@ -184,7 +185,7 @@ export function DockviewContainer({ tabManager, onReady }: DockviewContainerProp
  * one force-re-render dep — the simplification over the old per-context
  * tracking.
  */
-function withProviders(node: ReactElement, ctx: DockviewContextValue): ReactElement {
+export function withDockviewProviders(node: ReactElement, ctx: DockviewContextValue): ReactElement {
   return createElement(
     DockviewContext.Provider,
     { value: ctx },
@@ -195,7 +196,7 @@ function withProviders(node: ReactElement, ctx: DockviewContextValue): ReactElem
             createElement(AuthContext.Provider, { value: ctx.auth },
               createElement(SessionStoreContext.Provider, { value: ctx.sessionStore },
                 createElement(RightSidebarControlContext.Provider, { value: ctx.rightSidebar },
-                  node,
+                  createElement(TooltipProvider, { delayDuration: 200, children: node }),
                 ),
               ),
             ),
@@ -210,11 +211,10 @@ function withProviders(node: ReactElement, ctx: DockviewContextValue): ReactElem
  * Mounts a content panel React component on the dockview element.
  * `name` is the `component` string from addPanel, matching a TabType.
  */
-class ReactContentRenderer implements IContentRenderer {
+export class ReactContentRenderer implements IContentRenderer {
   readonly element: HTMLElement
   private root: Root | null = null
   private params: GroupPanelPartInitParameters | null = null
-  private activeSub: DockviewIDisposable | null = null
   private readonly name: string
   private readonly ctxRef: RefObject<DockviewContextValue>
 
@@ -228,7 +228,6 @@ class ReactContentRenderer implements IContentRenderer {
   init(parameters: GroupPanelPartInitParameters): void {
     this.params = parameters
     this.root = createRoot(this.element)
-    this.activeSub = parameters.containerApi.onDidActivePanelChange(() => this.render())
     this.render()
   }
 
@@ -242,10 +241,10 @@ class ReactContentRenderer implements IContentRenderer {
     const Component = CONTENT_COMPONENTS[this.name as keyof typeof CONTENT_COMPONENTS]
     if (!Component) return
     this.root.render(
-      withProviders(
+      withDockviewProviders(
         <Suspense fallback={<div className="flex h-full items-center justify-center text-sm text-text-muted">Loading…</div>}>
           <Component
-            params={panelParamsWithActive(this.params)}
+            params={this.params.params as PanelParams}
             api={this.params.api}
             containerApi={this.params.containerApi}
           />
@@ -256,17 +255,10 @@ class ReactContentRenderer implements IContentRenderer {
   }
 
   dispose(): void {
-    this.activeSub?.dispose()
-    this.activeSub = null
     this.root?.unmount()
     this.root = null
     this.params = null
   }
-}
-
-function panelParamsWithActive(parameters: GroupPanelPartInitParameters): PanelParams {
-  const params = parameters.params as PanelParams
-  return { ...params, active: parameters.containerApi.activePanel?.id === parameters.api.id }
 }
 
 /**
@@ -293,6 +285,9 @@ class ReactTabRenderer implements ITabRenderer {
     // Ensure the renderer element fills its .dv-tab parent and constrains content
     this.element.style.height = '100%'
     this.element.style.width = '100%'
+    this.element.style.minWidth = '0'
+    this.element.style.maxWidth = '100%'
+    this.element.style.boxSizing = 'border-box'
     this.element.style.display = 'flex'
     this.element.style.overflow = 'hidden'
   }
@@ -327,7 +322,7 @@ class ReactTabRenderer implements ITabRenderer {
     if (!this.root || !this.params) return
     const panelParams = this.params.params as PanelParams
     this.root.render(
-      withProviders(
+      withDockviewProviders(
         <TabHeader
           params={panelParams}
           api={this.params.api}

@@ -34,6 +34,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -668,8 +669,11 @@ export function SettingsLLM({ settings }: SettingsLLMProps) {
   }
 
   // Thinking mode
-  const [thinking, setThinking] = useState(data.thinkingMode)
-  useEffect(() => setThinking(data.thinkingMode), [data.thinkingMode])
+  const [thinking, setThinking] = useState(data.thinkingMode === 'enabled' ? 'think' : data.thinkingMode)
+  useEffect(
+    () => setThinking(data.thinkingMode === 'enabled' ? 'think' : data.thinkingMode),
+    [data.thinkingMode],
+  )
   const commitThinking = (mode: string) => {
     if (mode === data.thinkingMode) return
     void setThinkingMode(mode).then((ok) => {
@@ -837,9 +841,12 @@ export function SettingsLLM({ settings }: SettingsLLMProps) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="auto">{t('settings.thinkingAuto')}</SelectItem>
-              <SelectItem value="enabled">{t('settings.thinkingEnabled')}</SelectItem>
-              <SelectItem value="disabled">{t('settings.thinkingDisabled')}</SelectItem>
+              <SelectGroup>
+                <SelectItem value="auto">{t('settings.thinkingAuto')}</SelectItem>
+                <SelectItem value="think">{t('settings.thinkingStandard')}</SelectItem>
+                <SelectItem value="think-max">{t('settings.thinkingMaximum')}</SelectItem>
+                <SelectItem value="disabled">{t('settings.thinkingDisabled')}</SelectItem>
+              </SelectGroup>
             </SelectContent>
           </Select>
         </div>

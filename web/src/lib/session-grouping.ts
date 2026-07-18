@@ -74,29 +74,29 @@ export function sessionGroupKey(s: SessionInfo, category: SessionCategory): stri
 }
 
 /**
- * Extract the work directory basename from a session for `path` grouping.
+ * Return the full work directory used as the stable `path` grouping key.
  *
  * CLI sessions have chatID like `/path/to/workdir:session-name`.
- * Web sessions have empty workDir → "Web 会话" group key.
+ * Older servers are supported by parsing CLI-style chat IDs.
  */
 export function pathBucket(s: SessionInfo): string {
+  const explicit = normalizeWorkDir(s.workDir || '')
+  if (explicit) return explicit
   // For SubAgent sessions, inherit the parent's path group
   if (s.parentChatID && s.parentChannel) {
     return pathBucket({ ...s, chatID: s.parentChatID, channel: s.parentChannel, parentChatID: undefined, parentChannel: undefined })
   }
-  if (s.channel === 'cli' || (s.channel === 'web' && s.chatID.includes(':'))) {
+  if (s.channel === 'cli') {
     const workDir = extractWorkDir(s.chatID)
-    if (workDir) return basename(workDir)
+    if (workDir) return normalizeWorkDir(workDir)
   }
-  // Web sessions (no workDir) → special group key
-  return '__web__'
+  return '__unset__'
 }
 
 /** Extract the workDir from a CLI-style chatID: `/path/to/workdir:session-name`. */
 function extractWorkDir(chatID: string): string {
   const idx = chatID.lastIndexOf(':')
-  if (idx <= 0 || idx === chatID.length - 1) return ''
-  const candidate = chatID.slice(0, idx)
+  const candidate = idx > 1 && idx < chatID.length - 1 ? chatID.slice(0, idx) : chatID
   // Must look like a path (starts with / or drive letter or ~)
   if (candidate.startsWith('/') || /^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith('~')) {
     return candidate
@@ -104,10 +104,10 @@ function extractWorkDir(chatID: string): string {
   return ''
 }
 
-function basename(path: string): string {
-  const clean = path.replace(/[\\/]+$/, '')
-  const slash = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'))
-  return slash >= 0 ? clean.slice(slash + 1) : clean
+function normalizeWorkDir(path: string): string {
+  const trimmed = path.trim()
+  if (trimmed === '/' || /^[A-Za-z]:[\\/]$/.test(trimmed)) return trimmed
+  return trimmed.replace(/[\\/]+$/, '')
 }
 
 /** Ordered status groups (UI iterates this for stable ordering). */
@@ -154,7 +154,7 @@ export interface SessionGroup {
  * Group + sort sessions for a category. Group order:
  *   - time:    today → yesterday → earlier
  *   - status:  STATUS_ORDER
- *   - path:    sorted by group key (directory basename), Web sessions last
+ *   - path:    sorted by full directory, sessions without a directory last
  *
  * Within each group the full sort (starred-first, lastActive-desc) applies,
  * so starred items float to the top of their group too.
@@ -178,10 +178,10 @@ export function groupSessions(
   } else if (category === 'time') {
     keys = TIME_BUCKETS.filter((k) => map.has(k))
   } else {
-    // path: sort alphabetically, with '__web__' last
+    // path: sort alphabetically, with the unset bucket last
     keys = [...map.keys()].sort((a, b) => {
-      if (a === '__web__') return 1
-      if (b === '__web__') return -1
+      if (a === '__unset__') return 1
+      if (b === '__unset__') return -1
       return a.localeCompare(b)
     })
   }

@@ -74,6 +74,34 @@ Optional channel capabilities via interfaces in `capability.go`:
 - `SettingsCapability` — channel supports user settings UI
 - `UIBuilder` — channel can render custom UI elements
 
+## Web Context Usage
+
+The Web context ring reads the authoritative session snapshot from the
+`get_context_usage` RPC using `(channel, chat_id)`. The response combines the
+current `(subscription, model)`, its effective `max_context_tokens`, and the
+latest provider-confirmed `prompt_tokens`; the browser must not rebuild this
+state by joining subscription APIs or by falling back to a hard-coded limit.
+
+- `prompt_tokens` is the context fill value. Completion tokens are informational
+  and are never added to the usage percentage.
+- Usage is exact at LLM-response and compression checkpoints. Active streaming
+  keeps the last confirmed snapshot until the provider returns another usage
+  record; Web does not estimate token growth locally.
+- A session with no confirmed usage, or one whose model was just changed,
+  returns `available=false` and `usage_percent=null` until the new model responds.
+- The server does not clamp `usage_percent`. The ring may cap its drawing at
+  100%, but its tooltip must retain the real percentage when usage is over the
+  configured context window.
+- Web refreshes the snapshot on session/reconnection lifecycle changes, model
+  switches, history compression or reset, completed turns, and exact prompt
+  token changes from structured progress. The snapshot lives outside the
+  progress store so terminal progress cleanup cannot reset an idle ring to 0%.
+- Web chat creation persists the canonical user ID to `user_chats.user_id`, and
+  tenant creation/binding copies it to `tenants.owner_user_id` while lazily
+  repairing legacy zero-owner rows. Context RPC authorization still accepts a
+  matching Web `user_chats.sender_id` for pre-canonical data, but never applies
+  that fallback across channels.
+
 ## CLI Conventions
 
 - Settings save is synchronous (`doSaveSettings` in `cli_helpers.go`) — all local I/O

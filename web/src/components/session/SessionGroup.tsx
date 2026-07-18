@@ -10,9 +10,9 @@ import { cn } from '@/lib/utils'
 import { useI18n } from '@/providers/i18n'
 import { sameSession, sessionKey } from '@/lib/session-grouping'
 import type { SessionCategory, SessionInfo, SessionSelector } from '@/types/shared'
-import type { TabManager } from '@/hooks/useTabManager'
 import { SessionItem } from './SessionItem'
 import { childrenForParent } from './session-tree'
+import { AnimatedCollapse } from '@/components/ui/animated-collapse'
 
 interface SessionGroupProps {
   groupKey: string
@@ -21,7 +21,6 @@ interface SessionGroupProps {
   starredIds: string[]
   unreadIds: string[]
   activeSession: SessionSelector | null
-  tabManager: TabManager
   onSelect: (id: string, channel: string) => void
   onToggleStar: (id: string) => void
   onRename: (session: SessionInfo) => void
@@ -35,7 +34,6 @@ export function SessionGroup({
   starredIds,
   unreadIds,
   activeSession,
-  tabManager,
   onSelect,
   onToggleStar,
   onRename,
@@ -57,12 +55,12 @@ export function SessionGroup({
         style={{ color: 'var(--text-secondary)' }}
       >
         <ChevronRight className={cn('size-3 transition-transform', open && 'rotate-90')} />
-        <span>{title}</span>
+        <span title={category === 'path' && groupKey !== '__unset__' ? groupKey : undefined}>{title}</span>
         <span className="font-normal" style={{ color: 'var(--text-muted)' }}>
           {sessions.length}
         </span>
       </button>
-      {open && (
+      <AnimatedCollapse open={open} lazy>
         <div className="flex flex-col gap-0.5">
           {sessions.map((s) => (
             <div key={sessionKey(s)} className="flex flex-col gap-0.5">
@@ -71,7 +69,6 @@ export function SessionGroup({
                 starred={starred.has(sessionKey(s))}
                 unread={unreadSet.has(sessionKey(s))}
                 active={sameSession(activeSession, s)}
-                tabManager={tabManager}
                 onSelect={(id) => onSelect(id, s.channel)}
                 onToggleStar={onToggleStar}
                 onRename={onRename}
@@ -84,8 +81,7 @@ export function SessionGroup({
                   session={sa}
                   activeSession={activeSession}
                   depth={1}
-                  tabManager={tabManager}
-                  onSelect={(id, channel) => onSelect(id, channel)}
+                    onSelect={(id, channel) => onSelect(id, channel)}
                   onRename={onRename}
                   onDelete={onDelete}
                 />
@@ -93,7 +89,7 @@ export function SessionGroup({
             </div>
           ))}
         </div>
-      )}
+      </AnimatedCollapse>
     </section>
   )
 }
@@ -102,7 +98,6 @@ function SubAgentTreeItem({
   session,
   activeSession,
   depth,
-  tabManager,
   onSelect,
   onRename,
   onDelete,
@@ -110,7 +105,6 @@ function SubAgentTreeItem({
   session: SessionInfo
   activeSession: SessionSelector | null
   depth: number
-  tabManager: TabManager
   onSelect: (id: string, channel: string) => void
   onRename: (session: SessionInfo) => void
   onDelete: (session: SessionInfo) => void
@@ -124,7 +118,6 @@ function SubAgentTreeItem({
         active={sameSession(activeSession, session)}
         isSubAgent
         depth={depth}
-        tabManager={tabManager}
         onSelect={(id) => onSelect(id, session.channel)}
         onToggleStar={() => undefined}
         onRename={onRename}
@@ -136,7 +129,6 @@ function SubAgentTreeItem({
           session={child}
           activeSession={activeSession}
           depth={depth + 1}
-          tabManager={tabManager}
           onSelect={onSelect}
           onRename={onRename}
           onDelete={onDelete}
@@ -161,8 +153,14 @@ function groupTitle(
     case 'status':
       return t(`session.status.${statusKey(key)}`)
     case 'path':
-      return key === '__web__' ? t('session.webSessions') : key
+      return key === '__unset__' ? t('session.unsetWorkPath') : basename(key)
   }
+}
+
+function basename(path: string): string {
+  if (path === '/' || /^[A-Za-z]:[\\/]$/.test(path)) return path
+  const slash = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return slash >= 0 ? path.slice(slash + 1) : path
 }
 
 function statusKey(s: string): 'running' | 'waiting' | 'pending' | 'unread' | 'idle' | 'error' {

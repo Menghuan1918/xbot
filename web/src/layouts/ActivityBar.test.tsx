@@ -13,7 +13,6 @@ vi.mock('@/hooks/useSessionStore', () => ({
   }),
 }))
 
-// Mock fetch for identities
 const mockIdentities = [
   { id: 1, channel: 'cli', channel_user_id: '张三' },
   { id: 2, channel: 'feishu', channel_user_id: '李四' },
@@ -23,7 +22,11 @@ beforeEach(() => {
   globalThis.fetch = vi.fn(() =>
     Promise.resolve({
       ok: true,
-      json: () => Promise.resolve({ identities: mockIdentities }),
+      json: () => Promise.resolve({
+        ok: true,
+        data: { identities: mockIdentities },
+        error: null,
+      }),
     } as Response),
   )
 })
@@ -35,24 +38,19 @@ vi.mock('@/components/ui/tooltip', () => ({
 }))
 
 describe('ActivityBar', () => {
-  it('renders sessions icon and settings icon', () => {
+  it('renders settings icon', () => {
     renderWithProviders(
       <ActivityBar
-        activeView="sessions"
-        onToggleView={vi.fn()}
         onOpenSettings={vi.fn()}
       />,
     )
 
-    expect(screen.getByLabelText('Sessions')).toBeInTheDocument()
     expect(screen.getByLabelText('Appearance')).toBeInTheDocument()
   })
 
   it('renders aggregate globe icon', () => {
     renderWithProviders(
       <ActivityBar
-        activeView="sessions"
-        onToggleView={vi.fn()}
         onOpenSettings={vi.fn()}
       />,
     )
@@ -63,8 +61,6 @@ describe('ActivityBar', () => {
   it('renders channel identity icons after fetch', async () => {
     renderWithProviders(
       <ActivityBar
-        activeView="sessions"
-        onToggleView={vi.fn()}
         onOpenSettings={vi.fn()}
       />,
     )
@@ -72,13 +68,15 @@ describe('ActivityBar', () => {
     // After fetch resolves, CLI and Feishu icons should appear
     expect(await screen.findByLabelText('CLI')).toBeInTheDocument()
     expect(screen.getByLabelText('Feishu')).toBeInTheDocument()
+    expect(globalThis.fetch).toHaveBeenCalledWith(
+      '/api/account/identities/list',
+      expect.objectContaining({ method: 'POST' }),
+    )
   })
 
   it('renders badge with first character of channel_user_id', async () => {
     renderWithProviders(
       <ActivityBar
-        activeView="sessions"
-        onToggleView={vi.fn()}
         onOpenSettings={vi.fn()}
       />,
     )

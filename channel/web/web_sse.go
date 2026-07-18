@@ -73,6 +73,7 @@ func (wc *WebChannel) handleSSE(w http.ResponseWriter, r *http.Request) {
 		sessionChannel: sel.Channel,
 		id:             strings.ReplaceAll(uuid.New().String(), "-", ""),
 		lastSentSeq:    lastSeq,
+		statelessSig:   make(chan struct{}, 1),
 	}
 
 	// Sequence high-water selection and subscription are one transaction: an
@@ -296,6 +297,11 @@ func (wc *WebChannel) sseWriteLoopCore(ctx context.Context, client *Client) {
 
 	for {
 		select {
+		case <-client.statelessSig:
+			client.drainStateless()
+			if closed, err := wc.catchUpSSE(ctx, client, nil); err != nil || closed {
+				return
+			}
 		case msg, ok := <-client.sendCh:
 			if !ok {
 				return

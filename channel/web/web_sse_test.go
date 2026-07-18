@@ -1076,6 +1076,7 @@ func TestSSEActiveProgressFallbackHonorsIdleAtHighWater(t *testing.T) {
 	}
 }
 
+//nolint:staticcheck // The empty critical section intentionally verifies lock acquisition without deadlock.
 func TestSSEProgressFallbackDoesNotHoldSequenceLockDuringCallback(t *testing.T) {
 	wc, _ := newTestWebChannel(t, nil)
 	chatID := "web-1"

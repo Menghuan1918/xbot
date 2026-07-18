@@ -11,10 +11,12 @@
  */
 import { memo, useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { AlertCircle, Asterisk, Check } from 'lucide-react'
+import { AlertCircle, Sparkles, Check } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import type { WebSubAgentProgress } from '@/types/shared'
+import { AnimatedCollapse } from '@/components/ui/animated-collapse'
+import { SweepText } from './SweepText'
 
 interface SubAgentProgressTreeProps {
   nodes: WebSubAgentProgress[]
@@ -72,7 +74,6 @@ function SubAgentCard({
       transition={{ duration: 0.2 }}
       className={cn(
         'relative overflow-hidden rounded-lg border border-border/50 bg-bg-secondary/50',
-        running && 'subagent-card--running',
       )}
       style={{ paddingLeft: '2px' }}
     >
@@ -86,17 +87,25 @@ function SubAgentCard({
         {/* Node header row */}
         <div className="flex min-w-0 items-center gap-1.5">
           {running ? (
-            <Asterisk className="size-3.5 shrink-0 animate-pulse" style={{ color: 'var(--accent)' }} />
+            <Sparkles className="size-3.5 shrink-0 animate-pulse" style={{ color: 'var(--accent)' }} />
           ) : done ? (
             <Check className="size-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
           ) : errored ? (
             <AlertCircle className="size-3.5 shrink-0" style={{ color: 'var(--destructive)' }} />
           ) : (
-            <Asterisk className="size-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
+            <Sparkles className="size-3.5 shrink-0" style={{ color: 'var(--text-muted)' }} />
           )}
-          <span className="shrink-0 text-xs font-medium text-text-secondary">
-            {node.role}{node.instance ? `:${node.instance}` : ''}
-          </span>
+          {running ? (
+            <SweepText
+              text={`${node.role}${node.instance ? `:${node.instance}` : ''}`}
+              color="var(--accent)"
+              className="shrink-0 text-xs font-medium"
+            />
+          ) : (
+            <span className="shrink-0 text-xs font-medium text-text-secondary">
+              {node.role}{node.instance ? `:${node.instance}` : ''}
+            </span>
+          )}
           {node.desc && (
             <span className="min-w-0 truncate text-xs text-text-muted" title={node.desc}>
               {node.desc}
@@ -105,11 +114,8 @@ function SubAgentCard({
         </div>
 
         {/* Children — hidden when collapsed */}
-        {!collapsed && hasChildren && (
-          <div
-            className="mt-1 ml-3 flex flex-col gap-1 border-l border-dashed"
-            style={{ borderColor: 'var(--border)', paddingLeft: '12px' }}
-          >
+        {hasChildren && (
+          <AnimatedCollapse open={!collapsed} lazy className="mt-1 ml-3 border-l border-dashed" contentClassName="flex flex-col gap-1 pl-3" >
             <AnimatePresence initial={true}>
               {(node.children ?? []).map((child, i) => (
                 <SubAgentChild
@@ -118,7 +124,7 @@ function SubAgentCard({
                 />
               ))}
             </AnimatePresence>
-          </div>
+          </AnimatedCollapse>
         )}
       </div>
     </motion.div>
@@ -142,17 +148,25 @@ function SubAgentChild({ node }: { node: WebSubAgentProgress }) {
     >
       <div className="flex min-w-0 items-center gap-1.5">
         {running ? (
-          <Asterisk className="size-3 shrink-0 animate-pulse" style={{ color: 'var(--accent)' }} />
+          <Sparkles className="size-3 shrink-0 animate-pulse" style={{ color: 'var(--accent)' }} />
         ) : done ? (
           <Check className="size-3 shrink-0" style={{ color: 'var(--text-muted)' }} />
         ) : errored ? (
           <AlertCircle className="size-3 shrink-0" style={{ color: 'var(--destructive)' }} />
         ) : (
-          <Asterisk className="size-3 shrink-0" style={{ color: 'var(--text-muted)' }} />
+          <Sparkles className="size-3 shrink-0" style={{ color: 'var(--text-muted)' }} />
         )}
-        <span className="shrink-0 text-xs font-medium text-text-secondary">
-          {node.role}{node.instance ? `:${node.instance}` : ''}
-        </span>
+        {running ? (
+          <SweepText
+            text={`${node.role}${node.instance ? `:${node.instance}` : ''}`}
+            color="var(--accent)"
+            className="shrink-0 text-xs font-medium"
+          />
+        ) : (
+          <span className="shrink-0 text-xs font-medium text-text-secondary">
+            {node.role}{node.instance ? `:${node.instance}` : ''}
+          </span>
+        )}
         {node.desc && (
           <span className="min-w-0 truncate text-xs text-text-muted" title={node.desc}>
             {node.desc}
@@ -160,17 +174,14 @@ function SubAgentChild({ node }: { node: WebSubAgentProgress }) {
         )}
       </div>
       {hasChildren && (
-        <div
-          className="mt-0.5 ml-3 flex flex-col gap-1 border-l border-dashed"
-          style={{ borderColor: 'var(--border)', paddingLeft: '12px' }}
-        >
+        <AnimatedCollapse open className="mt-0.5 ml-3 border-l border-dashed" contentClassName="flex flex-col gap-1 pl-3">
           {(node.children ?? []).map((child, i) => (
             <SubAgentChild
               key={`${child.role}:${child.instance ?? ''}:${i}`}
               node={child}
             />
           ))}
-        </div>
+        </AnimatedCollapse>
       )}
     </motion.div>
   )

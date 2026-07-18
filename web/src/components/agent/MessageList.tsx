@@ -2,10 +2,10 @@
  * MessageList — virtualized chat message list (Spec A §3+§4).
  *
  * Rewritten scroll logic with strict user-intent priority:
- *   - `stickyRef` controls auto-follow; once false, no content increments
+ *   - `stickToBottomRef` controls auto-follow; once false, no content increments
  *     trigger auto-scroll.
- *   - `unreadCountRef` tracks new messages while scrolled up.
- *   - Bottom "↓ N new" bubble appears when unread > 0.
+ *   - One cancellable RAF coalesces all application-level bottom scrolling.
+ *   - Bottom "↓ new content" bubble appears while follow mode is paused.
  *   - Right-side floating navigation button group (top/prev-user/next-user/bottom).
  *
  * Uses @tanstack/react-virtual with dynamic measurement. The committed list
@@ -49,7 +49,7 @@ interface MessageListProps {
 }
 
 const ESTIMATE = 120
-const BOTTOM_THRESHOLD = 48
+const EDGE_EPSILON = 2
 
 export function latestCompactBoundaryIndex(rows: Pick<ChatMessage, 'role' | 'content'>[]): number {
   let idx = -1
@@ -83,14 +83,14 @@ export function MessageList({
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
-  const unreadCountRef = useRef(0)
+  const pendingFollowRafRef = useRef<number | null>(null)
   const lastChatKeyRef = useRef<string | null | undefined>(chatKey)
   const lastRowCountRef = useRef(0)
   const lastFollowResetTokenRef = useRef(followResetToken)
   const lastTouchYRef = useRef<number | null>(null)
 
   // React state mirrors for re-rendering UI elements (bubble, nav buttons)
-  const [unreadCount, setUnreadCount] = useState(0)
+  const [hasNewContent, setHasNewContent] = useState(false)
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 0 })
   const [atTop, setAtTop] = useState(false)
   const [atBottom, setAtBottom] = useState(true)
@@ -111,14 +111,7 @@ export function MessageList({
   }, [messages, liveMessage])
   const liveId = liveMessage?.id ?? null
   const compactBoundaryIndex = useMemo(() => latestCompactBoundaryIndex(rows), [rows])
-  const followSignal = [
-    rows.length,
-    liveProgress?.phase ?? '',
-    liveProgress?.iteration ?? 0,
-    liveProgress?.streamContent ?? '',
-    liveProgress?.reasoningStreamContent ?? '',
-    liveProgress?.iterationHistory.length ?? 0,
-  ].join(':')
+  const hasFooter = footer !== null && footer !== undefined
 
   // User message indices for navigation
   const userMessageIndices = useMemo(
@@ -136,30 +129,43 @@ export function MessageList({
     getItemKey: (index) => rows[index]?.id ?? `row-${index}`,
   })
 
-  const doScrollToBottom = useCallback(() => {
-    if (rows.length > 0) {
-      virtualizer.scrollToIndex(rows.length - 1, { align: 'end' })
-    }
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [rows.length, virtualizer])
+  const cancelPendingFollow = useCallback(() => {
+    if (pendingFollowRafRef.current === null) return
+    cancelAnimationFrame(pendingFollowRafRef.current)
+    pendingFollowRafRef.current = null
+  }, [])
+
+  const pauseFollowing = useCallback(() => {
+    stickToBottomRef.current = false
+    cancelPendingFollow()
+  }, [cancelPendingFollow])
+
+  const resumeFollowing = useCallback(() => {
+    stickToBottomRef.current = true
+    setHasNewContent(false)
+  }, [])
+
+  const scheduleFollow = useCallback(() => {
+    if (!stickToBottomRef.current || pendingFollowRafRef.current !== null) return
+    pendingFollowRafRef.current = requestAnimationFrame(() => {
+      pendingFollowRafRef.current = null
+      if (!stickToBottomRef.current) return
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  }, [])
 
   // ── Scroll event handler ──────────────────────────────────────────────────
   const onScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    const nearBottom = isNearBottom(el)
-    const nearTop = el.scrollTop <= BOTTOM_THRESHOLD
+    const atEnd = isAtBottom(el)
+    const atStart = el.scrollTop <= EDGE_EPSILON
     // Only setState when values actually change to avoid unnecessary re-renders
-    setAtTop((prev) => (prev === nearTop ? prev : nearTop))
-    setAtBottom((prev) => (prev === nearBottom ? prev : nearBottom))
-    if (nearBottom) {
-      stickToBottomRef.current = true
-      if (unreadCountRef.current > 0) {
-        unreadCountRef.current = 0
-        setUnreadCount(0)
-      }
-    }
+    setAtTop((prev) => (prev === atStart ? prev : atStart))
+    setAtBottom((prev) => (prev === atEnd ? prev : atEnd))
+    if (atEnd) resumeFollowing()
+    else pauseFollowing()
     // Update visible range for nav button state — only when range changes
     const items = virtualizer.getVirtualItems()
     if (items.length > 0) {
@@ -171,63 +177,45 @@ export function MessageList({
           : { start: newStart, end: newEnd },
       )
     }
-  }, [virtualizer])
+  }, [pauseFollowing, resumeFollowing, virtualizer])
 
   // ── User scroll detection ─────────────────────────────────────────────────
   const onWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    const el = scrollRef.current
-    if (!el) return
-    // deltaY > 0 (scroll down) AND near bottom → keep sticky
-    // deltaY < 0 (scroll up) OR not near bottom → break sticky
-    if (e.deltaY > 0 && isNearBottom(el)) {
-      stickToBottomRef.current = true
-    } else {
-      stickToBottomRef.current = false
-    }
-  }, [])
+    if (e.deltaY < 0) pauseFollowing()
+  }, [pauseFollowing])
 
   const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (['ArrowUp', 'PageUp', 'Home', ' '].includes(e.key)) {
-      stickToBottomRef.current = false
+    if (e.key === 'End') {
+      resumeFollowing()
+      scheduleFollow()
       return
     }
-    if (['ArrowDown', 'PageDown', 'End'].includes(e.key)) {
-      stickToBottomRef.current = true
+    if (['ArrowUp', 'PageUp', 'Home'].includes(e.key) || (e.key === ' ' && e.shiftKey)) {
+      pauseFollowing()
     }
-  }, [])
+  }, [pauseFollowing, resumeFollowing, scheduleFollow])
 
-  // ── Auto-scroll when new content arrives ──────────────────────────────────
+  // Treat the live snapshot as the activity revision: any progress update while
+  // paused is new content, even when it does not change the rendered height.
   useEffect(() => {
-    if (stickToBottomRef.current) {
-      // Use requestAnimationFrame for smooth scroll after DOM measurement
-      const raf = requestAnimationFrame(() => doScrollToBottom())
-      return () => cancelAnimationFrame(raf)
-    }
-    // Not sticky → increment unread count if rows grew
-    const el = scrollRef.current
-    if (el && rows.length > lastRowCountRef.current) {
-      const delta = rows.length - lastRowCountRef.current
-      unreadCountRef.current += delta
-      setUnreadCount(unreadCountRef.current)
-    }
-  }, [followSignal, rows.length, doScrollToBottom])
+    if (!stickToBottomRef.current) setHasNewContent(true)
+  }, [rows.length, liveProgress, hasFooter])
 
   // ── ResizeObserver: follow bottom when sticky ─────────────────────────────
   useEffect(() => {
-    const el = scrollRef.current
+    const scrollElement = scrollRef.current
     const content = contentRef.current
-    if (!el || !content || typeof ResizeObserver === 'undefined') return
+    if (!scrollElement || !content || typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(() => {
-      if (stickToBottomRef.current) {
-        const raf = requestAnimationFrame(() => doScrollToBottom())
-        // Cleanup is handled by the next observation cycle
-        return () => cancelAnimationFrame(raf)
-      }
-      // sticky = false → do NOT scroll, do NOT reset sticky
+      if (stickToBottomRef.current) scheduleFollow()
     })
+    observer.observe(scrollElement)
     observer.observe(content)
-    return () => observer.disconnect()
-  }, [rows.length, doScrollToBottom])
+    return () => {
+      observer.disconnect()
+      cancelPendingFollow()
+    }
+  }, [cancelPendingFollow, scheduleFollow])
 
   // ── Chat switch: force scroll to bottom ────────────────────────────────────
   useLayoutEffect(() => {
@@ -239,42 +227,38 @@ export function MessageList({
     lastRowCountRef.current = rows.length
     lastFollowResetTokenRef.current = followResetToken
     if (!el || rows.length === 0 || (!chatChanged && !initialLoad && !followReset)) return
-    stickToBottomRef.current = true
-    unreadCountRef.current = 0
-    setUnreadCount(0)
-    const raf = requestAnimationFrame(() => doScrollToBottom())
-    return () => cancelAnimationFrame(raf)
-  }, [chatKey, followResetToken, rows.length, doScrollToBottom])
+    resumeFollowing()
+    scheduleFollow()
+  }, [chatKey, followResetToken, rows.length, resumeFollowing, scheduleFollow])
 
   // ── Navigation helpers ────────────────────────────────────────────────────
   const scrollToTop = useCallback(() => {
+    pauseFollowing()
     virtualizer.scrollToIndex(0, { align: 'start' })
-    const el = scrollRef.current
-    if (el) el.scrollTop = 0
-  }, [virtualizer])
+  }, [pauseFollowing, virtualizer])
 
   const scrollToPrevUser = useCallback(() => {
     const visibleStart = visibleRange.start
     const prev = userMessageIndices.filter((i) => i < visibleStart).pop()
     if (prev !== undefined) {
+      pauseFollowing()
       virtualizer.scrollToIndex(prev, { align: 'start' })
     }
-  }, [userMessageIndices, visibleRange.start, virtualizer])
+  }, [pauseFollowing, userMessageIndices, visibleRange.start, virtualizer])
 
   const scrollToNextUser = useCallback(() => {
     const visibleStart = visibleRange.start
     const next = userMessageIndices.find((i) => i > visibleStart)
     if (next !== undefined) {
+      pauseFollowing()
       virtualizer.scrollToIndex(next, { align: 'start' })
     }
-  }, [userMessageIndices, visibleRange.start, virtualizer])
+  }, [pauseFollowing, userMessageIndices, visibleRange.start, virtualizer])
 
   const scrollToBottomClick = useCallback(() => {
-    stickToBottomRef.current = true
-    unreadCountRef.current = 0
-    setUnreadCount(0)
-    doScrollToBottom()
-  }, [doScrollToBottom])
+    resumeFollowing()
+    scheduleFollow()
+  }, [resumeFollowing, scheduleFollow])
 
   // ── Nav button disabled states ────────────────────────────────────────────
   const visibleStart = visibleRange.start
@@ -293,12 +277,7 @@ export function MessageList({
           if (!touch) return
           if (lastTouchYRef.current !== null) {
             const delta = touch.clientY - lastTouchYRef.current
-            if (delta > 0) { // Finger moving down = scrolling up = user wants to read earlier content
-              stickToBottomRef.current = false
-            } else if (delta < 0 && scrollRef.current && isNearBottom(scrollRef.current)) {
-              // Finger moving up + near bottom = restore sticky
-              stickToBottomRef.current = true
-            }
+            if (delta > 0) pauseFollowing()
           }
           lastTouchYRef.current = touch.clientY
         }}
@@ -307,6 +286,7 @@ export function MessageList({
         }}
         onKeyDown={onKeyDown}
         tabIndex={0}
+        style={{ overflowAnchor: 'none' }}
         className="h-full overflow-y-auto overflow-x-hidden px-3 py-4"
       >
         {loading && rows.length === 0 && (
@@ -325,54 +305,55 @@ export function MessageList({
           </div>
         )}
 
-        {rows.length > 0 && (
-          <div
-            ref={contentRef}
-            style={{ height: `${virtualizer.getTotalSize()}px` }}
-            className="relative w-full"
-          >
-            {virtualizer.getVirtualItems().map((item) => {
-              const row = rows[item.index]
-              if (!row) return null
-              const canRewind = canRewindMessage(row, item.index, compactBoundaryIndex)
-              const isEditing = editingMessageId === row.id
-              const editDisabled = editingMessageId !== null && editingMessageId !== row.id
-              return (
-                <div
-                  key={item.key}
-                  data-index={item.index}
-                  ref={virtualizer.measureElement}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    transform: `translateY(${item.start}px)`,
-                  }}
-                  className="py-1.5"
-                >
-                  <MessageItem
-                    message={row}
-                    liveProgress={row.id === liveId ? liveProgress : null}
-                    collapseLevel={collapseLevel}
-                    mergeTools={mergeTools}
-                    onRewind={canRewind && onRewind ? (editedContent: string) => onRewind(editedContent, row) : undefined}
-                    isEditing={isEditing}
-                    onStartEdit={canRewind && onStartEdit ? () => onStartEdit(row.id) : undefined}
-                    onEndEdit={onEndEdit}
-                    editDisabled={editDisabled}
-                  />
-                </div>
-              )
-            })}
-          </div>
-        )}
-        {footer}
+        <div ref={contentRef} data-message-list-content className="w-full">
+          {rows.length > 0 && (
+            <div
+              style={{ height: `${virtualizer.getTotalSize()}px` }}
+              className="relative w-full"
+            >
+              {virtualizer.getVirtualItems().map((item) => {
+                const row = rows[item.index]
+                if (!row) return null
+                const canRewind = canRewindMessage(row, item.index, compactBoundaryIndex)
+                const isEditing = editingMessageId === row.id
+                const editDisabled = editingMessageId !== null && editingMessageId !== row.id
+                return (
+                  <div
+                    key={item.key}
+                    data-index={item.index}
+                    ref={virtualizer.measureElement}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      transform: `translateY(${item.start}px)`,
+                    }}
+                    className="py-1.5"
+                  >
+                    <MessageItem
+                      message={row}
+                      liveProgress={row.id === liveId ? liveProgress : null}
+                      collapseLevel={collapseLevel}
+                      mergeTools={mergeTools}
+                      onRewind={canRewind && onRewind ? (editedContent: string) => onRewind(editedContent, row) : undefined}
+                      isEditing={isEditing}
+                      onStartEdit={canRewind && onStartEdit ? () => onStartEdit(row.id) : undefined}
+                      onEndEdit={onEndEdit}
+                      editDisabled={editDisabled}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {footer}
+        </div>
       </div>
 
-      {/* ── Bottom "N new" unread bubble ─────────────────────────────────────── */}
+      {/* ── Bottom new-content bubble ─────────────────────────────────────────── */}
       <AnimatePresence>
-        {unreadCount > 0 && (
+        {hasNewContent && (
           <motion.button
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -381,7 +362,7 @@ export function MessageList({
             onClick={scrollToBottomClick}
             className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 rounded-full bg-accent px-3 py-1 text-xs text-accent-foreground shadow-md"
           >
-            ↓ {unreadCount} {t('agent.newContent')}
+            ↓ {t('agent.newContent')}
           </motion.button>
         )}
       </AnimatePresence>
@@ -462,6 +443,6 @@ export function canRewindMessage(
     !isCompactMarker(row)
 }
 
-function isNearBottom(el: HTMLDivElement): boolean {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_THRESHOLD
+function isAtBottom(el: HTMLDivElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= EDGE_EPSILON
 }

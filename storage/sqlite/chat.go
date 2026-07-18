@@ -185,9 +185,13 @@ func (s *ChatService) CreateChat(channel, senderID, label string) (string, error
 		}
 	}
 
-	_, err := conn.Exec(
-		"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
-		channel, senderID, chatID, label,
+	userID, err := canonicalUserID(conn, channel, senderID)
+	if err != nil {
+		return "", fmt.Errorf("resolve chat owner: %w", err)
+	}
+	_, err = conn.Exec(
+		"INSERT INTO user_chats (channel, sender_id, chat_id, label, user_id) VALUES (?, ?, ?, ?, ?)",
+		channel, senderID, chatID, label, userID,
 	)
 	if err != nil {
 		return "", fmt.Errorf("create chat: %w", err)

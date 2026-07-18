@@ -13,10 +13,9 @@
  * of user's collapse setting. "all" (complete fold) is only for completed
  * messages. A shimmer "thinking" indicator appears at the bottom during streaming.
  */
-import { memo, useState } from 'react'
+import { memo } from 'react'
 
 import { FoldedLine } from './FoldedLine'
-import { FoldedToolGroup } from './FoldedToolGroup'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { TurnBody } from './TurnBody'
 import { ShimmerThinking } from './ShimmerThinking'
@@ -36,8 +35,6 @@ interface AssistantMessageProps {
 
 function AssistantMessageImpl({ message, progress, collapseLevel, mergeTools = true }: AssistantMessageProps) {
   const { t } = useI18n()
-  const [summaryExpanded, setSummaryExpanded] = useState(false)
-
   // Source iterations: prefer committed message.iterations, fall back to live progress.
   const iterations = message.iterations?.length > 0
     ? message.iterations
@@ -58,25 +55,20 @@ function AssistantMessageImpl({ message, progress, collapseLevel, mergeTools = t
   // 'all' level + committed: fold all intermediate content (iterations' thinking/O),
   // show only the last TEXT output. Last TEXT = message.content, or fall back to
   // the last iteration's thinking when content is empty.
-  // If the last iteration has tools, those tools are also shown after the text.
   if (effectiveLevel === 'all' && !isStreaming) {
     const totalTools = iterations.reduce((sum, iter) => sum + iter.toolCount, 0)
     const showSummary = iterations.length > 0
     const lastIteration = iterations[iterations.length - 1]
     const lastText = finalContent || lastIteration?.thinking || ''
-    const lastIterationTools = lastIteration?.tools ?? []
 
     return (
-      <div className="agent-msg-card px-1">
+      <div className="px-1">
         {showSummary && (
           <FoldedLine
             title={t('agent.processed', { iterations: iterations.length, tools: totalTools })}
             defaultOpen={false}
-            onToggle={(open) => setSummaryExpanded(open)}
           >
-            {summaryExpanded && (
-              <TurnBody iterations={iterations} level="minimal" mergeTools={mergeTools} />
-            )}
+            <TurnBody iterations={iterations} level="minimal" mergeTools={mergeTools} />
           </FoldedLine>
         )}
         {lastText ? (
@@ -87,10 +79,6 @@ function AssistantMessageImpl({ message, progress, collapseLevel, mergeTools = t
           !showSummary && (
             <span className="text-sm text-text-muted">{t('agent.emptyAssistant')}</span>
           )
-        )}
-        {/* Show the last iteration's tools if they exist */}
-        {lastIterationTools.length > 0 && (
-          <FoldedToolGroup tools={lastIterationTools} level="minimal" mergeTools={mergeTools} />
         )}
         {message.displayOnly && (
           <span className="mt-1 inline-block rounded bg-bg-tertiary px-1.5 py-0.5 text-[11px] text-text-muted">
@@ -103,7 +91,7 @@ function AssistantMessageImpl({ message, progress, collapseLevel, mergeTools = t
 
   // 'minimal'/'none' level or streaming: render full TurnBody.
   return (
-    <div className="agent-msg-card px-1">
+    <div className="px-1">
       <TurnBody
         iterations={iterations}
         liveProgress={liveProgress}

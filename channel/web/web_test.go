@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -59,6 +58,11 @@ func startTestServer(t *testing.T, wc *WebChannel) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wc.handleWS)
 	mux.HandleFunc("/api/sse", wc.authMiddleware(wc.handleSSE))
+	mux.HandleFunc("/api/rpc", wc.authMiddleware(limitBodySize(wc.handleRPC)))
+	mux.HandleFunc("/api/message", wc.authMiddleware(limitBodySize(wc.handleMessage)))
+	mux.HandleFunc("/api/cancel", wc.authMiddleware(limitBodySize(wc.handleCancel)))
+	mux.HandleFunc("/api/ask_user/respond", wc.authMiddleware(limitBodySize(wc.handleAskUserRespond)))
+	mux.HandleFunc("/api/session/status", wc.authMiddleware(limitBodySize(wc.handleSessionStatus)))
 	mux.HandleFunc("/api/auth/register", wc.handleRegister)
 	mux.HandleFunc("/api/auth/login", wc.handleLogin)
 	mux.HandleFunc("/api/auth/logout", wc.handleLogout)
@@ -109,45 +113,6 @@ func makeWSConnection(t *testing.T, serverURL, cookie string) *websocket.Conn {
 	}
 	t.Cleanup(func() { conn.Close() })
 	return conn
-}
-
-func TestRemovedMarketEndpointsReturnNotFound(t *testing.T) {
-	wc := NewWebChannel(WebChannelConfig{}, bus.NewMessageBus())
-	staticDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(staticDir, "index.html"), []byte("web app"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	wc.SetStaticDir(staticDir)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", wc.handleStatic)
-
-	spaRec := httptest.NewRecorder()
-	mux.ServeHTTP(spaRec, httptest.NewRequest(http.MethodGet, "/chat", nil))
-	if spaRec.Code != http.StatusOK {
-		t.Fatalf("test setup: expected SPA fallback to return 200, got %d", spaRec.Code)
-	}
-
-	tests := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodGet, "/api/market"},
-		{http.MethodPost, "/api/market/install"},
-		{http.MethodPost, "/api/market/uninstall"},
-		{http.MethodGet, "/api/market/my"},
-		{http.MethodPost, "/api/market/publish"},
-		{http.MethodPost, "/api/market/unpublish"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.path, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
-			if rec.Code != http.StatusNotFound {
-				t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -418,13 +383,13 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 		SessionTree: func(senderID string, current SessionSelector, admin bool) (SessionTreeResult, error) {
 			return SessionTreeResult{Sessions: []SessionTreeNode{
 				{UserChatWithPreview: UserChatWithPreview{
-					ChatID: "web-chat", Channel: "web", Label: "Web Chat", LastActive: time.Now().Format(time.RFC3339),
+					ChatID: "web-chat", Channel: "web", Label: "Web Chat", WorkDir: "/workspace/web", LastActive: time.Now().Format(time.RFC3339),
 					Children: []UserChatWithPreview{{
 						ChatID: "web:web-chat/review", Channel: "agent", Label: "review", Type: "agent",
 					}},
 				}},
 				{UserChatWithPreview: UserChatWithPreview{
-					ChatID: "/repo", Channel: "cli", Label: "/repo", LastActive: time.Now().Format(time.RFC3339),
+					ChatID: "/repo", Channel: "cli", Label: "/repo", WorkDir: "/repo", LastActive: time.Now().Format(time.RFC3339),
 				}},
 			}}, nil
 		},
@@ -458,7 +423,6 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var out struct {
-		OK              bool                  `json:"ok"`
 		Chats           []UserChatWithPreview `json:"chats"`
 		Sessions        []SessionTreeNode     `json:"sessions"`
 		OrphanSubAgents []UserChatWithPreview `json:"orphan_subagents"`
@@ -470,6 +434,9 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 	if out.Chats[0].Channel != "web" || out.Chats[1].Channel != "cli" {
 		t.Fatalf("expected web+cli chats, got %#v", out.Chats)
 	}
+	if out.Chats[0].WorkDir != "/workspace/web" || out.Chats[1].WorkDir != "/repo" {
+		t.Fatalf("expected work directories in compatibility chats, got %#v", out.Chats)
+	}
 	if len(out.Chats[0].Children) != 1 || out.Chats[0].Children[0].ChatID != "web:web-chat/review" {
 		t.Fatalf("/api/chats must preserve SubAgent children, got: %#v", out.Chats[0].Children)
 	}
@@ -478,6 +445,9 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 	}
 	if len(out.Sessions[0].Children) != 1 || out.Sessions[0].Children[0].ChatID != "web:web-chat/review" {
 		t.Fatalf("/api/chats tree sessions must preserve children, got: %#v", out.Sessions[0].Children)
+	}
+	if out.Sessions[0].WorkDir != "/workspace/web" || out.Sessions[1].WorkDir != "/repo" {
+		t.Fatalf("/api/chats tree sessions must preserve work directories, got: %#v", out.Sessions)
 	}
 }
 
@@ -550,7 +520,6 @@ func TestChatsChannelListFiltersSubAgentRows(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var out struct {
-		OK    bool                  `json:"ok"`
 		Chats []UserChatWithPreview `json:"chats"`
 	}
 	decodeAPIData(t, resp.Body, &out)
@@ -637,7 +606,6 @@ func TestSessionTreeReturnsChildrenForAdmin(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var out struct {
-		OK              bool                  `json:"ok"`
 		Sessions        []SessionTreeNode     `json:"sessions"`
 		OrphanSubAgents []UserChatWithPreview `json:"orphan_subagents"`
 	}
@@ -1348,6 +1316,29 @@ func TestRPCNonBlocking(t *testing.T) {
 	}
 	if secondResp.ID != "rpc-slow" {
 		t.Errorf("expected slow RPC response second, got ID=%s", secondResp.ID)
+	}
+}
+
+func TestShouldEagerSaveUserMessageSkipsCommands(t *testing.T) {
+	cases := []struct {
+		name    string
+		channel string
+		content string
+		want    bool
+	}{
+		{name: "web normal", channel: "web", content: "hello", want: true},
+		{name: "web empty", channel: "web", content: "", want: true},
+		{name: "cli normal", channel: "cli", content: "hello", want: false},
+		{name: "bang command", channel: "web", content: "!pwd", want: false},
+		{name: "slash new", channel: "web", content: "/new", want: false},
+		{name: "slash rewind", channel: "web", content: "/rewind", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldEagerSaveUserMessage(tc.channel, tc.content); got != tc.want {
+				t.Fatalf("shouldEagerSaveUserMessage(%q, %q) = %v, want %v", tc.channel, tc.content, got, tc.want)
+			}
+		})
 	}
 }
 

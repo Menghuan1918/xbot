@@ -6,7 +6,7 @@
  * renderers ToolCallBlock and ReasoningBlock.
  */
 import { describe, expect, it } from 'vitest'
-import { screen, fireEvent } from '@testing-library/react'
+import { screen, fireEvent, waitFor } from '@testing-library/react'
 import '@testing-library/jest-dom'
 
 import { renderWithProviders } from '@/test-utils'
@@ -16,7 +16,7 @@ import { IterationGroup } from '@/components/agent/IterationHistory'
 import { ReasoningBlock } from '@/components/agent/ReasoningBlock'
 import { ToolCallBlock } from '@/components/agent/ToolCallBlock'
 import { getToolIcon } from '@/components/agent/toolIcons'
-import { Terminal, FileText, Search, Asterisk, Wrench } from 'lucide-react'
+import { Terminal, FileText, Search, Sparkles, Wrench } from 'lucide-react'
 import type { WebIteration, WebToolProgress } from '@/types/shared'
 
 /** Helper: build a WebToolProgress with defaults. */
@@ -47,23 +47,27 @@ function makeIteration(overrides: Partial<WebIteration> = {}): WebIteration {
 }
 
 describe('FoldedLine', () => {
-  it('renders the title with ▸ and toggles open class on click', () => {
+  it('renders the title with ▸ and toggles open class on click', async () => {
     const { container } = renderWithProviders(
       <FoldedLine title="T1">
         <span>content</span>
       </FoldedLine>,
     )
-    // Always renders ▸ (rotation handled by CSS class), content always in DOM
+    // Collapsed lazy content is mounted only after first expansion.
     expect(screen.getByText('▸')).toBeInTheDocument()
-    // Content is always in the DOM (CSS grid controls visibility)
-    expect(screen.getByText('content')).toBeInTheDocument()
-    // Fold container does not have 'open' class when collapsed
-    expect(container.querySelector('.fold-container')).not.toHaveClass('open')
+    expect(screen.queryByText('content')).not.toBeInTheDocument()
+    expect(container.querySelector('.fold-container')).toBeNull()
 
     // Click to expand
     fireEvent.click(screen.getByRole('button'))
-    expect(container.querySelector('.fold-container')).toHaveClass('open')
+    expect(screen.getByText('content')).toBeInTheDocument()
+    await waitFor(() => expect(container.querySelector('.fold-container')).toHaveClass('open'))
     expect(container.querySelector('.fold-arrow')).toHaveClass('open')
+
+    // Collapse again: the mounted content remains available for smooth reversal.
+    fireEvent.click(screen.getByRole('button'))
+    await waitFor(() => expect(container.querySelector('.fold-container')).not.toHaveClass('open'))
+    expect(screen.getByText('content')).toBeInTheDocument()
   })
 
   it('starts open when defaultOpen=true', () => {
@@ -133,16 +137,16 @@ describe('FoldedToolGroup', () => {
       makeTool({ name: 'Grep', label: 'Grep' }),
     ]
     const { container } = renderWithProviders(<FoldedToolGroup tools={tools} level="minimal" />)
-    // Merged line now shows icons + tool count text (no "Name · Name" join)
-    // The tool-group count text should be present
-    expect(screen.getByText(/2.*call/)).toBeInTheDocument()
-    // Icons should be rendered as SVG elements in the merged row
-    const icons = container.querySelectorAll('.tool-icon-group svg')
+    // Merged row shows icons in the button (title row); AnimatedCollapse also renders
+    // icons in the hidden expanded content, so check the button specifically.
+    const button = container.querySelector('button[aria-expanded="false"]')
+    expect(button).not.toBeNull()
+    const icons = button!.querySelectorAll('.tool-icon-single')
     expect(icons.length).toBe(2)
 
     // Expand the merged line
     fireEvent.click(screen.getByRole('button'))
-    // Individual tool FoldedLines should now be visible — tool names appear in expanded rows
+    // Individual tool cards should now be visible — tool names appear in expanded cards
     expect(screen.getAllByText('Read').length).toBeGreaterThan(0)
     expect(screen.getAllByText('Grep').length).toBeGreaterThan(0)
   })
@@ -155,9 +159,9 @@ describe('FoldedToolGroup', () => {
     const { container } = renderWithProviders(
       <FoldedToolGroup tools={tools} level="none" />,
     )
-    // Each tool is its own FoldedLine (two toggle buttons)
-    const buttons = container.querySelectorAll('button[aria-expanded]')
-    expect(buttons.length).toBe(2)
+    // At 'none' level, each tool renders as an independent ToolCard (no toggle button)
+    const cards = container.querySelectorAll('.tool-icon-single')
+    expect(cards.length).toBe(2)
   })
 
   it('renders single tool as independent FoldedLine regardless of level', () => {
@@ -205,9 +209,7 @@ describe('IterationGroup', () => {
     )
     // Reasoning folded line shows character count as title
     expect(screen.getByText(/Thought.*characters/)).toBeInTheDocument()
-    // Reasoning content is always in the DOM but hidden via CSS (grid 0fr).
-    // The fold-container should NOT have the 'open' class when collapsed.
-    expect(container.querySelector('.fold-container')).not.toHaveClass('open')
+    expect(container.querySelector('.fold-container')).toBeNull()
   })
 
   it('renders O (text output) always visible', () => {
@@ -229,9 +231,9 @@ describe('IterationGroup', () => {
       toolCount: 2,
     })
     const { container } = renderWithProviders(<IterationGroup iteration={iter} level="minimal" />)
-    // Merged line shows tool count text + icons
-    expect(screen.getByText(/2.*call/)).toBeInTheDocument()
-    const icons = container.querySelectorAll('.tool-icon-group svg')
+    // Merged line shows icons in the button (fold-container also renders hidden icons)
+    const button = container.querySelector('button[aria-expanded="false"]')
+    const icons = button!.querySelectorAll('.tool-icon-single')
     expect(icons.length).toBe(2)
   })
 
@@ -256,8 +258,8 @@ describe('getToolIcon', () => {
     expect(getToolIcon('Grep')).toBe(Search)
   })
 
-  it('returns Asterisk for SubAgent', () => {
-    expect(getToolIcon('SubAgent')).toBe(Asterisk)
+  it('returns Sparkles for SubAgent', () => {
+    expect(getToolIcon('SubAgent')).toBe(Sparkles)
   })
 
   it('returns Wrench for unmapped tool names', () => {

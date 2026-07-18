@@ -26,9 +26,7 @@ describe('SubAgentProgressTree', () => {
       { role: 'explore', instance: 'search-1', status: 'running', desc: 'searching codebase' },
     ]
     const { container } = render(<SubAgentProgressTree nodes={nodes} />)
-    // The card should have the running class
-    const card = container.querySelector('.subagent-card--running')
-    expect(card).not.toBeNull()
+    expect(container.querySelector('.sweep-text')).not.toBeNull()
     // Should show role:instance text
     expect(container.textContent).toContain('explore:search-1')
     expect(container.textContent).toContain('searching codebase')

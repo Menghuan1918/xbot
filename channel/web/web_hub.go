@@ -395,6 +395,8 @@ func (h *Hub) broadcastSessionState(channel, chatID string, msg protocol.WSMessa
 
 // broadcastToCLI sends a message only to CLI-type clients.
 // Used for session state events that are only relevant to remote CLI sessions.
+//
+//nolint:unused // Kept for compatibility; Web sessions use channel-aware SSE broadcasting.
 func (h *Hub) broadcastToCLI(msg protocol.WSMessage) {
 	h.mu.RLock()
 	var clients []*Client

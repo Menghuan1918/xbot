@@ -28,6 +28,7 @@ import { useWSConnection } from '@/hooks/useWSConnection'
 import { postAPI } from '@/lib/api'
 import { groupSessions, parseAgentChatID, sameSession, sessionKey, sortSessions } from '@/lib/session-grouping'
 import { clearSessionCaches, loadSessionTreeCache, saveSessionTreeCache, sessionCacheKey } from '@/lib/webCache'
+import { rememberRecentWorkDir } from '@/lib/recent-workdirs'
 import type { SessionCategory, SessionEvent, SessionInfo, SessionSelector, SessionStatus } from '@/types/shared'
 import type { AskUserPrompt, AskUserQuestion } from '@/types/agent'
 
@@ -174,6 +175,7 @@ interface RawChat {
   chat_id: string
   channel?: string
   label: string
+  work_dir?: string
   last_active: string
   preview?: string
   is_current?: boolean
@@ -219,6 +221,7 @@ function toSessionInfo(c: RawChat, channel: string, children?: SessionInfo[]): S
     chatID: isAgent ? fullKey : c.chat_id,
     channel: rawChannel,
     label,
+    workDir: c.work_dir || undefined,
     lastActive: c.last_active,
     preview: c.preview || '',
     status: c.status || (c.running ? 'running' : 'idle'),
@@ -733,6 +736,31 @@ function removeSubAgentLifecycle(nodes: SessionInfo[], role: string | undefined,
   return changed ? next : nodes
 }
 
+function addRunningSessionKeys(nodes: SessionInfo[], target: Set<string>): void {
+  for (const node of nodes) {
+    if (node.running || node.status === 'running' || node.status === 'pending') {
+      target.add(sessionKey(node))
+    }
+    addRunningSessionKeys(node.children || [], target)
+  }
+}
+
+function applyPersistedUnreadStatuses(
+  nodes: SessionInfo[],
+  unread: Set<string>,
+  active: SessionSelector | null,
+): SessionInfo[] {
+  let changed = false
+  const next = nodes.map((node) => {
+    const children = node.children ? applyPersistedUnreadStatuses(node.children, unread, active) : node.children
+    const shouldMark = unread.has(sessionKey(node)) && !sameSession(node, active) && !node.running && node.status === 'idle'
+    const updated = shouldMark ? { ...node, status: 'unread' as const } : node
+    if (updated !== node || children !== node.children) changed = true
+    return children === node.children && updated === node ? node : { ...updated, children }
+  })
+  return changed ? next : nodes
+}
+
 export function useSessionStoreImpl(): SessionStore {
   const ws = useWSConnection()
   const [cachedTree] = useState(loadSessionTreeCache)
@@ -746,6 +774,8 @@ export function useSessionStoreImpl(): SessionStore {
   const [starredIds, setStarredIds] = useState<string[]>(loadStarred)
   const [category, setCategoryState] = useState<SessionCategory>(loadCategory)
   const [unreadIds, setUnreadIds] = useState<string[]>(loadUnread)
+  const unreadIdsRef = useRef(unreadIds)
+  unreadIdsRef.current = unreadIds
   const [activeChannel, setActiveChannelState] = useState<string | null>(loadActiveChannel)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -761,6 +791,7 @@ export function useSessionStoreImpl(): SessionStore {
   const switchSeqRef = useRef(0)
   const subAgentRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const transientSubAgentsRef = useRef(new Map<string, TransientSubAgent>())
+  const executingSessionsRef = useRef(new Set<string>())
 
   const refresh = useCallback(async () => {
     const seq = ++refreshSeqRef.current
@@ -772,8 +803,10 @@ export function useSessionStoreImpl(): SessionStore {
       if (seq !== refreshSeqRef.current) return
       const normalized = normalizeCanonicalSessionTree(data.sessions || [], data.orphan_subagents || [])
       const { mainSessions, agents } = mergeTransientSubAgents(normalized.mainSessions, transientSubAgentsRef.current)
+      if (initialLoad) addRunningSessionKeys(mainSessions, executingSessionsRef.current)
       const { sessions: markedSessions, active } = reconcileActiveSession(mainSessions, activeSessionRef.current)
-      const cachedSessions = mergeStatus(sessionsRef.current, markedSessions)
+      const withUnread = applyPersistedUnreadStatuses(markedSessions, new Set(unreadIdsRef.current), active)
+      const cachedSessions = mergeStatus(sessionsRef.current, withUnread)
       sessionsRef.current = cachedSessions
       saveSessionTreeCache(cachedSessions, agents)
       setSessions((prev) => (sameSessionList(prev, cachedSessions) ? prev : cachedSessions))
@@ -866,7 +899,8 @@ export function useSessionStoreImpl(): SessionStore {
   }, [])
 
   const setStatus = useCallback((selector: SessionSelector, status: SessionStatus) => {
-    setSessions((prev) => updateSessionTree(prev, selector, (s) => ({ ...s, status })))
+    const running = status === 'running' || status === 'pending'
+    setSessions((prev) => updateSessionTree(prev, selector, (s) => ({ ...s, status, running })))
   }, [])
 
   const applySubAgentLifecycle = useCallback((ev: SessionEvent, running: boolean) => {
@@ -892,6 +926,7 @@ export function useSessionStoreImpl(): SessionStore {
   const createSession = useCallback(
     async (label?: string, workPath?: string): Promise<string | null> => {
       let chatID: string
+      let appliedWorkDir: string | undefined
       try {
         const data = await postAPI<CreateChatResponse>('/api/chats/create', { label: label ?? '' })
         if (!data.chat_id) return null
@@ -902,6 +937,8 @@ export function useSessionStoreImpl(): SessionStore {
       if (workPath) {
         try {
           await setCwd({ channel: DEFAULT_CHANNEL, chatID }, workPath)
+          rememberRecentWorkDir(workPath)
+          appliedWorkDir = workPath
         } catch (e) {
           // Non-fatal: session was created, but CWD is the default.
           // Toast so the user knows their workPath didn't take effect.
@@ -922,6 +959,7 @@ export function useSessionStoreImpl(): SessionStore {
           preview: '',
           status: 'idle',
           isCurrent: true,
+          workDir: appliedWorkDir,
         },
         ...prev.map((s) => ({ ...s, isCurrent: false })),
       ])
@@ -978,6 +1016,7 @@ export function useSessionStoreImpl(): SessionStore {
       clearSessionCaches(sessionCacheKey(channel, id))
       const deleted = sessionsRef.current.find((s) => sameSession(s, selector))
       setSessions((prev) => prev.filter((s) => !sameSession(s, selector)))
+      markRead(sessionKey(selector))
       setStarredIds((prev) => {
         const key = deleted ? sessionKey(deleted) : id
         if (!prev.includes(key)) return prev
@@ -991,7 +1030,7 @@ export function useSessionStoreImpl(): SessionStore {
       void refresh()
       return true
     },
-    [activeSession, refresh],
+    [activeSession, refresh, markRead],
   )
 
   /* ── SSE-driven status inference ── */
@@ -1016,19 +1055,23 @@ export function useSessionStoreImpl(): SessionStore {
       }
       switch (ev.action) {
         case 'busy':
+          executingSessionsRef.current.add(sessionKey(selector))
           setStatus(selector, 'running')
           break
-        case 'idle':
-          // If this session is not the active one, mark as unread + add to
-          // unreadSet so the sidebar shows the highlight bar.
-          if (activeSessionRef.current && !sameSession(activeSessionRef.current, selector)) {
+        case 'idle': {
+          const wasExecuting = executingSessionsRef.current.delete(sessionKey(selector))
+          if (wasExecuting && !sameSession(activeSessionRef.current, selector)) {
             setStatus(selector, 'unread')
             addUnread(sessionKey(selector))
           } else {
             setStatus(selector, 'idle')
           }
+          void refresh()
           break
+        }
         case 'deleted':
+          executingSessionsRef.current.delete(sessionKey(selector))
+          markRead(sessionKey(selector))
           setSessions((prev) => prev.filter((s) => !sameSession(s, selector)))
           break
         case 'renamed':
@@ -1045,7 +1088,7 @@ export function useSessionStoreImpl(): SessionStore {
       }
       void refresh()
     })
-  }, [ws, setStatus, applySubAgentLifecycle, refresh, addUnread])
+  }, [ws, setStatus, applySubAgentLifecycle, refresh, addUnread, markRead])
 
   useEffect(() => {
     return () => {
@@ -1162,6 +1205,7 @@ function sameSessionNode(a: SessionInfo, b: SessionInfo): boolean {
     a.chatID !== b.chatID ||
     a.channel !== b.channel ||
     a.label !== b.label ||
+    a.workDir !== b.workDir ||
     a.lastActive !== b.lastActive ||
     a.preview !== b.preview ||
     a.status !== b.status ||
