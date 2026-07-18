@@ -405,11 +405,6 @@
 /* KaTeX display blocks stay scrollable on narrow widths. */
 .markdown-body .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.25em 0; }
 
-/* content-visibility: skip rendering offscreen Agent message cards (Spec 4 perf).
- * The virtualizer already keeps the DOM light, but this protects the live
- * streaming card and any non-virtualized fallback from layout thrash. */
-.agent-msg-card { content-visibility: auto; contain-intrinsic-size: auto 96px; }
-
 /* ── Dockview theme override — follow app light/dark palette ────────────────
  * dockview's `.dockview-theme-vs` hardcodes dark background variables (#1e1e1e
  * etc), ignoring the app's `.dark` class. We override these CSS variables to
@@ -441,27 +436,37 @@
   border-top: none !important;
   border-bottom: none !important;
   background-color: transparent !important;
+  box-sizing: border-box;
+  flex: 0 1 180px !important;
+  max-width: 180px !important;
+  min-width: 48px !important;
+  padding: 0 !important;
+}
+
+/* The React tab renderer is the only layout child; keep long titles from
+ * forcing Dockview's outer tab wider than the VSCode-like cap. */
+.dockview-theme-vs .dv-tab > * {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* ── Shimmer color variable — defined for both themes ────────────────────── */
 :root { --shimmer-color: rgba(0, 0, 0, 0.06); }
 .dark { --shimmer-color: rgba(255, 255, 255, 0.08); }
 
-/* ── "正在思考" character sweep effect ───────────────────────────────────────
- * Each character lights up in sequence, then the whole text dims and
- * repeats — a bold, borderless loading indicator.
- */
-@keyframes thinkingCharSweep {
+/* ── Shared live-status sweep ──────────────────────────────────────────────── */
+@keyframes sweepText {
   0%, 100% { opacity: 0.3; }
-  50%      { opacity: 1; }
+  50% { opacity: 1; }
 }
-.thinking-shimmer {
-  font-size: 0.875rem;
-  letter-spacing: 0.05em;
-}
-.thinking-char {
+.sweep-text {
   display: inline-block;
-  animation: thinkingCharSweep 1.5s ease-in-out infinite;
+  color: var(--sweep-color);
+}
+.sweep-text-char {
+  display: inline-block;
+  animation: sweepText 1.5s ease-in-out infinite;
 }
 
 /* ── Fold/expand animation ───────────────────────────────────────────────────
@@ -472,7 +477,7 @@
 .fold-container {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 0.2s ease-out, opacity 0.2s ease-out;
+  transition: grid-template-rows 180ms ease-out, opacity 180ms ease-out;
   opacity: 0;
 }
 .fold-container.open {
@@ -491,4 +496,160 @@
 }
 .fold-arrow.open {
   transform: rotate(90deg);
+}
+
+@keyframes collapsibleOpen {
+  from { height: 0; opacity: 0; }
+  to { height: var(--radix-collapsible-content-height); opacity: 1; }
+}
+@keyframes collapsibleClose {
+  from { height: var(--radix-collapsible-content-height); opacity: 1; }
+  to { height: 0; opacity: 0; }
+}
+.collapsible-motion {
+  overflow: hidden;
+}
+.collapsible-motion[data-state='open'] {
+  animation: collapsibleOpen 180ms ease-out;
+}
+.collapsible-motion[data-state='closed'] {
+  animation: collapsibleClose 180ms ease-out;
+}
+
+/* ── Tool status dot (Spec A §5) ──────────────────────────────────────────────
+ * Status dots replace the old emoji status icons (◑ ✓ ✗ ◒) with CSS-animated
+ * colored dots. Each status has its own animation:
+ *   generating: blue blink (args still being generated)
+ *   running:    blue pulse (tool is executing)
+ *   done:       gray static dot
+ *   error:      red static dot
+ *   pending:    transparent/very-light dot
+ *
+ * Color transitions between states are smooth via `transition: background-color`.
+ */
+
+.tool-status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background-color 0.3s ease-out;
+}
+
+.tool-status-running {
+  background-color: var(--status-running);
+  animation: pulse-blue 1.5s ease-in-out infinite;
+}
+
+.tool-status-generating {
+  background-color: var(--status-running);
+  opacity: 0.5;
+  animation: blink-blue 1s ease-in-out infinite;
+}
+
+.tool-status-done {
+  background-color: var(--text-muted);
+}
+
+.tool-status-error {
+  background-color: var(--status-error);
+}
+
+.tool-status-pending {
+  background-color: transparent;
+  border: 1px solid var(--text-muted);
+}
+
+@keyframes pulse-blue {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(0.85);
+  }
+}
+
+@keyframes blink-blue {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+/* ── Tool icon styles (Spec B §7) ────────────────────────────────────────────
+ * Lucide icons for tool calls. Compact (14–16px), muted color, flex-shrink:0.
+ */
+
+.tool-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* Icon group in merged row: icons side by side with minimal gap */
+.tool-icon-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tool-icon-group .tool-icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* Single-tool title row: slightly larger icon */
+.tool-icon-single {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+}
+
+/* ── Inline typewriter cursor (Spec A §2) ─────────────────────────────────
+ * The cursor follows the last character of streaming Markdown output.
+ * Using ::after on the last child of .streaming-content ensures the cursor
+ * appears at the end of the rendered content, not on a separate line.
+ */
+@keyframes streaming-cursor-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+.streaming-content > :last-child::after {
+  content: '';
+  display: inline-block;
+  vertical-align: text-bottom;
+  height: 1.1em;
+  width: 2px;
+  margin-left: 2px;
+  background-color: var(--accent);
+  animation: streaming-cursor-blink 1s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sweep-text-char,
+  .streaming-content > :last-child::after,
+  .tool-status-running,
+  .tool-status-generating,
+  .animate-spin,
+  .animate-pulse {
+    animation: none !important;
+  }
+
+  .sweep-text-char {
+    opacity: 1;
+  }
+
+  .fold-container,
+  .fold-arrow,
+  .collapsible-motion {
+    animation: none !important;
+    transition: none !important;
+  }
 }

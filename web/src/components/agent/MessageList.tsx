@@ -1,20 +1,21 @@
 /**
- * MessageList — virtualized chat message list (Spec 4 §3.4).
+ * MessageList — virtualized chat message list (Spec A §3+§4).
  *
- * Uses @tanstack/react-virtual with dynamic measurement so 100+ messages scroll
- * smoothly. The committed list comes from useChatMessages; a single live
- * streaming message (from useProgressStream) is appended as the last row when
- * present, so streamed text renders inline without touching committed state.
+ * Rewritten scroll logic with strict user-intent priority:
+ *   - `stickToBottomRef` controls auto-follow; once false, no content increments
+ *     trigger auto-scroll.
+ *   - One cancellable RAF coalesces all application-level bottom scrolling.
+ *   - Bottom "↓ new content" bubble appears while follow mode is paused.
+ *   - Right-side floating navigation button group (top/prev-user/next-user/bottom).
  *
- * Performance tactics (mirroring opencode session-ui, adapted to React):
- *   - stable item keys (message id) so the virtualizer reuses DOM across renders
- *   - measureElement for dynamic heights; estimateSize is a cheap fallback
- *   - React.memo'd MessageItem keeps mounted rows from re-rendering on scroll
- *   - the streaming row is the only one receiving liveProgress; others get null
- *   - auto-scroll to bottom while following; stops if the user scrolls up
+ * Uses @tanstack/react-virtual with dynamic measurement. The committed list
+ * comes from useChatMessages; a single live streaming message is appended as
+ * the last row when present.
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import { AnimatePresence, motion } from 'framer-motion'
+import { ChevronDown, ChevronUp, ChevronsDown, ChevronsUp } from 'lucide-react'
 
 import { MessageItem } from './MessageItem'
 import { useI18n } from '@/providers/i18n'
@@ -31,15 +32,24 @@ interface MessageListProps {
   /** Live progress snapshot handed only to the streaming row. */
   liveProgress: LiveProgress | null
   collapseLevel: 'all' | 'minimal' | 'none'
+  /** Whether to merge consecutive tools. Default true. */
+  mergeTools?: boolean
   loading: boolean
   error: string | null
-  onRewind?: (message: ChatMessage) => void
+  /** Rewind callback — receives the edited content string. */
+  onRewind?: (editedContent: string, originalMessage: ChatMessage) => void
+  /** ID of the message currently being edited, or null. */
+  editingMessageId?: string | null
+  /** Callback to start editing a message. */
+  onStartEdit?: (messageId: string) => void
+  /** Callback to end editing (cancel or confirm). */
+  onEndEdit?: () => void
   /** Optional footer rendered after the message list (e.g. AskUserPanel). */
   footer?: ReactNode
 }
 
 const ESTIMATE = 120
-const BOTTOM_THRESHOLD = 80
+const EDGE_EPSILON = 2
 
 export function latestCompactBoundaryIndex(rows: Pick<ChatMessage, 'role' | 'content'>[]): number {
   let idx = -1
@@ -61,20 +71,30 @@ export function MessageList({
   liveMessage,
   liveProgress,
   collapseLevel,
+  mergeTools = true,
   loading,
   error,
   onRewind,
+  editingMessageId,
+  onStartEdit,
+  onEndEdit,
   footer,
 }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const stickToBottomRef = useRef(true)
-  const userScrolledUpRef = useRef(false)
+  const pendingFollowRafRef = useRef<number | null>(null)
   const lastChatKeyRef = useRef<string | null | undefined>(chatKey)
   const lastRowCountRef = useRef(0)
   const lastFollowResetTokenRef = useRef(followResetToken)
-  const userScrollIntentRef = useRef(false)
-  const pendingScrollCancelRef = useRef<(() => void) | null>(null)
+  const lastTouchYRef = useRef<number | null>(null)
+
+  // React state mirrors for re-rendering UI elements (bubble, nav buttons)
+  const [hasNewContent, setHasNewContent] = useState(false)
+  const [visibleRange, setVisibleRange] = useState({ start: 0, end: 0 })
+  const [atTop, setAtTop] = useState(false)
+  const [atBottom, setAtBottom] = useState(true)
+
   const { t } = useI18n()
 
   // Combined row list: committed messages + optional live streaming row.
@@ -91,18 +111,15 @@ export function MessageList({
   }, [messages, liveMessage])
   const liveId = liveMessage?.id ?? null
   const compactBoundaryIndex = useMemo(() => latestCompactBoundaryIndex(rows), [rows])
-  const followSignal = [
-    rows.length,
-    liveProgress?.phase ?? '',
-    liveProgress?.iteration ?? 0,
-    liveProgress?.streamContent ?? '',
-    liveProgress?.reasoningStreamContent ?? '',
-    liveProgress?.iterationHistory.length ?? 0,
-  ].join(':')
+  const hasFooter = footer !== null && footer !== undefined
 
-  // TanStack Virtual returns imperative functions; React Compiler deliberately
-  // skips memoizing this hook. Safe to disable here (the virtualizer is meant
-  // to be recreated per render anyway, keyed on rows.length).
+  // User message indices for navigation
+  const userMessageIndices = useMemo(
+    () => rows.map((r, i) => (r.role === 'user' ? i : -1)).filter((i) => i >= 0),
+    [rows],
+  )
+
+  // TanStack Virtual
   // eslint-disable-next-line react-hooks/incompatible-library
   const virtualizer = useVirtualizer({
     count: rows.length,
@@ -112,90 +129,95 @@ export function MessageList({
     getItemKey: (index) => rows[index]?.id ?? `row-${index}`,
   })
 
-  // Track whether the viewport sits near the bottom to drive auto-scroll.
+  const cancelPendingFollow = useCallback(() => {
+    if (pendingFollowRafRef.current === null) return
+    cancelAnimationFrame(pendingFollowRafRef.current)
+    pendingFollowRafRef.current = null
+  }, [])
+
+  const pauseFollowing = useCallback(() => {
+    stickToBottomRef.current = false
+    cancelPendingFollow()
+  }, [cancelPendingFollow])
+
+  const resumeFollowing = useCallback(() => {
+    stickToBottomRef.current = true
+    setHasNewContent(false)
+  }, [])
+
+  const scheduleFollow = useCallback(() => {
+    if (!stickToBottomRef.current || pendingFollowRafRef.current !== null) return
+    pendingFollowRafRef.current = requestAnimationFrame(() => {
+      pendingFollowRafRef.current = null
+      if (!stickToBottomRef.current) return
+      const el = scrollRef.current
+      if (el) el.scrollTop = el.scrollHeight
+    })
+  }, [])
+
+  // ── Scroll event handler ──────────────────────────────────────────────────
   const onScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    const atBottom = isNearBottom(el)
-    if (atBottom) {
-      stickToBottomRef.current = true
-      userScrolledUpRef.current = false
-      userScrollIntentRef.current = false
-      return
+    const atEnd = isAtBottom(el)
+    const atStart = el.scrollTop <= EDGE_EPSILON
+    // Only setState when values actually change to avoid unnecessary re-renders
+    setAtTop((prev) => (prev === atStart ? prev : atStart))
+    setAtBottom((prev) => (prev === atEnd ? prev : atEnd))
+    if (atEnd) resumeFollowing()
+    else pauseFollowing()
+    // Update visible range for nav button state — only when range changes
+    const items = virtualizer.getVirtualItems()
+    if (items.length > 0) {
+      const newStart = items[0].index
+      const newEnd = items[items.length - 1].index
+      setVisibleRange((prev) =>
+        prev && prev.start === newStart && prev.end === newEnd
+          ? prev
+          : { start: newStart, end: newEnd },
+      )
     }
-    if (userScrollIntentRef.current) {
-      stickToBottomRef.current = false
-      userScrolledUpRef.current = true
-    }
-  }, [])
+  }, [pauseFollowing, resumeFollowing, virtualizer])
 
-  const markUserScrollIntent = useCallback(() => {
-    pendingScrollCancelRef.current?.()
-    pendingScrollCancelRef.current = null
-    userScrollIntentRef.current = true
-    stickToBottomRef.current = false
-    userScrolledUpRef.current = true
-  }, [])
-
-  const markFollowIntent = useCallback(() => {
-    userScrollIntentRef.current = false
-    stickToBottomRef.current = true
-    userScrolledUpRef.current = false
-  }, [])
-
-  const scheduleFollowScroll = useCallback((el: HTMLDivElement) => {
-    pendingScrollCancelRef.current?.()
-    const cancel = scheduleScrollToBottom(el, () => {
-      if (rows.length > 0) virtualizer.scrollToIndex(rows.length - 1, { align: 'end' })
-    }, () => !userScrolledUpRef.current && stickToBottomRef.current)
-    pendingScrollCancelRef.current = cancel
-    return cancel
-  }, [rows.length, virtualizer])
-
+  // ── User scroll detection ─────────────────────────────────────────────────
   const onWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    const el = scrollRef.current
-    if (!el) return
-    if (e.deltaY < 0 || !isNearBottom(el)) {
-      markUserScrollIntent()
-    }
-  }, [markUserScrollIntent])
+    if (e.deltaY < 0) pauseFollowing()
+  }, [pauseFollowing])
 
   const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
-    if (['ArrowUp', 'PageUp', 'Home', ' '].includes(e.key)) {
-      markUserScrollIntent()
+    if (e.key === 'End') {
+      resumeFollowing()
+      scheduleFollow()
       return
     }
-    if (['ArrowDown', 'PageDown', 'End'].includes(e.key)) {
-      markFollowIntent()
+    if (['ArrowUp', 'PageUp', 'Home'].includes(e.key) || (e.key === ' ' && e.shiftKey)) {
+      pauseFollowing()
     }
-  }, [markFollowIntent, markUserScrollIntent])
+  }, [pauseFollowing, resumeFollowing, scheduleFollow])
 
-  // Auto-scroll to bottom when the list grows and we're following.
+  // Treat the live snapshot as the activity revision: any progress update while
+  // paused is new content, even when it does not change the rendered height.
   useEffect(() => {
-    const el = scrollRef.current
-    if (!el || userScrolledUpRef.current || !stickToBottomRef.current) return
-    // Defer to next frame so newly measured rows have settled.
-    return scheduleFollowScroll(el)
-  }, [followSignal, rows.length, scheduleFollowScroll])
+    if (!stickToBottomRef.current) setHasNewContent(true)
+  }, [rows.length, liveProgress, hasFooter])
 
-  // Keep following when already at bottom and late content measurement changes
-  // row heights, e.g. images, KaTeX, or highlighted code blocks.
+  // ── ResizeObserver: follow bottom when sticky ─────────────────────────────
   useEffect(() => {
-    const el = scrollRef.current
+    const scrollElement = scrollRef.current
     const content = contentRef.current
-    if (!el || !content || typeof ResizeObserver === 'undefined') return
+    if (!scrollElement || !content || typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(() => {
-      if (userScrolledUpRef.current || !stickToBottomRef.current) return
-      if (!userScrolledUpRef.current && stickToBottomRef.current) {
-        scheduleFollowScroll(el)
-      }
+      if (stickToBottomRef.current) scheduleFollow()
     })
+    observer.observe(scrollElement)
     observer.observe(content)
-    return () => observer.disconnect()
-  }, [rows.length, scheduleFollowScroll])
+    return () => {
+      observer.disconnect()
+      cancelPendingFollow()
+    }
+  }, [cancelPendingFollow, scheduleFollow])
 
-  // Chat switches should land at the latest message. Same-chat message growth is
-  // handled by follow mode above so user scroll intent is preserved.
+  // ── Chat switch: force scroll to bottom ────────────────────────────────────
   useLayoutEffect(() => {
     const el = scrollRef.current
     const chatChanged = lastChatKeyRef.current !== chatKey
@@ -205,18 +227,43 @@ export function MessageList({
     lastRowCountRef.current = rows.length
     lastFollowResetTokenRef.current = followResetToken
     if (!el || rows.length === 0 || (!chatChanged && !initialLoad && !followReset)) return
-    stickToBottomRef.current = true
-    userScrolledUpRef.current = false
-    userScrollIntentRef.current = false
-    return scheduleFollowScroll(el)
-  }, [chatKey, followResetToken, rows.length, scheduleFollowScroll])
+    resumeFollowing()
+    scheduleFollow()
+  }, [chatKey, followResetToken, rows.length, resumeFollowing, scheduleFollow])
 
-  useEffect(() => {
-    return () => {
-      pendingScrollCancelRef.current?.()
-      pendingScrollCancelRef.current = null
+  // ── Navigation helpers ────────────────────────────────────────────────────
+  const scrollToTop = useCallback(() => {
+    pauseFollowing()
+    virtualizer.scrollToIndex(0, { align: 'start' })
+  }, [pauseFollowing, virtualizer])
+
+  const scrollToPrevUser = useCallback(() => {
+    const visibleStart = visibleRange.start
+    const prev = userMessageIndices.filter((i) => i < visibleStart).pop()
+    if (prev !== undefined) {
+      pauseFollowing()
+      virtualizer.scrollToIndex(prev, { align: 'start' })
     }
-  }, [])
+  }, [pauseFollowing, userMessageIndices, visibleRange.start, virtualizer])
+
+  const scrollToNextUser = useCallback(() => {
+    const visibleStart = visibleRange.start
+    const next = userMessageIndices.find((i) => i > visibleStart)
+    if (next !== undefined) {
+      pauseFollowing()
+      virtualizer.scrollToIndex(next, { align: 'start' })
+    }
+  }, [pauseFollowing, userMessageIndices, visibleRange.start, virtualizer])
+
+  const scrollToBottomClick = useCallback(() => {
+    resumeFollowing()
+    scheduleFollow()
+  }, [resumeFollowing, scheduleFollow])
+
+  // ── Nav button disabled states ────────────────────────────────────────────
+  const visibleStart = visibleRange.start
+  const hasPrevUser = userMessageIndices.some((i) => i < visibleStart)
+  const hasNextUser = userMessageIndices.some((i) => i > visibleStart)
 
   return (
     <div className="relative min-h-0 flex-1 overflow-hidden">
@@ -224,9 +271,22 @@ export function MessageList({
         ref={scrollRef}
         onScroll={onScroll}
         onWheel={onWheel}
-        onTouchStart={markUserScrollIntent}
+        onTouchMove={(e) => {
+          // Only break sticky on upward touch scroll (finger moving down = content scrolling up = user reading up)
+          const touch = e.touches[0]
+          if (!touch) return
+          if (lastTouchYRef.current !== null) {
+            const delta = touch.clientY - lastTouchYRef.current
+            if (delta > 0) pauseFollowing()
+          }
+          lastTouchYRef.current = touch.clientY
+        }}
+        onTouchStart={() => {
+          lastTouchYRef.current = null
+        }}
         onKeyDown={onKeyDown}
         tabIndex={0}
+        style={{ overflowAnchor: 'none' }}
         className="h-full overflow-y-auto overflow-x-hidden px-3 py-4"
       >
         {loading && rows.length === 0 && (
@@ -245,43 +305,129 @@ export function MessageList({
           </div>
         )}
 
-        {rows.length > 0 && (
-          <div
-            ref={contentRef}
-            style={{ height: `${virtualizer.getTotalSize()}px` }}
-            className="relative w-full"
+        <div ref={contentRef} data-message-list-content className="w-full">
+          {rows.length > 0 && (
+            <div
+              style={{ height: `${virtualizer.getTotalSize()}px` }}
+              className="relative w-full"
+            >
+              {virtualizer.getVirtualItems().map((item) => {
+                const row = rows[item.index]
+                if (!row) return null
+                const canRewind = canRewindMessage(row, item.index, compactBoundaryIndex)
+                const isEditing = editingMessageId === row.id
+                const editDisabled = editingMessageId !== null && editingMessageId !== row.id
+                return (
+                  <div
+                    key={item.key}
+                    data-index={item.index}
+                    ref={virtualizer.measureElement}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      transform: `translateY(${item.start}px)`,
+                    }}
+                    className="py-1.5"
+                  >
+                    <MessageItem
+                      message={row}
+                      liveProgress={row.id === liveId ? liveProgress : null}
+                      collapseLevel={collapseLevel}
+                      mergeTools={mergeTools}
+                      onRewind={canRewind && onRewind ? (editedContent: string) => onRewind(editedContent, row) : undefined}
+                      isEditing={isEditing}
+                      onStartEdit={canRewind && onStartEdit ? () => onStartEdit(row.id) : undefined}
+                      onEndEdit={onEndEdit}
+                      editDisabled={editDisabled}
+                    />
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {footer}
+        </div>
+      </div>
+
+      {/* ── Bottom new-content bubble ─────────────────────────────────────────── */}
+      <AnimatePresence>
+        {hasNewContent && (
+          <motion.button
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 10 }}
+            transition={{ duration: 0.2 }}
+            onClick={scrollToBottomClick}
+            className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 rounded-full bg-accent px-3 py-1 text-xs text-accent-foreground shadow-md"
           >
-            {virtualizer.getVirtualItems().map((item) => {
-              const row = rows[item.index]
-              if (!row) return null
-              return (
-                <div
-                  key={item.key}
-                  data-index={item.index}
-                  ref={virtualizer.measureElement}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    transform: `translateY(${item.start}px)`,
-                  }}
-                  className="py-1.5"
-                >
-                  <MessageItem
-                    message={row}
-                    liveProgress={row.id === liveId ? liveProgress : null}
-                    collapseLevel={collapseLevel}
-                    onRewind={canRewindMessage(row, item.index, compactBoundaryIndex) ? onRewind : undefined}
-                  />
-                </div>
-              )
-            })}
-          </div>
+            ↓ {t('agent.newContent')}
+          </motion.button>
         )}
-        {footer}
+      </AnimatePresence>
+
+      {/* ── Right-side floating navigation button group ─────────────────────── */}
+      <div className="absolute right-2 top-1/2 -translate-y-1/2 z-10 flex flex-col gap-1">
+        <NavButton
+          onClick={scrollToTop}
+          disabled={atTop || rows.length === 0}
+          title={t('agent.navToTop')}
+        >
+          <ChevronsUp className="size-4" />
+        </NavButton>
+        <NavButton
+          onClick={scrollToPrevUser}
+          disabled={!hasPrevUser}
+          title={t('agent.navPrevUser')}
+        >
+          <ChevronUp className="size-4" />
+        </NavButton>
+        <NavButton
+          onClick={scrollToNextUser}
+          disabled={!hasNextUser}
+          title={t('agent.navNextUser')}
+        >
+          <ChevronDown className="size-4" />
+        </NavButton>
+        <NavButton
+          onClick={scrollToBottomClick}
+          disabled={atBottom || rows.length === 0}
+          title={t('agent.navToBottom')}
+        >
+          <ChevronsDown className="size-4" />
+        </NavButton>
       </div>
     </div>
+  )
+}
+
+// ── Navigation button ────────────────────────────────────────────────────────
+function NavButton({
+  onClick,
+  disabled,
+  title,
+  children,
+}: {
+  onClick: () => void
+  disabled?: boolean
+  title: string
+  children: ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`flex size-8 items-center justify-center rounded-md border border-border/50 bg-bg-secondary/80 backdrop-blur transition-all duration-150 ${
+        disabled
+          ? 'cursor-default opacity-20'
+          : 'cursor-pointer opacity-40 hover:bg-accent/10 hover:text-accent hover:opacity-100'
+      }`}
+    >
+      {children}
+    </button>
   )
 }
 
@@ -297,36 +443,6 @@ export function canRewindMessage(
     !isCompactMarker(row)
 }
 
-function scrollToBottom(el: HTMLDivElement): void {
-  el.scrollTop = el.scrollHeight
-}
-
-function isNearBottom(el: HTMLDivElement): boolean {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_THRESHOLD
-}
-
-function scheduleScrollToBottom(
-  el: HTMLDivElement,
-  scrollVirtualizer?: () => void,
-  shouldRun?: () => boolean,
-): () => void {
-  let cancelled = false
-  const run = () => {
-    if (cancelled) return
-    if (shouldRun && !shouldRun()) return
-    scrollVirtualizer?.()
-    scrollToBottom(el)
-  }
-  run()
-  // RAF for post-measurement settle, plus short timeouts for async
-  // rendering (syntax highlighting, image loading) that completes after RAF.
-  const raf = requestAnimationFrame(run)
-  const t1 = window.setTimeout(run, 150)
-  const t2 = window.setTimeout(run, 400)
-  return () => {
-    cancelled = true
-    cancelAnimationFrame(raf)
-    clearTimeout(t1)
-    clearTimeout(t2)
-  }
+function isAtBottom(el: HTMLDivElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= EDGE_EPSILON
 }

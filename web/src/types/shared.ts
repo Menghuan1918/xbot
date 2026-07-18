@@ -9,7 +9,7 @@ export type Theme = 'dark' | 'light'
 export type Locale = 'zh-CN' | 'en'
 export type TabType = 'agent' | 'file' | 'terminal' | 'background'
 export type SessionStatus = 'running' | 'waiting_input' | 'pending' | 'idle' | 'unread' | 'error'
-export type SessionCategory = 'all' | 'time' | 'status'
+export type SessionCategory = 'time' | 'status' | 'path'
 
 /**
  * How Agent intermediate steps (tool calls / reasoning) are shown.
@@ -60,6 +60,8 @@ export interface SessionInfo {
   chatID: string
   channel: string
   label: string
+  /** Current persisted working directory returned by the session API. */
+  workDir?: string
   lastActive: string
   preview: string
   status: SessionStatus
@@ -95,13 +97,25 @@ export interface SessionSelector {
   chatID: string
 }
 
+/** Authoritative context-usage snapshot returned by get_context_usage. */
+export interface ContextUsage {
+  available: boolean
+  prompt_tokens: number
+  completion_tokens: number
+  max_context_tokens: number
+  usage_percent: number | null
+  model: string
+  subscription_id: string
+  subscription_name: string
+}
+
 /* ---------------------------------------------------------------------------
- * WebSocket message envelopes (mirrors Go protocol/ws.go).
+ * Realtime event envelopes shared by SSE and the Go transport protocol.
  * Added in Spec 2 (布局壳 + Dockview); these are pure data shapes shared by
  * the WS connection layer (useWSConnection) and consumers.
  * ------------------------------------------------------------------------- */
 
-/** Server → Client message types (see protocol/ws.go MsgType*). */
+/** Server → Web SSE event types. */
 export type WSMessageType =
   | 'text'
   | 'progress_structured'
@@ -110,13 +124,14 @@ export type WSMessageType =
   | 'ask_user'
   | 'session'
   | 'user_echo'
+  | 'inject_user'
   | 'card'
   | 'plugin_widgets'
   | 'runner_status'
   | 'sync_progress'
   | '__pong__'
 
-/** Client → Server message types (see protocol/ws.go MsgType*). */
+/** Client operations mapped to REST endpoints by the connection adapter. */
 export type WSClientMessageType =
   | 'message'
   | 'cancel'
@@ -213,6 +228,7 @@ export interface ProgressEvent {
 export interface SessionEvent {
   channel?: string
   chat_id?: string
+  session_key?: string
   action?: string
   label?: string
   role?: string
@@ -230,7 +246,7 @@ export interface SessionEvent {
  * ------------------------------------------------------------------------- */
 
 /** Tool call progress status. */
-export type ToolStatus = 'generating' | 'running' | 'done' | 'error'
+export type ToolStatus = 'pending' | 'generating' | 'running' | 'done' | 'error'
 
 /** TODO item — mirrors Go protocol.TodoItem (json: id, text, done). */
 export interface TodoItem {
@@ -243,6 +259,7 @@ export interface TodoItem {
 export interface WebSubAgentProgress {
   role: string
   instance?: string
+  sessionKey?: string
   status: string
   desc?: string
   children?: WebSubAgentProgress[]
@@ -295,6 +312,15 @@ export interface ProgressSnapshot {
   todos: TodoItem[]
   /** Structured SubAgent progress tree, carried forward while active. */
   subAgents: WebSubAgentProgress[]
+  /** Token usage from the last LLM API response (mirrors protocol.TokenUsage). */
+  tokenUsage: TokenUsageInfo | null
+}
+
+/** Token usage info (mirrors protocol.TokenUsage). */
+export interface TokenUsageInfo {
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
 }
 
 /** Empty snapshot — the idle state. */
@@ -312,6 +338,7 @@ export const EMPTY_PROGRESS_SNAPSHOT: ProgressSnapshot = {
   lastReasoning: '',
   todos: [],
   subAgents: [],
+  tokenUsage: null,
 }
 
 /** Chat message role. */
@@ -333,4 +360,50 @@ export interface ChatMessage {
   displayOnly?: boolean
   /** True when loaded from persisted backend history, not an optimistic echo. */
   persisted?: boolean
+  /** SSE sequence for live committed rows, used to reconcile them with history. */
+  eventSeq?: number
+  /** Stable logical-send ID used to correlate optimistic rows with echoes. */
+  requestID?: string
+}
+
+/* ---------------------------------------------------------------------------
+ * LLM Subscription & Model Management types (Spec D — LLM 配置设计).
+ *
+ * These mirror the Go protocol.Subscription / protocol.PerModelConfig /
+ * protocol.ModelEntry structs (serverapp/rpc_table.go + protocol/events.go).
+ * JSON field names match the backend serialization exactly.
+ * ------------------------------------------------------------------------- */
+
+/** Per-model override config (mirrors protocol.PerModelConfig). */
+export interface PerModelConfig {
+  max_output_tokens: number
+  max_context: number
+  api_type: string
+  enabled: boolean
+}
+
+/** LLM subscription (mirrors protocol.Subscription JSON serialization). */
+export interface Subscription {
+  id: string
+  name: string
+  provider: string
+  base_url: string
+  api_key: string
+  model: string
+  max_output_tokens: number
+  max_context: number
+  api_type: string
+  thinking_mode: string
+  per_model_configs: Record<string, PerModelConfig>
+  active: boolean
+  enabled: boolean
+  is_system: boolean
+}
+
+/** Selectable model paired with its subscription (mirrors protocol.ModelEntry). */
+export interface ModelEntry {
+  sub_id: string
+  sub_name: string
+  model: string
+  status: 'normal' | 'offline' | 'disabled'
 }

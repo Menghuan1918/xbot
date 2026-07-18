@@ -4,21 +4,25 @@
  * 3-level collapse model:
  *   'all'     — only a summary fold line + final O. Click the summary to
  *               expand into a TurnBody rendered at 'minimal' level.
- *   'minimal' — full TurnBody: T folded, C merged, O shown.
+ *               If the last iteration has tools, those tools are also shown
+ *               after the final text.
+ *   'minimal' — full TurnBody: T folded, C merged (mergeTools), O shown.
  *   'none'    — full TurnBody: T folded, C individual, O shown.
  *
  * Streaming state: when `message.isPartial`, force 'minimal' level regardless
  * of user's collapse setting. "all" (complete fold) is only for completed
  * messages. A shimmer "thinking" indicator appears at the bottom during streaming.
  */
-import { memo, useState } from 'react'
+import { memo } from 'react'
 
 import { FoldedLine } from './FoldedLine'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { TurnBody } from './TurnBody'
 import { ShimmerThinking } from './ShimmerThinking'
+import { isToolInProgress } from './statusVisual'
 import { useI18n } from '@/providers/i18n'
 import type { ChatMessage, CollapseLevel, LiveProgress } from '@/types/agent'
+import type { WebIteration } from '@/types/shared'
 
 interface AssistantMessageProps {
   message: ChatMessage
@@ -26,12 +30,12 @@ interface AssistantMessageProps {
   progress?: LiveProgress | null
   /** Collapse level controlling default-open for iteration history. */
   collapseLevel: CollapseLevel
+  /** Whether to merge consecutive tools. Default true. */
+  mergeTools?: boolean
 }
 
-function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMessageProps) {
+function AssistantMessageImpl({ message, progress, collapseLevel, mergeTools = true }: AssistantMessageProps) {
   const { t } = useI18n()
-  const [summaryExpanded, setSummaryExpanded] = useState(false)
-
   // Source iterations: prefer committed message.iterations, fall back to live progress.
   const iterations = message.iterations?.length > 0
     ? message.iterations
@@ -42,7 +46,13 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
   // 'all' (complete fold) is only for completed messages.
   const effectiveLevel: CollapseLevel = isStreaming ? 'minimal' : collapseLevel
   const liveProgress = isStreaming ? progress : null
-  const showThinkingIndicator = isStreaming && !progress?.streamContent
+  const hasReasoning = Boolean(progress?.reasoningStreamContent || progress?.lastReasoning)
+  const hasToolInProgress = progress
+    ? progress.streamingTools.some((tool) => isToolInProgress(tool.status)) ||
+      progress.activeTools.some((tool) => isToolInProgress(tool.status)) ||
+      progress.completedTools.some((tool) => isToolInProgress(tool.status))
+    : false
+  const showThinkingIndicator = isStreaming && !progress?.streamContent && !hasReasoning && !hasToolInProgress
   const emptyResponse = isEmptyResponseContent(message.content)
   const finalContent = !emptyResponse && shouldRenderFinalContent(message.content, iterations)
     ? message.content
@@ -59,16 +69,13 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
     const lastText = finalContent || lastIteration?.thinking || ''
 
     return (
-      <div className="agent-msg-card px-1">
+      <div className="px-1">
         {showSummary && (
           <FoldedLine
             title={t('agent.processed', { iterations: iterations.length, tools: totalTools })}
             defaultOpen={false}
-            onToggle={(open) => setSummaryExpanded(open)}
           >
-            {summaryExpanded && (
-              <TurnBody iterations={iterations} level="minimal" />
-            )}
+            <TurnBody iterations={iterations} level="minimal" mergeTools={mergeTools} />
           </FoldedLine>
         )}
         {lastText ? (
@@ -91,11 +98,12 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
 
   // 'minimal'/'none' level or streaming: render full TurnBody.
   return (
-    <div className="agent-msg-card px-1">
+    <div className="px-1">
       <TurnBody
         iterations={iterations}
         liveProgress={liveProgress}
         level={effectiveLevel}
+        mergeTools={mergeTools}
       />
       {/* Final O: for committed messages, render message.content after iterations.
           For streaming, the streamContent is already in LiveIteration. */}
@@ -119,7 +127,7 @@ function AssistantMessageImpl({ message, progress, collapseLevel }: AssistantMes
   )
 }
 
-function shouldRenderFinalContent(content: string, iterations: ChatMessage['iterations']): boolean {
+function shouldRenderFinalContent(content: string, iterations: WebIteration[]): boolean {
   const finalText = content.trim()
   if (!finalText) return false
   return !iterations.some((iter) => (iter.thinking || '').trim() === finalText)

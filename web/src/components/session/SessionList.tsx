@@ -44,6 +44,7 @@ interface SessionListProps {
   sortedSessions: SessionInfo[]
   category: SessionCategory
   starredIds: string[]
+  unreadIds: string[]
   activeSession: SessionSelector | null
   search: string
   /** Deprecated compatibility prop. The canonical source is sessions[].children. */
@@ -62,6 +63,7 @@ export function SessionList({
   sortedSessions,
   category,
   starredIds,
+  unreadIds,
   activeSession,
   search,
   onSelect,
@@ -146,6 +148,7 @@ export function SessionList({
                 <SessionItem
                   session={s}
                   starred={starredIds.includes(sessionKey(s))}
+                  unread={unreadIds.includes(sessionKey(s))}
                   active={sameSession(activeSession, s)}
                   onSelect={() => selectChannel(s)}
                   onToggleStar={onToggleStar}
@@ -177,6 +180,7 @@ export function SessionList({
                 category={category}
                 sessions={g.sessions}
                 starredIds={starredIds}
+                unreadIds={unreadIds}
                 activeSession={activeSession}
                 onSelect={onSelect}
                 onToggleStar={onToggleStar}
@@ -268,6 +272,7 @@ function SubAgentSearchItem({
       <SessionItem
         session={session}
         starred={false}
+        unread={false}
         active={sameSession(activeSession, session)}
         isSubAgent
         depth={depth}

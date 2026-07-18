@@ -56,10 +56,11 @@ describe('SessionList', () => {
     renderWithProviders(
       <SessionList
         sessions={[parent]}
-        groups={[{ key: 'all', sessions: [parent] }]}
+        groups={[{ key: 'today', sessions: [parent] }]}
         sortedSessions={[parent]}
-        category="all"
+        category="time"
         starredIds={[]}
+        unreadIds={[]}
         activeSession={null}
         search=""
         subAgents={[]}
@@ -96,10 +97,11 @@ describe('SessionList', () => {
     renderWithProviders(
       <SessionList
         sessions={[parent]}
-        groups={[{ key: 'all', sessions: [parent] }]}
+        groups={[{ key: 'today', sessions: [parent] }]}
         sortedSessions={[parent]}
-        category="all"
+        category="time"
         starredIds={[]}
+        unreadIds={[]}
         activeSession={null}
         search="code-review"
         subAgents={[]}
@@ -143,10 +145,11 @@ describe('SessionList', () => {
     renderWithProviders(
       <SessionList
         sessions={[parent]}
-        groups={[{ key: 'all', sessions: [parent] }]}
+        groups={[{ key: 'today', sessions: [parent] }]}
         sortedSessions={[parent]}
-        category="all"
+        category="time"
         starredIds={[]}
+        unreadIds={[]}
         activeSession={null}
         search=""
         subAgents={[]}
@@ -182,10 +185,11 @@ describe('SessionList', () => {
     renderWithProviders(
       <SessionList
         sessions={[parent]}
-        groups={[{ key: 'all', sessions: [parent] }]}
+        groups={[{ key: 'today', sessions: [parent] }]}
         sortedSessions={[parent]}
-        category="all"
+        category="time"
         starredIds={[]}
+        unreadIds={[]}
         activeSession={null}
         search=""
         subAgents={[]}
@@ -221,10 +225,11 @@ describe('SessionList', () => {
     renderWithProviders(
       <SessionList
         sessions={[parent]}
-        groups={[{ key: 'all', sessions: [parent] }]}
+        groups={[{ key: 'today', sessions: [parent] }]}
         sortedSessions={[parent]}
-        category="all"
+        category="time"
         starredIds={[]}
+        unreadIds={[]}
         activeSession={null}
         search=""
         subAgents={[]}
@@ -268,10 +273,11 @@ describe('SessionList', () => {
     renderWithProviders(
       <SessionList
         sessions={[parent]}
-        groups={[{ key: 'all', sessions: [parent] }]}
+        groups={[{ key: 'today', sessions: [parent] }]}
         sortedSessions={[parent]}
-        category="all"
+        category="time"
         starredIds={[]}
+        unreadIds={[]}
         activeSession={null}
         search="fix"
         subAgents={[]}

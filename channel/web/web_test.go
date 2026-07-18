@@ -57,6 +57,12 @@ func startTestServer(t *testing.T, wc *WebChannel) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", wc.handleWS)
+	mux.HandleFunc("/api/sse", wc.authMiddleware(wc.handleSSE))
+	mux.HandleFunc("/api/rpc", wc.authMiddleware(limitBodySize(wc.handleRPC)))
+	mux.HandleFunc("/api/message", wc.authMiddleware(limitBodySize(wc.handleMessage)))
+	mux.HandleFunc("/api/cancel", wc.authMiddleware(limitBodySize(wc.handleCancel)))
+	mux.HandleFunc("/api/ask_user/respond", wc.authMiddleware(limitBodySize(wc.handleAskUserRespond)))
+	mux.HandleFunc("/api/session/status", wc.authMiddleware(limitBodySize(wc.handleSessionStatus)))
 	mux.HandleFunc("/api/auth/register", wc.handleRegister)
 	mux.HandleFunc("/api/auth/login", wc.handleLogin)
 	mux.HandleFunc("/api/auth/logout", wc.handleLogout)
@@ -126,13 +132,13 @@ func TestRegisterAndLogin(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("expected 201, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 
 	var regResp authResponse
-	json.NewDecoder(resp.Body).Decode(&regResp)
-	if !regResp.OK || regResp.UserID == 0 {
+	envelope := decodeAPIData(t, resp.Body, &regResp)
+	if !envelope.OK || regResp.UserID == 0 {
 		t.Fatal("registration failed")
 	}
 
@@ -275,7 +281,7 @@ func TestWebSocketAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	regResp.Body.Close()
-	if regResp.StatusCode != http.StatusCreated {
+	if regResp.StatusCode != http.StatusOK {
 		t.Fatalf("register failed: %d", regResp.StatusCode)
 	}
 
@@ -377,13 +383,13 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 		SessionTree: func(senderID string, current SessionSelector, admin bool) (SessionTreeResult, error) {
 			return SessionTreeResult{Sessions: []SessionTreeNode{
 				{UserChatWithPreview: UserChatWithPreview{
-					ChatID: "web-chat", Channel: "web", Label: "Web Chat", LastActive: time.Now().Format(time.RFC3339),
+					ChatID: "web-chat", Channel: "web", Label: "Web Chat", WorkDir: "/workspace/web", LastActive: time.Now().Format(time.RFC3339),
 					Children: []UserChatWithPreview{{
 						ChatID: "web:web-chat/review", Channel: "agent", Label: "review", Type: "agent",
 					}},
 				}},
 				{UserChatWithPreview: UserChatWithPreview{
-					ChatID: "/repo", Channel: "cli", Label: "/repo", LastActive: time.Now().Format(time.RFC3339),
+					ChatID: "/repo", Channel: "cli", Label: "/repo", WorkDir: "/repo", LastActive: time.Now().Format(time.RFC3339),
 				}},
 			}}, nil
 		},
@@ -417,19 +423,19 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var out struct {
-		OK              bool                  `json:"ok"`
 		Chats           []UserChatWithPreview `json:"chats"`
 		Sessions        []SessionTreeNode     `json:"sessions"`
 		OrphanSubAgents []UserChatWithPreview `json:"orphan_subagents"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeAPIData(t, resp.Body, &out)
 	if len(out.Chats) != 2 {
 		t.Fatalf("expected 2 chats, got %d: %#v", len(out.Chats), out.Chats)
 	}
 	if out.Chats[0].Channel != "web" || out.Chats[1].Channel != "cli" {
 		t.Fatalf("expected web+cli chats, got %#v", out.Chats)
+	}
+	if out.Chats[0].WorkDir != "/workspace/web" || out.Chats[1].WorkDir != "/repo" {
+		t.Fatalf("expected work directories in compatibility chats, got %#v", out.Chats)
 	}
 	if len(out.Chats[0].Children) != 1 || out.Chats[0].Children[0].ChatID != "web:web-chat/review" {
 		t.Fatalf("/api/chats must preserve SubAgent children, got: %#v", out.Chats[0].Children)
@@ -439,6 +445,9 @@ func TestChatsDefaultListAggregatesWebAndCLIForAdmin(t *testing.T) {
 	}
 	if len(out.Sessions[0].Children) != 1 || out.Sessions[0].Children[0].ChatID != "web:web-chat/review" {
 		t.Fatalf("/api/chats tree sessions must preserve children, got: %#v", out.Sessions[0].Children)
+	}
+	if out.Sessions[0].WorkDir != "/workspace/web" || out.Sessions[1].WorkDir != "/repo" {
+		t.Fatalf("/api/chats tree sessions must preserve work directories, got: %#v", out.Sessions)
 	}
 }
 
@@ -511,12 +520,9 @@ func TestChatsChannelListFiltersSubAgentRows(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var out struct {
-		OK    bool                  `json:"ok"`
 		Chats []UserChatWithPreview `json:"chats"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeAPIData(t, resp.Body, &out)
 	if len(out.Chats) != 1 {
 		t.Fatalf("expected only main chat row, got %#v", out.Chats)
 	}
@@ -600,13 +606,10 @@ func TestSessionTreeReturnsChildrenForAdmin(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
 	var out struct {
-		OK              bool                  `json:"ok"`
 		Sessions        []SessionTreeNode     `json:"sessions"`
 		OrphanSubAgents []UserChatWithPreview `json:"orphan_subagents"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		t.Fatal(err)
-	}
+	decodeAPIData(t, resp.Body, &out)
 	if len(out.Sessions) != 1 || len(out.Sessions[0].Children) != 1 {
 		t.Fatalf("expected one parent with one child, got %#v", out.Sessions)
 	}
@@ -1250,7 +1253,7 @@ func TestRPCNonBlocking(t *testing.T) {
 	server := startTestServer(t, wc)
 
 	// Custom RPCHandler: "slow_method" sleeps 300ms, "fast_method" returns immediately.
-	wc.SetRPCHandler(func(method string, params json.RawMessage, senderID string) (json.RawMessage, error) {
+	wc.SetRPCHandler(func(method string, params json.RawMessage, identity RPCIdentity) (json.RawMessage, error) {
 		switch method {
 		case "slow_method":
 			time.Sleep(300 * time.Millisecond)

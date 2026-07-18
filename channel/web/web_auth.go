@@ -243,7 +243,7 @@ func (wc *WebChannel) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, _ := result.LastInsertId()
-	writeJSON(w, http.StatusCreated, authResponse{OK: true, UserID: int(id)})
+	writeJSON(w, http.StatusOK, authResponse{OK: true, UserID: int(id)})
 }
 
 // handleLogin handles POST /api/auth/login
@@ -371,8 +371,8 @@ func (wc *WebChannel) validateSession(r *http.Request) *sessionInfo {
 // authMiddleware wraps a handler with session validation
 func (wc *WebChannel) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Limit request body size for all non-GET requests to prevent memory abuse
-		if r.Method != http.MethodGet {
+		// Uploads enforce their own 10MB limit in handleFileUpload.
+		if r.Method != http.MethodGet && r.URL.Path != "/api/files/upload" {
 			r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 		}
 		si := wc.validateSession(r)
@@ -388,6 +388,7 @@ func (wc *WebChannel) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		}
 		ctx := contextWithSenderID(r.Context(), senderID)
 		ctx = contextWithUserID(ctx, si.userID)
+		ctx = context.WithValue(ctx, webSessionKey, *si)
 		next(w, r.WithContext(ctx))
 	}
 }
@@ -632,8 +633,9 @@ func (wc *WebChannel) isSecureCookie() bool {
 type contextKey string
 
 const (
-	senderIDKey contextKey = "sender_id"
-	userIDKey   contextKey = "user_id"
+	senderIDKey   contextKey = "sender_id"
+	userIDKey     contextKey = "user_id"
+	webSessionKey contextKey = "web_session"
 )
 
 func contextWithSenderID(ctx context.Context, id string) context.Context {
@@ -658,14 +660,19 @@ func userIDFromContext(ctx context.Context) int {
 	return 0
 }
 
+func webSessionFromContext(ctx context.Context) (sessionInfo, bool) {
+	si, ok := ctx.Value(webSessionKey).(sessionInfo)
+	return si, ok
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// handleAuthConfig handles GET /api/auth/config
+// handleAuthConfig handles POST /api/auth/config.
 // Returns public auth configuration (e.g., invite-only mode).
 func (wc *WebChannel) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodPost {
 		jsonErrorResponse(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -674,16 +681,94 @@ func (wc *WebChannel) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type apiError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type apiResponse struct {
+	OK    bool      `json:"ok"`
+	Data  any       `json:"data"`
+	Error *apiError `json:"error"`
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
+	payload := normalizeAPIValue(v)
+	if status >= http.StatusBadRequest {
+		message := http.StatusText(status)
+		if fields, ok := payload.(map[string]any); ok {
+			if value, ok := fields["error"].(string); ok && value != "" {
+				message = value
+			} else if value, ok := fields["message"].(string); ok && value != "" {
+				message = value
+			}
+		}
+		writeAPIResponse(w, status, apiResponse{
+			OK:    false,
+			Data:  nil,
+			Error: &apiError{Code: apiErrorCode(status), Message: message},
+		})
+		return
+	}
+
+	if fields, ok := payload.(map[string]any); ok {
+		delete(fields, "ok")
+		delete(fields, "error")
+	}
+	writeAPIResponse(w, status, apiResponse{OK: true, Data: payload, Error: nil})
+}
+
+func writeAPIResponse(w http.ResponseWriter, status int, response apiResponse) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func normalizeAPIValue(v any) any {
+	if v == nil {
+		return map[string]any{}
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return map[string]any{}
+	}
+	var normalized any
+	if err := json.Unmarshal(raw, &normalized); err != nil {
+		return map[string]any{}
+	}
+	return normalized
+}
+
+func apiErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case http.StatusNotImplemented:
+		return "not_implemented"
+	case http.StatusServiceUnavailable:
+		return "service_unavailable"
+	default:
+		return "internal_error"
+	}
 }
 
 // jsonErrorResponse writes a JSON-formatted error response (for consistent API errors).
 func jsonErrorResponse(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]any{
-		"ok":    false,
-		"error": message,
+	writeAPIResponse(w, status, apiResponse{
+		OK:    false,
+		Data:  nil,
+		Error: &apiError{Code: apiErrorCode(status), Message: message},
 	})
 }

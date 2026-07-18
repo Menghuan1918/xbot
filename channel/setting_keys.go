@@ -85,7 +85,7 @@ var AllSettingDefs = []SettingDef{
 	// chat dialog and as a Select in /settings. Per-model overrides still exist
 	// in subscription_models but are not user-editable. It is NOT subscription-
 	// scoped anymore ("订阅是订阅，模型是模型").
-	{Key: "thinking_mode", Scope: ScopeUser, Source: SourceUserDB, Permission: PermPersistent, AIDescription: "Enable thinking/reasoning mode (global toggle)", ValidValues: "|enabled|disabled", DefaultValue: ""},
+	{Key: "thinking_mode", Scope: ScopeUser, Source: SourceUserDB, Permission: PermPersistent, AIDescription: "Set thinking/reasoning effort (global)", ValidValues: "|think|think-max|disabled|enabled", DefaultValue: ""},
 	{Key: "api_type", Scope: ScopeSubscription, Source: SourceLLMConfig, Permission: PermPersistent, AIDescription: "OpenAI API endpoint type: chat_completions or responses", ValidValues: "chat_completions|responses", DefaultValue: "chat_completions"},
 
 	// ── Model tier settings (user_settings DB, consumed by agent tier resolver) ──

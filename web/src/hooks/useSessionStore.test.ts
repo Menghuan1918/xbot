@@ -2,24 +2,65 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { normalizeCanonicalSessionTree, normalizeSessionTree, useSessionStoreImpl } from './useSessionStore'
+import {
+  lastSeqCache,
+  messagesCache,
+  progressSnapshotCache,
+  SESSION_TREE_CACHE_KEY,
+  sessionCacheKey,
+} from '@/lib/webCache'
+import type { SessionInfo, WSMessage } from '@/types/shared'
 
-let sessionHandler: ((event: { channel?: string; chat_id?: string; action?: string; role?: string; instance?: string; parent_id?: string }) => void) | null = null
+let sessionHandler: ((event: { channel?: string; chat_id?: string; session_key?: string; action?: string; role?: string; instance?: string; parent_id?: string }) => void) | null = null
+let messageHandler: ((event: WSMessage) => void) | null = null
 
 vi.mock('@/hooks/useWSConnection', () => ({
   useWSConnection: () => ({
     connected: true,
     subscribe: vi.fn(),
+    disconnect: vi.fn(),
     rpc: vi.fn(),
     onSession: vi.fn((handler) => {
       sessionHandler = handler
       return vi.fn()
     }),
-    onMessage: vi.fn(() => vi.fn()),
+    onMessage: vi.fn((handler) => {
+      messageHandler = handler
+      return vi.fn()
+    }),
+    chatID: null,
+    channel: null,
   }),
+}))
+
+vi.mock('@/lib/api', () => ({
+  postAPI: async (endpoint: string, body: Record<string, unknown> = {}) => {
+    let target = endpoint
+    if (endpoint === '/api/session-tree') {
+      let response = await fetch('/api/chats', { method: 'POST', body: JSON.stringify(body) })
+      if (!response.ok) response = await fetch('/api/session-tree', { method: 'POST', body: JSON.stringify(body) })
+      const raw = await response.json()
+      const data = raw.data ?? raw
+      return {
+        sessions: data.sessions ?? data.chats ?? [],
+        orphan_subagents: data.orphan_subagents ?? [],
+      }
+    }
+    if (endpoint === '/api/chats/create') target = '/api/chats'
+    if (endpoint.endsWith('/switch')) {
+      const channel = typeof body.channel === 'string' ? body.channel : 'web'
+      target = `${endpoint}?channel=${encodeURIComponent(channel)}`
+    }
+    const response = await fetch(target, { method: 'POST', body: JSON.stringify(body) })
+    if (!response.ok) throw new Error(`request failed: ${response.status}`)
+    const raw = await response.json()
+    return raw.data ?? raw
+  },
 }))
 
 beforeEach(() => {
   sessionHandler = null
+  messageHandler = null
   const store = new Map<string, string>()
   vi.stubGlobal('localStorage', {
     getItem: vi.fn((key: string) => store.get(key) ?? null),
@@ -550,6 +591,99 @@ describe('normalizeSessionTree', () => {
     expect(tree.agents).toEqual([])
   })
 
+  it('stores structured questions from a live CLI AskUser event', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats') {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            sessions: [{
+              chat_id: '/repo',
+              channel: 'cli',
+              label: 'repo',
+              last_active: '2026-07-08T00:00:00Z',
+              is_current: true,
+            }],
+          }),
+        } as Response
+      }
+      if (url === '/api/subagents') {
+        return { ok: true, json: async () => ({ ok: true, subagents: [] }) } as Response
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }))
+    const { result } = renderHook(() => useSessionStoreImpl())
+    await waitFor(() => expect(result.current.sessions).toHaveLength(1))
+
+    act(() => {
+      messageHandler?.({
+        type: 'ask_user',
+        channel: 'cli',
+        chat_id: '/repo',
+        progress: {
+          request_id: 'request-1',
+          questions: [{ question: 'Continue?', options: ['yes', 'no'] }],
+        },
+      })
+    })
+
+    expect(result.current.sessions[0].status).toBe('waiting_input')
+    expect(result.current.askUserPrompts.get('cli:/repo')).toEqual({
+      requestId: 'request-1',
+      questions: [{ question: 'Continue?', options: ['yes', 'no'] }],
+    })
+  })
+
+  it('sends the selected channel when renaming and deleting matching chat IDs', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/api/chats') {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            sessions: [
+              { chat_id: 'shared', channel: 'web', label: 'web', last_active: '2026-07-08T00:00:00Z' },
+              { chat_id: 'shared', channel: 'cli', label: 'cli', last_active: '2026-07-08T00:00:01Z' },
+            ],
+          }),
+        } as Response
+      }
+      if (url === '/api/chats/shared/rename' || url === '/api/chats/shared/delete') {
+        return {
+          ok: true,
+          json: async () => ({ ok: true, data: {}, error: null }),
+        } as Response
+      }
+      if (url === '/api/subagents') {
+        return { ok: true, json: async () => ({ ok: true, subagents: [] }) } as Response
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useSessionStoreImpl())
+    await waitFor(() => expect(result.current.sessions).toHaveLength(2))
+    const cliCacheKey = sessionCacheKey('cli', 'shared')
+    messagesCache.set(cliCacheKey, [])
+    lastSeqCache.set(cliCacheKey, 9)
+    progressSnapshotCache.set(cliCacheKey, { phase: 'tool' })
+
+    await act(async () => {
+      expect(await result.current.renameSession('shared', 'cli', 'renamed')).toBe(true)
+      expect(await result.current.deleteSession('shared', 'cli')).toBe(true)
+    })
+
+    const renameCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/rename'))
+    const deleteCall = fetchMock.mock.calls.find(([input]) => String(input).endsWith('/delete'))
+    expect(JSON.parse(String(renameCall?.[1]?.body))).toEqual({ channel: 'cli', label: 'renamed' })
+    expect(JSON.parse(String(deleteCall?.[1]?.body))).toEqual({ channel: 'cli' })
+    expect(messagesCache.has(cliCacheKey)).toBe(false)
+    expect(lastSeqCache.has(cliCacheKey)).toBe(false)
+    expect(progressSnapshotCache.has(cliCacheKey)).toBe(false)
+  })
+
   it('uses /api/chats as the authoritative SubAgent tree source', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input)
@@ -1062,6 +1196,11 @@ describe('normalizeSessionTree', () => {
       await result.current.switchSession('second', 'cli')
     })
     expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'second' })
+    const cached = JSON.parse(localStorage.getItem(SESSION_TREE_CACHE_KEY) ?? '{}') as {
+      sessions?: Array<{ chatID: string; isCurrent?: boolean }>
+    }
+    expect(cached.sessions?.find((session) => session.chatID === 'first')?.isCurrent).toBe(false)
+    expect(cached.sessions?.find((session) => session.chatID === 'second')?.isCurrent).toBe(true)
 
     await act(async () => {
       await result.current.refresh()
@@ -1069,6 +1208,59 @@ describe('normalizeSessionTree', () => {
 
     expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'second' })
     expect(result.current.sessions.find((s) => s.chatID === 'second')?.isCurrent).toBe(true)
+  })
+
+  it('keeps the latest session switch when REST responses resolve out of order', async () => {
+    let resolveA!: (response: Response) => void
+    let resolveB!: (response: Response) => void
+    const responseA = new Promise<Response>((resolve) => { resolveA = resolve })
+    const responseB = new Promise<Response>((resolve) => { resolveB = resolve })
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === '/api/chats') {
+        return {
+          ok: true,
+          json: async () => ({
+            ok: true,
+            chats: [
+              { chat_id: 'initial', channel: 'cli', label: 'initial', is_current: true, last_active: '2026-07-08T00:00:00Z' },
+              { chat_id: 'session-a', channel: 'cli', label: 'A', last_active: '2026-07-08T00:00:01Z' },
+              { chat_id: 'session-b', channel: 'cli', label: 'B', last_active: '2026-07-08T00:00:02Z' },
+            ],
+          }),
+        } as Response
+      }
+      if (url === '/api/chats/session-a/switch?channel=cli') return responseA
+      if (url === '/api/chats/session-b/switch?channel=cli') return responseB
+      throw new Error(`unexpected fetch: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { result } = renderHook(() => useSessionStoreImpl())
+    await waitFor(() => expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'initial' }))
+
+    let switchA!: Promise<void>
+    let switchB!: Promise<void>
+    act(() => {
+      switchA = result.current.switchSession('session-a', 'cli')
+      switchB = result.current.switchSession('session-b', 'cli')
+    })
+    await act(async () => {
+      resolveB({
+        ok: true,
+        json: async () => ({ ok: true, data: { chat_id: 'session-b', channel: 'cli' }, error: null }),
+      } as Response)
+      await switchB
+    })
+    expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'session-b' })
+
+    await act(async () => {
+      resolveA({
+        ok: true,
+        json: async () => ({ ok: true, data: { chat_id: 'session-a', channel: 'cli' }, error: null }),
+      } as Response)
+      await switchA
+    })
+    expect(result.current.activeSession).toEqual({ channel: 'cli', chatID: 'session-b' })
   })
 
   it('keeps session object identity when a background refresh returns the same tree', async () => {
@@ -1190,11 +1382,12 @@ describe('normalizeSessionTree', () => {
                 last_active: '2026-07-08T00:00:00Z',
                 children: includeChild ? [
                   {
-                    chat_id: 'cli:/repo:Agent-main/review',
+                    chat_id: 'cli:/repo:Agent-main/review:runtime-1',
                     channel: 'agent',
                     type: 'agent',
                     label: 'review',
                     role: 'review',
+                    instance: 'runtime-1',
                     parent_channel: 'cli',
                     parent_chat_id: '/repo:Agent-main',
                     running: true,
@@ -1222,24 +1415,26 @@ describe('normalizeSessionTree', () => {
         action: 'subagent_started',
         channel: 'cli',
         chat_id: '/repo:Agent-main',
-        role: 'review',
+        session_key: 'cli:/repo:Agent-main/review:runtime-1',
+        role: 'stale-role',
+        instance: 'stale-instance',
       })
     })
-    expect(result.current.subAgents.map((s) => s.chatID)).toEqual(['cli:/repo:Agent-main/review'])
-    expect(result.current.sessions[0].children?.map((s) => s.chatID)).toEqual(['cli:/repo:Agent-main/review'])
-    const transient = result.current.subAgents.find((s) => s.chatID === 'cli:/repo:Agent-main/review')
+    expect(result.current.subAgents.map((s) => s.chatID)).toEqual(['cli:/repo:Agent-main/review:runtime-1'])
+    expect(result.current.sessions[0].children?.map((s) => s.chatID)).toEqual(['cli:/repo:Agent-main/review:runtime-1'])
+    const transient = result.current.subAgents.find((s) => s.chatID === 'cli:/repo:Agent-main/review:runtime-1')
     expect(transient?.running).toBe(true)
-    expect(transient?.label).toBe('review')
+    expect(transient?.label).toBe('review/runtime-1')
 
     includeChild = true
     await act(async () => {
       await result.current.refresh()
     })
 
-    expect(result.current.subAgents.map((s) => s.chatID)).toEqual(['cli:/repo:Agent-main/review'])
-    const started = result.current.subAgents.find((s) => s.chatID === 'cli:/repo:Agent-main/review')
+    expect(result.current.subAgents.map((s) => s.chatID)).toEqual(['cli:/repo:Agent-main/review:runtime-1'])
+    const started = result.current.subAgents.find((s) => s.chatID === 'cli:/repo:Agent-main/review:runtime-1')
     expect(started?.running).toBe(true)
-    expect(started?.label).toBe('review')
+    expect(started?.label).toBe('review/runtime-1')
   })
 
   it('keeps short-lived SubAgent rows when delayed canonical refresh has not persisted them yet', async () => {
@@ -1366,5 +1561,85 @@ describe('normalizeSessionTree', () => {
 
     expect(result.current.subAgents).toEqual([])
     expect(result.current.sessions[0].children ?? []).toEqual([])
+  })
+
+  it('uses session_key to stop only the matching SubAgent', async () => {
+    const child = (parentChatID: string): SessionInfo => ({
+      chatID: `cli:${parentChatID}/review:1`,
+      channel: 'agent',
+      label: 'review/1',
+      lastActive: '2026-07-08T00:00:01Z',
+      preview: '',
+      status: 'running',
+      isCurrent: false,
+      type: 'agent',
+      role: 'review',
+      instance: '1',
+      parentChannel: 'cli',
+      parentChatID,
+      fullKey: `cli:${parentChatID}/review:1`,
+      agentChatID: `cli:${parentChatID}/review:1`,
+      running: true,
+      children: [],
+    })
+    const childA = child('/repo-a:Agent-main')
+    const childB = child('/repo-b:Agent-main')
+    const parent = (chatID: string, agent: SessionInfo): SessionInfo => ({
+      chatID,
+      channel: 'cli',
+      label: chatID,
+      lastActive: '2026-07-08T00:00:00Z',
+      preview: '',
+      status: 'idle',
+      isCurrent: false,
+      type: 'main',
+      children: [agent],
+    })
+    localStorage.setItem('xbot_session_tree', JSON.stringify({
+      version: 1,
+      sessions: [parent('/repo-a:Agent-main', childA), parent('/repo-b:Agent-main', childB)],
+      subAgents: [childA, childB],
+    }))
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+
+    const { result, unmount } = renderHook(() => useSessionStoreImpl())
+    expect(result.current.subAgents).toHaveLength(2)
+
+    await act(async () => {
+      sessionHandler?.({
+        action: 'subagent_stopped',
+        channel: 'cli',
+        chat_id: '/repo-a:Agent-main',
+        session_key: childA.chatID,
+        role: 'review',
+        instance: '1',
+      })
+    })
+
+    expect(result.current.subAgents.map((agent) => agent.chatID)).toEqual([childB.chatID])
+    unmount()
+  })
+
+  it('renders the cached session tree before the background refresh resolves', () => {
+    localStorage.setItem('xbot_session_tree', JSON.stringify({
+      version: 1,
+      sessions: [{
+        chatID: 'cached-chat',
+        channel: 'web',
+        label: 'Cached chat',
+        lastActive: '2026-07-13T00:00:00Z',
+        preview: 'cached preview',
+        status: 'idle',
+        isCurrent: true,
+      }],
+      subAgents: [],
+    }))
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(() => undefined)))
+
+    const { result, unmount } = renderHook(() => useSessionStoreImpl())
+
+    expect(result.current.sessions.map((session) => session.chatID)).toEqual(['cached-chat'])
+    expect(result.current.activeSession).toEqual({ channel: 'web', chatID: 'cached-chat' })
+    unmount()
   })
 })

@@ -1,91 +1,62 @@
-/**
- * TodoPullOut — a pull-out TODO panel above the message input.
- *
- * Collapsed (default): a single row showing progress bar N/M + the first
- *   incomplete task text. Click to expand.
- * Expanded: the full TODO list (✓ done, ○ pending).
- * Hidden entirely when there are no TODOs.
- *
- * The width is slightly narrower than the input (mx-2 margin).
- */
 import { useState } from 'react'
-import { ChevronDown } from 'lucide-react'
+import { ChevronRight } from 'lucide-react'
+
 import { cn } from '@/lib/utils'
-import type { TodoState } from '@/hooks/useTodos'
 import { useI18n } from '@/providers/i18n'
+import type { TodoState } from '@/hooks/useTodos'
+import { AnimatedCollapse } from '@/components/ui/animated-collapse'
 
 interface TodoPullOutProps {
   todoState: TodoState
 }
 
+/** TODO-only inset toolbar restored above the composer. */
 export function TodoPullOut({ todoState }: TodoPullOutProps) {
   const { t } = useI18n()
   const [expanded, setExpanded] = useState(false)
-
   const { todos, doneCount, total, currentTask } = todoState
   if (total === 0) return null
 
-  const pct = total > 0 ? Math.round((doneCount / total) * 100) : 0
+  const percent = Math.round((doneCount / total) * 100)
 
   return (
-    <div className="mx-2 mb-1.5 overflow-hidden rounded-lg border border-border bg-bg-secondary text-sm">
-      {/* Collapsed summary — click to expand/collapse */}
+    <div className="mx-2 mb-1.5 overflow-hidden rounded-md border border-border bg-bg-secondary text-sm">
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-bg-tertiary"
+        aria-expanded={expanded}
+        aria-label={expanded ? t('agent.collapseTodos') : t('agent.expandTodos')}
+        onClick={() => setExpanded((open) => !open)}
+        className="flex h-8 w-full items-center gap-2 px-2.5 text-left transition-colors hover:bg-bg-tertiary"
       >
-        <ChevronDown
-          className={cn(
-            'size-3.5 shrink-0 text-text-muted transition-transform',
-            expanded && 'rotate-180',
-          )}
+        <ChevronRight
+          className={cn('size-3.5 shrink-0 text-text-muted transition-transform', expanded && 'rotate-90')}
         />
-        {/* Progress bar */}
-        <div className="flex items-center gap-2">
-          <div className="h-1.5 w-16 overflow-hidden rounded-full bg-bg-tertiary">
-            <div
-              className="h-full rounded-full bg-accent transition-all"
-              style={{ width: `${pct}%` }}
-            />
-          </div>
-          <span className="shrink-0 text-xs tabular-nums text-text-secondary">
-            {doneCount}/{total}
-          </span>
+        <div className="h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-bg-tertiary">
+          <div
+            className="h-full rounded-full bg-accent transition-[width] duration-300"
+            style={{ width: `${percent}%` }}
+          />
         </div>
-        {/* Current task (first incomplete) */}
-        {currentTask ? (
-          <span className="min-w-0 flex-1 truncate text-text-primary">
-            {currentTask.text}
-          </span>
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-text-muted">
-            {t('agent.todoAllDone')}
-          </span>
-        )}
+        <span className="shrink-0 text-xs tabular-nums text-text-secondary">
+          {doneCount}/{total}
+        </span>
+        <span className={cn('min-w-0 flex-1 truncate text-xs', currentTask ? 'text-text-primary' : 'text-text-muted')}>
+          {currentTask?.text ?? t('agent.todoAllDone')}
+        </span>
       </button>
-
-      {/* Expanded list */}
-      {expanded && (
-        <div className="border-t border-border px-3 py-1.5">
+      <AnimatedCollapse open={expanded}>
+        <div className="max-h-[200px] overflow-y-auto border-t border-border px-3 py-1.5">
           {todos.map((todo) => (
             <div
               key={todo.id}
-              className={cn(
-                'flex items-start gap-2 py-1',
-                todo.done ? 'text-text-muted' : 'text-text-primary',
-              )}
+              className={cn('flex items-start gap-2 py-1 text-xs', todo.done ? 'text-text-muted' : 'text-text-primary')}
             >
-              <span className="mt-0.5 shrink-0">
-                {todo.done ? '✓' : '○'}
-              </span>
-              <span className={cn('min-w-0 flex-1', todo.done && 'line-through')}>
-                {todo.text}
-              </span>
+              <span className="mt-0.5 shrink-0">{todo.done ? '✓' : '○'}</span>
+              <span className={cn('min-w-0 flex-1', todo.done && 'line-through')}>{todo.text}</span>
             </div>
           ))}
         </div>
-      )}
+      </AnimatedCollapse>
     </div>
   )
 }

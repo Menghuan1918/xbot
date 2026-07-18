@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { ProgressStore, dedupMessages } from './progressStore'
+import { ProgressStore, dedupMessages, normalizeWebSubAgent } from './progressStore'
 import type { WebToolProgress } from '@/types/shared'
 
 // Helper: create a tool with defaults
@@ -110,6 +110,24 @@ describe('ProgressStore basic', () => {
     store.appendStreamContent('z')
     flushRaf()
     expect(calls).not.toHaveBeenCalled()
+  })
+})
+
+describe('normalizeWebSubAgent', () => {
+  it('normalizes session_key recursively', () => {
+    expect(normalizeWebSubAgent({
+      role: 'orchestrator',
+      status: 'running',
+      session_key: 'cli:main/orchestrator:1',
+      children: [{
+        role: 'review',
+        status: 'running',
+        session_key: 'cli:main/orchestrator:1/review:2',
+      }],
+    })).toMatchObject({
+      sessionKey: 'cli:main/orchestrator:1',
+      children: [{ sessionKey: 'cli:main/orchestrator:1/review:2' }],
+    })
   })
 })
 
@@ -277,7 +295,7 @@ describe('ProgressStore stream-only patch + carry-forward', () => {
     store.dispose()
   })
 
-  it('filters completed SubAgent nodes from live progress', () => {
+  it('preserves completed SubAgent nodes in progress tree', () => {
     const store = new ProgressStore()
     store.setStructuredTools({
       phase: 'tool_exec',
@@ -291,7 +309,9 @@ describe('ProgressStore stream-only patch + carry-forward', () => {
       subAgents: [{ role: 'review', status: 'done' }],
     })
     flushRaf()
-    expect(store.getSnapshot().subAgents).toHaveLength(0)
+    // Done nodes are preserved (not filtered) — they show the final status
+    expect(store.getSnapshot().subAgents).toHaveLength(1)
+    expect(store.getSnapshot().subAgents[0].status).toBe('done')
     store.dispose()
   })
 

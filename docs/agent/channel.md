@@ -27,7 +27,7 @@ channel/              # Root package — shared core types, interfaces, infrastr
 
 channel/cli/          # CLI BubbleTea TUI (~44k lines)
 channel/feishu/       # Feishu webhook + settings UI
-channel/web/          # WebSocket server, REST API, OAuth, RemoteCLIChannel
+channel/web/          # REST + SSE Web server, WebSocket RemoteCLIChannel, auth
 channel/qq/           # QQ bot (WebSocket)
 channel/napcat/       # NapCat HTTP API
 ```
@@ -51,8 +51,13 @@ channel/napcat/       # NapCat HTTP API
 | `cli_palette.go` | Command palette (Ctrl+K): fuzzy-search, category tabs, external contributors (~531 lines) |
 | `feishu.go` | Feishu webhook, message send, card messages (~3154 lines) |
 | `feishu_settings.go` | Feishu settings UI (~2189 lines) |
-| `web.go` | WebSocket server, WebChannel core, read/write pumps, RPC dispatch (~1383 lines) |
-| `web_hub.go` | Hub: WS connection routing, Client struct, ring buffer for offline messages, stateless message slotting (storeStateless/drainStateless, ~345 lines) |
+| `web.go` | WebChannel core, route registration, HTTP lifecycle, security middleware |
+| `web_socket.go` | WebSocket handler and read/write pumps; retained for remote CLI transport |
+| `web_sse.go` | Cookie-authenticated `/api/sse` transport, event replay, 15s heartbeat, SSE framing |
+| `web_types.go` | Web channel configuration, callbacks, and API response types |
+| `web_outbound.go` | WebChannel outbound message stamping and Hub delivery |
+| `web_static.go` | Frontend static-file and SPA fallback handler |
+| `web_hub.go` | Shared WS/SSE connection routing, Client struct, offline ring buffer, stateless message slotting |
 | `web_eventstream.go` | EventStream: seq-stamped ring buffer for replay/dedup (~99 lines) |
 | `web_remote_cli.go` | RemoteCLIChannel: virtual CLI channel for CLI→WS→server mode (~270 lines) |
 | `web_api.go` | REST API endpoints (~1901 lines) |
@@ -68,6 +73,34 @@ channel/napcat/       # NapCat HTTP API
 Optional channel capabilities via interfaces in `capability.go`:
 - `SettingsCapability` — channel supports user settings UI
 - `UIBuilder` — channel can render custom UI elements
+
+## Web Context Usage
+
+The Web context ring reads the authoritative session snapshot from the
+`get_context_usage` RPC using `(channel, chat_id)`. The response combines the
+current `(subscription, model)`, its effective `max_context_tokens`, and the
+latest provider-confirmed `prompt_tokens`; the browser must not rebuild this
+state by joining subscription APIs or by falling back to a hard-coded limit.
+
+- `prompt_tokens` is the context fill value. Completion tokens are informational
+  and are never added to the usage percentage.
+- Usage is exact at LLM-response and compression checkpoints. Active streaming
+  keeps the last confirmed snapshot until the provider returns another usage
+  record; Web does not estimate token growth locally.
+- A session with no confirmed usage, or one whose model was just changed,
+  returns `available=false` and `usage_percent=null` until the new model responds.
+- The server does not clamp `usage_percent`. The ring may cap its drawing at
+  100%, but its tooltip must retain the real percentage when usage is over the
+  configured context window.
+- Web refreshes the snapshot on session/reconnection lifecycle changes, model
+  switches, history compression or reset, completed turns, and exact prompt
+  token changes from structured progress. The snapshot lives outside the
+  progress store so terminal progress cleanup cannot reset an idle ring to 0%.
+- Web chat creation persists the canonical user ID to `user_chats.user_id`, and
+  tenant creation/binding copies it to `tenants.owner_user_id` while lazily
+  repairing legacy zero-owner rows. Context RPC authorization still accepts a
+  matching Web `user_chats.sender_id` for pre-canonical data, but never applies
+  that fallback across channels.
 
 ## CLI Conventions
 

@@ -58,6 +58,13 @@ func limitBodySize(next http.HandlerFunc) http.HandlerFunc {
 // WebConfig (channel-level)
 // ---------------------------------------------------------------------------
 
+// RPCIdentity identifies the authenticated user for RPC dispatch.
+type RPCIdentity struct {
+	SenderID        string
+	CanonicalUserID int64
+	CanonicalRole   string
+}
+
 // WebChannelConfig Web 渠道配置（channel 包内部使用）
 type WebChannelConfig struct {
 	Host       string
@@ -66,6 +73,7 @@ type WebChannelConfig struct {
 	AdminToken string  // global admin token for privileged auth
 	InviteOnly bool    // 禁止自主注册，新账号只能由 admin 创建
 	PublicURL  string  // 对外访问地址，用于生成 Runner 连接命令
+	SingleUser bool    // 单用户模式：所有用户共享同一身份，视为 admin
 }
 
 // WebCallbacks holds callback functions for Web channel API endpoints.
@@ -111,6 +119,10 @@ type WebCallbacks struct {
 	// GetPendingAskUser returns the pending AskUser prompt for a chat, or nil.
 	// Used by Web WS reconnect to resend ask_user so page refresh doesn't lose it.
 	GetPendingAskUser func(channel, chatID string) *protocol.ProgressEvent
+	// WithPendingAskUser invokes fn while the matching prompt cannot be cleared.
+	// Web transports use it as a bounded delivery-admission gate; network writes
+	// happen after it returns. fn must not mutate pending AskUser state.
+	WithPendingAskUser func(channel, chatID string, fn func(*protocol.ProgressEvent) bool) bool
 	// HistorySnapshot returns a Web-only history snapshot with runtime state.
 	HistorySnapshot func(senderID string, sel SessionSelector) (HistorySnapshot, error)
 	// RewindHistory rewinds a Web-accessible session to a selected user message.
@@ -149,11 +161,12 @@ type WebCallbacks struct {
 	RunnerStatusNotify func(senderID, runnerName string, online bool)
 	// SyncProgressNotify is called when runner sync progress is reported.
 	SyncProgressNotify func(senderID, phase, message string)
-	// RPCHandler handles RPC requests from CLI remote clients.
+	// RPCHandler handles RPC requests from authenticated REST and remote CLI clients.
 	// The method string identifies the operation; params is the JSON-encoded request body.
-	// senderID is the authenticated user ID (from the WS connection / runner token).
+	// identity carries the channel identity and canonical authorization fields resolved
+	// at the HTTP or WebSocket authentication boundary.
 	// Returns JSON-encoded result or an error.
-	RPCHandler func(method string, params json.RawMessage, senderID string) (json.RawMessage, error)
+	RPCHandler func(method string, params json.RawMessage, identity RPCIdentity) (json.RawMessage, error)
 	// SessionsList returns interactive SubAgent sessions for a user (channel="web", chatID=senderID).
 	// Returns JSON-serializable session info objects.
 	SessionsList func(senderID string) []SessionInfo
@@ -171,9 +184,11 @@ type WebCallbacks struct {
 	// ChatCreate creates a new chatroom for a user. Returns new chatID.
 	ChatCreate func(senderID, label string) (string, error)
 	// ChatDelete deletes a chatroom (except the default one).
-	ChatDelete func(senderID, chatID string) error
+	ChatDelete func(senderID, channel, chatID string) error
 	// ChatRename renames a chatroom.
-	ChatRename func(senderID, chatID, label string) error
+	ChatRename func(senderID, channel, chatID, label string) error
+	// LocalSessionExists reports whether a local session exists outside the database.
+	LocalSessionExists func(channel, chatID string) bool
 
 	// IdentityResolver provides canonical user identity resolution, link code
 	// generation, merge preview/execution, and admin user management.
@@ -236,6 +251,7 @@ type UserChatWithPreview struct {
 	ChatID        string                `json:"chat_id"`
 	Channel       string                `json:"channel,omitempty"` // channel name (e.g. "web", "cli", "feishu")
 	Label         string                `json:"label"`
+	WorkDir       string                `json:"work_dir,omitempty"`
 	LastActive    string                `json:"last_active"` // RFC3339
 	Preview       string                `json:"preview"`
 	IsCurrent     bool                  `json:"is_current"`
@@ -330,6 +346,10 @@ type WebChannel struct {
 	sessions   map[string]sessionInfo // token → sessionInfo
 	sessionsMu sync.RWMutex
 
+	// Inbound request dedup
+	inboundRequests   map[inboundRequestKey]*inboundRequestState
+	inboundRequestsMu sync.Mutex
+
 	// DB
 	db *sql.DB
 
@@ -355,6 +375,10 @@ type WebChannel struct {
 	// Defaults to {Channel:"web", ChatID:senderID} if not set.
 	userCurrentSession   map[string]SessionSelector
 	userCurrentSessionMu sync.RWMutex
+
+	// singleUser mirrors config.Experimental.SingleUser — when true, all
+	// web users are treated as admin (no identity isolation).
+	singleUser bool
 }
 
 type sessionInfo struct {
@@ -368,10 +392,10 @@ type sessionInfo struct {
 var _ ch.SessionStateSender = (*WebChannel)(nil)
 
 // SendSessionState implements ch.SessionStateSender.
-// Broadcasts session events (busy/idle/etc.) to all connected web clients
-// so the sidebar can show status for all sessions.
+// WebSocket clients retain the legacy broadcast behavior; SSE clients receive
+// only events for their authorized chat subscription.
 func (wc *WebChannel) SendSessionState(ev protocol.SessionEvent) {
-	wc.hub.broadcastToAll(protocol.WSMessage{
+	wc.hub.broadcastSessionState(ev.Channel, ev.ChatID, protocol.WSMessage{
 		Type:    protocol.MsgTypeSession,
 		TS:      time.Now().Unix(),
 		Session: &ev,
@@ -386,15 +410,19 @@ type SessionSelector struct {
 
 // NewWebChannel 创建 Web 渠道
 func NewWebChannel(cfg WebChannelConfig, msgBus *bus.MessageBus) *WebChannel {
-	return &WebChannel{
+	wc := &WebChannel{
 		config:             cfg,
 		msgBus:             msgBus,
 		hub:                newHub(),
 		sessions:           make(map[string]sessionInfo),
 		db:                 cfg.DB,
 		stopCh:             make(chan struct{}),
+		inboundRequests:    make(map[inboundRequestKey]*inboundRequestState),
 		userCurrentSession: make(map[string]SessionSelector),
+		singleUser:         cfg.SingleUser,
 	}
+	wc.hub.seqFn = wc.stampAndBuffer
+	return wc
 }
 
 // Hub returns the web channel's hub for sharing with other channels.
@@ -428,7 +456,7 @@ func (wc *WebChannel) SetCallbacks(cb WebCallbacks) {
 
 // SetRPCHandler sets or replaces the RPC handler. Used to wire the handler
 // after the dispatcher and message bus are available.
-func (wc *WebChannel) SetRPCHandler(fn func(method string, params json.RawMessage, senderID string) (json.RawMessage, error)) {
+func (wc *WebChannel) SetRPCHandler(fn func(method string, params json.RawMessage, identity RPCIdentity) (json.RawMessage, error)) {
 	wc.callbacks.RPCHandler = fn
 }
 
@@ -440,85 +468,7 @@ func (wc *WebChannel) Name() string { return "web" }
 
 // Start 启动 Web 渠道 HTTP server
 func (wc *WebChannel) Start() error {
-	mux := http.NewServeMux()
-
-	// WebSocket endpoint
-	mux.HandleFunc("/ws", wc.handleWS)
-
-	// Auth API
-	mux.HandleFunc("/api/auth/register", limitBodySize(wc.handleRegister))
-	mux.HandleFunc("/api/auth/login", limitBodySize(wc.handleLogin))
-	mux.HandleFunc("/api/auth/logout", wc.handleLogout)
-	mux.HandleFunc("/api/auth/feishu-link", limitBodySize(wc.handleFeishuLink))
-	mux.HandleFunc("/api/auth/feishu-login", limitBodySize(wc.handleFeishuLogin))
-	mux.HandleFunc("/api/auth/config", wc.handleAuthConfig)
-
-	// REST API
-	mux.HandleFunc("/api/history", wc.authMiddleware(wc.handleHistory))
-	mux.HandleFunc("/api/history/rewind", wc.authMiddleware(wc.handleHistoryRewind))
-	mux.HandleFunc("/api/settings", wc.authMiddleware(wc.handleSettings))
-	mux.HandleFunc("/api/runner/token", wc.authMiddleware(wc.handleRunnerToken))
-	mux.HandleFunc("/api/search", wc.authMiddleware(wc.handleSearch))
-	mux.HandleFunc("/api/cwd", wc.authMiddleware(wc.handleCWD))
-	mux.HandleFunc("/api/tasks", wc.authMiddleware(wc.handleTasks))
-	mux.HandleFunc("/api/background-tasks", wc.authMiddleware(wc.handleBackgroundTasks))
-	mux.HandleFunc("/api/commands", wc.authMiddleware(wc.handleCommands))
-	mux.HandleFunc("/api/session-subscription", wc.authMiddleware(wc.handleSessionSubscription))
-
-	// Multi-runner API
-	mux.HandleFunc("/api/runners", wc.authMiddleware(wc.handleRunners))
-	mux.HandleFunc("/api/runners/active", wc.authMiddleware(wc.handleRunnerActive))
-	mux.HandleFunc("/api/runners/{name}", wc.authMiddleware(wc.handleRunnerByName))
-
-	// Market API
-	mux.HandleFunc("/api/market", wc.authMiddleware(wc.handleMarket))
-	mux.HandleFunc("/api/market/install", wc.authMiddleware(wc.handleMarketInstall))
-	mux.HandleFunc("/api/market/uninstall", wc.authMiddleware(wc.handleMarketUninstall))
-	mux.HandleFunc("/api/market/my", wc.authMiddleware(wc.handleMarketMy))
-	mux.HandleFunc("/api/market/publish", wc.authMiddleware(wc.handleMarketPublish))
-	mux.HandleFunc("/api/market/unpublish", wc.authMiddleware(wc.handleMarketUnpublish))
-
-	// LLM Config API
-	mux.HandleFunc("/api/llm-config", wc.authMiddleware(wc.handleLLMConfig))
-	mux.HandleFunc("/api/llm-config/model", wc.authMiddleware(wc.handleLLMModelSet))
-	mux.HandleFunc("/api/llm-max-context", wc.authMiddleware(wc.handleLLMMaxContext))
-
-	// File API
-	mux.HandleFunc("/api/files/upload", wc.authMiddleware(wc.handleFileUpload))
-
-	// File System API (browse, read, search, stat)
-	mux.HandleFunc("/api/fs/list", wc.authMiddleware(wc.handleFsList))
-	mux.HandleFunc("/api/fs/read", wc.authMiddleware(wc.handleFsRead))
-	mux.HandleFunc("/api/fs/raw", wc.authMiddleware(wc.handleFsRaw))
-	mux.HandleFunc("/api/fs/search", wc.authMiddleware(wc.handleFsSearch))
-	mux.HandleFunc("/api/fs/stat", wc.authMiddleware(wc.handleFsStat))
-
-	// Chatroom API
-	mux.HandleFunc("/api/chats", wc.authMiddleware(wc.handleChats))
-	mux.HandleFunc("/api/session-tree", wc.authMiddleware(wc.handleSessionTree))
-	mux.HandleFunc("/api/subagents", wc.authMiddleware(wc.handleSubAgents))
-	mux.HandleFunc("/api/chats/{chatID}/switch", wc.authMiddleware(wc.handleChatSwitch))
-	mux.HandleFunc("/api/chats/{chatID}/rename", wc.authMiddleware(wc.handleChatRename))
-	mux.HandleFunc("/api/chats/{chatID}", wc.authMiddleware(wc.handleChatDelete))
-
-	// Cross-channel browsing API
-	mux.HandleFunc("/api/context-info", wc.authMiddleware(wc.handleContextInfo))
-	mux.HandleFunc("/api/channels", wc.authMiddleware(wc.handleChannels))
-
-	// Account linking + identity management API
-	mux.HandleFunc("/api/account/link-code", wc.authMiddleware(wc.handleLinkCode))
-	mux.HandleFunc("/api/account/link", wc.authMiddleware(wc.handleLink))
-	mux.HandleFunc("/api/account/identities", wc.authMiddleware(wc.handleIdentities))
-	mux.HandleFunc("/api/account/identities/{id}", wc.authMiddleware(wc.handleUnlinkIdentity))
-
-	// Admin management API
-	mux.HandleFunc("/api/admin/users", wc.authMiddleware(wc.handleAdminUsers))
-	mux.HandleFunc("/api/admin/users/{id}/role", wc.authMiddleware(wc.handleAdminSetRole))
-
-	// Static files
-	if wc.staticDir != "" {
-		mux.HandleFunc("/", wc.handleStatic)
-	}
+	mux := wc.newServeMux()
 
 	addr := fmt.Sprintf("%s:%d", wc.config.Host, wc.config.Port)
 	// Use custom listener with SO_REUSEADDR to avoid "address already in use"
@@ -556,6 +506,64 @@ func (wc *WebChannel) Start() error {
 		return nil
 	}
 	return err
+}
+
+func (wc *WebChannel) newServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", wc.handleWS)
+	mux.HandleFunc("/api/sse", wc.authMiddleware(wc.handleSSE))
+
+	mux.HandleFunc("/api/auth/register", limitBodySize(postOnly(wc.handleRegister)))
+	mux.HandleFunc("/api/auth/login", limitBodySize(postOnly(wc.handleLogin)))
+	mux.HandleFunc("/api/auth/logout", postOnly(wc.handleLogout))
+	mux.HandleFunc("/api/auth/feishu-link", limitBodySize(postOnly(wc.handleFeishuLink)))
+	mux.HandleFunc("/api/auth/feishu-login", limitBodySize(postOnly(wc.handleFeishuLogin)))
+	mux.HandleFunc("/api/auth/config", postOnly(wc.handleAuthConfig))
+
+	mux.HandleFunc("/api/message", wc.authenticatedPOST(wc.handleMessage))
+	mux.HandleFunc("/api/cancel", wc.authenticatedPOST(wc.handleCancel))
+	mux.HandleFunc("/api/ask_user/respond", wc.authenticatedPOST(wc.handleAskUserRespond))
+	mux.HandleFunc("/api/rpc", wc.authenticatedPOST(wc.handleRPC))
+	mux.HandleFunc("/api/history", wc.authenticatedPOST(wc.handleHistoryPOST))
+	mux.HandleFunc("/api/history/rewind", wc.authenticatedPOST(wc.handleHistoryRewind))
+	mux.HandleFunc("/api/search", wc.authenticatedPOST(wc.handleSearchPOST))
+
+	mux.HandleFunc("/api/settings", wc.authenticatedPOST(wc.handleSettingsPOST))
+	mux.HandleFunc("/api/llm-config", wc.authenticatedPOST(wc.handleLLMConfigPOST))
+	mux.HandleFunc("/api/session/status", wc.authenticatedPOST(wc.handleSessionStatus))
+
+	mux.HandleFunc("/api/runners/list", wc.authenticatedPOST(wc.handleRunnersListPOST))
+	mux.HandleFunc("/api/runners/create", wc.authenticatedPOST(wc.handleRunnersCreatePOST))
+	mux.HandleFunc("/api/runners/active", wc.authenticatedPOST(wc.handleRunnerActivePOST))
+	mux.HandleFunc("/api/runners/{name}/delete", wc.authenticatedPOST(wc.handleRunnerDeletePOST))
+
+	mux.HandleFunc("/api/files/upload", wc.authenticatedPOST(wc.handleFileUpload))
+	mux.HandleFunc("/api/fs/list", wc.authenticatedPOST(wc.handleFsListPOST))
+	mux.HandleFunc("/api/fs/read", wc.authenticatedPOST(wc.handleFsReadPOST))
+	mux.HandleFunc("/api/fs/search", wc.authenticatedPOST(wc.handleFsSearchPOST))
+
+	mux.HandleFunc("/api/chats/list", wc.authenticatedPOST(wc.handleChatsListPOST))
+	mux.HandleFunc("/api/chats/create", wc.authenticatedPOST(wc.handleChatsCreatePOST))
+	mux.HandleFunc("/api/chats/{chatID}/switch", wc.authenticatedPOST(wc.handleChatSwitchPOST))
+	mux.HandleFunc("/api/chats/{chatID}/rename", wc.authenticatedPOST(wc.handleChatRename))
+	mux.HandleFunc("/api/chats/{chatID}/delete", wc.authenticatedPOST(wc.handleChatDeletePOST))
+	mux.HandleFunc("/api/session-tree", wc.authenticatedPOST(wc.handleSessionTreePOST))
+
+	mux.HandleFunc("/api/account/link-code", wc.authenticatedPOST(wc.handleLinkCode))
+	mux.HandleFunc("/api/account/link", wc.authenticatedPOST(wc.handleLink))
+	mux.HandleFunc("/api/account/identities/list", wc.authenticatedPOST(wc.handleIdentitiesListPOST))
+	mux.HandleFunc("/api/account/identities/{id}/delete", wc.authenticatedPOST(wc.handleUnlinkIdentityPOST))
+
+	mux.HandleFunc("/api/admin/users/list", wc.authenticatedPOST(wc.handleAdminUsersListPOST))
+	mux.HandleFunc("/api/admin/users/{id}/set-role", wc.authenticatedPOST(wc.handleAdminSetRole))
+
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
+		jsonErrorResponse(w, http.StatusNotFound, "endpoint not found")
+	})
+	if wc.staticDir != "" {
+		mux.HandleFunc("/", wc.handleStatic)
+	}
+	return mux
 }
 
 // Stop 停止 Web 渠道
@@ -609,19 +617,21 @@ func (wc *WebChannel) Send(msg ch.OutboundMsg) (string, error) {
 	}
 
 	targetClientID := msg.ChatID
+	channelName := msg.Channel
+	if channelName == "" {
+		channelName = "web"
+	}
 
 	// /new resets the conversation boundary. Drop buffered pre-reset events before
 	// buffering the reset message itself; otherwise reconnect replay can resurrect
 	// a stale in-flight progress event from the previous session.
 	if wsMsg.SessionReset {
-		wc.getEventStream(targetClientID).clear()
+		wc.getEventStream(sessionRouteKey(channelName, targetClientID)).clear()
 	}
 
-	// Stamp seq and buffer for replay
-	wsMsg = wc.stampAndBuffer(targetClientID, wsMsg)
-
-	// Send via hub (non-blocking: writes to buffered channel)
-	if !wc.hub.sendToClient(targetClientID, wsMsg) {
+	// The Hub stamps and buffers Web events before fan-out while preserving the
+	// remote CLI WebSocket envelope unchanged.
+	if !wc.hub.sendToSession(channelName, targetClientID, wsMsg) {
 		log.WithFields(log.Fields{"chat_id": msg.ChatID, "target_client_id": targetClientID}).Debug("Web client offline, message buffered")
 	}
 
@@ -641,10 +651,20 @@ func (wc *WebChannel) Send(msg ch.OutboundMsg) (string, error) {
 			Type:     protocol.MsgTypeAskUser,
 			ID:       msgID,
 			TS:       time.Now().Unix(),
+			Channel:  msg.Channel,
 			ChatID:   msg.ChatID,
 			Progress: askPayload,
 		}
-		wc.hub.sendToClient(targetClientID, askMsg)
+		if wc.callbacks.WithPendingAskUser != nil {
+			wc.callbacks.WithPendingAskUser(msg.Channel, msg.ChatID, func(pending *protocol.ProgressEvent) bool {
+				if pending.RequestID != askPayload.RequestID {
+					return false
+				}
+				askMsg.Progress = pending
+				wc.hub.sendToSession(channelName, targetClientID, askMsg)
+				return true
+			})
+		}
 	}
 
 	return msgID, nil
@@ -666,13 +686,13 @@ func (wc *WebChannel) SendProgress(chatID string, payload *protocol.ProgressEven
 		return
 	}
 
-	wsMsg := wc.stampAndBuffer(chatID, protocol.WSMessage{
+	wsMsg := protocol.WSMessage{
 		Type:     protocol.MsgTypeProgress,
 		TS:       time.Now().Unix(),
 		Progress: payload,
-	})
+	}
 
-	if !wc.hub.sendToClient(chatID, wsMsg) {
+	if !wc.hub.sendToSession("web", chatID, wsMsg) {
 		log.WithField("chat_id", chatID).Debug("Web client offline, progress event buffered")
 	}
 }
@@ -683,7 +703,7 @@ func (wc *WebChannel) SendStreamContent(chatID, content, reasoning string) {
 	if content == "" && reasoning == "" {
 		return
 	}
-	wsMsg := wc.stampAndBuffer(chatID, protocol.WSMessage{
+	wsMsg := protocol.WSMessage{
 		Type: protocol.MsgTypeStreamContent,
 		TS:   time.Now().Unix(),
 		Progress: &protocol.ProgressEvent{
@@ -691,8 +711,8 @@ func (wc *WebChannel) SendStreamContent(chatID, content, reasoning string) {
 			StreamContent:          content,
 			ReasoningStreamContent: reasoning,
 		},
-	})
-	_ = wc.hub.sendToClient(chatID, wsMsg) // stream events are ephemeral, safe to drop
+	}
+	_ = wc.hub.sendToSession("web", chatID, wsMsg) // stream events are ephemeral, safe to drop
 }
 
 // PushRunnerStatus pushes a runner online/offline status change to the Web client.
@@ -705,7 +725,7 @@ func (wc *WebChannel) PushRunnerStatus(chatID, runnerName string, online bool) {
 			return string(b)
 		}(),
 	}
-	if !wc.hub.sendToClient(chatID, wsMsg) {
+	if !wc.hub.sendToSession("web", chatID, wsMsg) {
 		log.WithField("chat_id", chatID).Debug("Web client offline, runner status buffered")
 	}
 }
@@ -720,7 +740,7 @@ func (wc *WebChannel) PushSyncProgress(chatID, phase, message string) {
 			return string(b)
 		}(),
 	}
-	if !wc.hub.sendToClient(chatID, wsMsg) {
+	if !wc.hub.sendToSession("web", chatID, wsMsg) {
 		log.WithField("chat_id", chatID).Debug("Web client offline, sync progress buffered")
 	}
 }
@@ -818,7 +838,8 @@ func (wc *WebChannel) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	isCLI := r.URL.Query().Get("client_type") == "cli"
 	client := &Client{
-		conn:            conn,
+		connType:        clientConnTypeWS,
+		wsConn:          conn,
 		sendCh:          make(chan protocol.WSMessage, webSendChBufSize),
 		done:            make(chan struct{}),
 		hub:             wc.hub,
@@ -830,7 +851,10 @@ func (wc *WebChannel) handleWS(w http.ResponseWriter, r *http.Request) {
 		statelessSig:    make(chan struct{}, 1),
 	}
 
-	wc.hub.addClient(client.id, client)
+	if !wc.hub.addClient(client.id, client) {
+		_ = conn.Close()
+		return
+	}
 
 	// Immediately subscribe to senderID for server-pushed events (progress, stream, etc.)
 	// CLI clients skip this — they subscribe to their business chatID (absolute path)
@@ -838,7 +862,7 @@ func (wc *WebChannel) handleWS(w http.ResponseWriter, r *http.Request) {
 	// senderID ("admin") causes cross-session widget pushes to overwrite other windows.
 	if !isCLI {
 		chatID := senderID // p2p mode: chatID == senderID
-		wc.hub.subscribe(client.id, chatID)
+		wc.hub.subscribe(client.id, sessionRouteKey("web", chatID))
 	}
 
 	log.WithFields(log.Fields{
@@ -932,17 +956,21 @@ func (wc *WebChannel) replayMissedEvents(client *Client, senderID string) {
 				}
 			}
 		}
+		wc.enqueuePendingAskUser(client, sel.Channel, chatID)
 		return
 	}
 
 	// Replay missed events from buffer. If no progress event is replayed, send the
 	// current active progress snapshot once so reconnecting clients can still
 	// restore an in-flight turn when their last_seq is already up to date.
-	es := wc.getEventStream(chatID)
+	es := wc.getEventStream(sessionRouteKey(sel.Channel, chatID))
 	events := es.eventsAfter(fromSeq)
 	replayedProgress := false
 	for _, evt := range events {
-		if evt.Type == "progress_structured" {
+		if evt.Type == protocol.MsgTypeAskUser {
+			continue
+		}
+		if evt.Type == protocol.MsgTypeProgress {
 			replayedProgress = true
 		}
 		select {
@@ -961,26 +989,31 @@ func (wc *WebChannel) replayMissedEvents(client *Client, senderID string) {
 		}
 	}
 
-	// Resend pending AskUser prompt if the session is waiting for user input.
-	// This handles page refresh: the original ask_user WS message was lost,
-	// so we resend it here to restore the AskUserPanel.
-	if wc.callbacks.GetPendingAskUser != nil {
-		if askP := wc.callbacks.GetPendingAskUser(sel.Channel, chatID); askP != nil {
-			select {
-			case client.sendCh <- protocol.WSMessage{
-				Type:     protocol.MsgTypeAskUser,
-				TS:       time.Now().Unix(),
-				ChatID:   chatID,
-				Progress: askP,
-			}:
-			default:
-			}
-		}
+	wc.enqueuePendingAskUser(client, sel.Channel, chatID)
+}
+
+func (wc *WebChannel) enqueuePendingAskUser(client *Client, channelName, chatID string) bool {
+	if wc.callbacks.WithPendingAskUser == nil {
+		return false
 	}
+	return wc.callbacks.WithPendingAskUser(channelName, chatID, func(pending *protocol.ProgressEvent) bool {
+		select {
+		case client.sendCh <- protocol.WSMessage{
+			Type:     protocol.MsgTypeAskUser,
+			TS:       time.Now().Unix(),
+			Channel:  channelName,
+			ChatID:   chatID,
+			Progress: pending,
+		}:
+			return true
+		default:
+			return false
+		}
+	})
 }
 
 func (wc *WebChannel) writePump(c *Client) {
-	defer c.conn.Close()
+	defer c.wsConn.Close()
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -990,34 +1023,37 @@ func (wc *WebChannel) writePump(c *Client) {
 		case <-c.statelessSig:
 			// Drain all accumulated stateless messages (one per type — latest only).
 			for _, msg := range c.drainStateless() {
-				c.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-				if err := c.conn.WriteJSON(*msg); err != nil {
+				c.wsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+				if err := c.wsConn.WriteJSON(*msg); err != nil {
 					log.WithError(err).Debug("WS write error (stateless)")
 					return
 				}
 			}
 		case msg, ok := <-c.sendCh:
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				c.wsConn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 			// Internal pong — reply to client ping via single-writer goroutine.
 			if msg.Type == "__pong__" {
-				c.conn.WriteControl(websocket.PongMessage, []byte(msg.Content), time.Now().Add(5*time.Second))
+				c.wsConn.WriteControl(websocket.PongMessage, []byte(msg.Content), time.Now().Add(5*time.Second))
 				continue
 			}
-			c.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
-			if err := c.conn.WriteJSON(msg); err != nil {
+			_, err := wc.writeCurrentWSMessage(c, msg, func(current protocol.WSMessage) error {
+				c.wsConn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+				return c.wsConn.WriteJSON(current)
+			})
+			if err != nil {
 				log.WithError(err).Debug("WS write error")
 				return
 			}
 		case <-ticker.C:
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := c.wsConn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}
 		case <-c.done:
 			// Server shutdown — send close frame with GoingAway status
-			c.conn.WriteMessage(websocket.CloseMessage,
+			c.wsConn.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutdown"))
 			return
 		}
@@ -1026,7 +1062,7 @@ func (wc *WebChannel) writePump(c *Client) {
 
 func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 	defer func() {
-		c.conn.Close()
+		c.wsConn.Close()
 		c.closeDone()
 		wc.hub.removeClient(c.id)
 		// Note: do NOT removeRoutes here — multiple clients may share the same
@@ -1034,16 +1070,16 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 		log.WithField("sender_id", c.userID).Info("Web client disconnected")
 	}()
 
-	c.conn.SetReadLimit(10 << 20) // 10MB max message (agent replies with code blocks can be large)
-	c.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
-	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	c.wsConn.SetReadLimit(10 << 20) // 10MB max message (agent replies with code blocks can be large)
+	c.wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	c.wsConn.SetPongHandler(func(string) error {
+		c.wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		return nil
 	})
 	// Route client pings through sendCh so writePump handles the pong.
 	// This avoids any direct write from readPump (no mutex needed).
-	c.conn.SetPingHandler(func(appData string) error {
-		c.conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	c.wsConn.SetPingHandler(func(appData string) error {
+		c.wsConn.SetReadDeadline(time.Now().Add(120 * time.Second))
 		select {
 		case c.sendCh <- protocol.WSMessage{Type: "__pong__", Content: appData}:
 		default:
@@ -1067,7 +1103,7 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 	// wc.GetCurrentSession(c.userID) so chat switches take effect immediately.
 
 	for {
-		_, raw, err := c.conn.ReadMessage()
+		_, raw, err := c.wsConn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err,
 				websocket.CloseGoingAway,
@@ -1174,7 +1210,7 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 				log.WithError(err).Debug("Invalid RPC message from CLI client")
 				continue
 			}
-			go func(id, method string, params json.RawMessage, userID string) {
+			go func(id, method string, params json.RawMessage, identity RPCIdentity) {
 				var result json.RawMessage
 				var rpcErr error
 				func() {
@@ -1188,7 +1224,7 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 							rpcErr = fmt.Errorf("internal error: %v", r)
 						}
 					}()
-					result, rpcErr = wc.callbacks.RPCHandler(method, params, userID)
+					result, rpcErr = wc.callbacks.RPCHandler(method, params, identity)
 				}()
 				rpcMsg := protocol.WSMessage{Type: protocol.MsgTypeRPCResponse, ID: id}
 				if rpcErr != nil {
@@ -1202,7 +1238,11 @@ func (wc *WebChannel) readPump(c *Client, si *sessionInfo) {
 					log.WithField("rpc_id", id).WithField("method", method).
 						Error("RPC response send timeout (10s)")
 				}
-			}(rpcReq.ID, rpcReq.Method, rpcReq.Params, c.userID)
+			}(rpcReq.ID, rpcReq.Method, rpcReq.Params, RPCIdentity{
+				SenderID:        c.userID,
+				CanonicalUserID: c.canonicalUserID,
+				CanonicalRole:   c.canonicalRole,
+			})
 			continue
 		case protocol.MsgTypeSubscribe:
 			// Subscribe to a business chatID so the Hub can route
@@ -1568,14 +1608,6 @@ func shouldEagerSaveUserMessage(channel, trimmedContent string) bool {
 }
 
 // isImageExt returns true if the file extension is a common image format.
-func isImageExt(ext string) bool {
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".tif":
-		return true
-	}
-	return false
-}
-
 // eagerSaveUserMsg persists a user message to session_messages immediately
 // so that a page-refresh can recover it while the backend is still processing.
 func eagerSaveUserMsg(db *sql.DB, channel, chatID, content string) error {

@@ -38,11 +38,12 @@ type ToolProgress struct {
 
 // SubAgentInfo represents a sub-agent's structured progress status.
 type SubAgentInfo struct {
-	Role     string         `json:"role"`
-	Instance string         `json:"instance,omitempty"`
-	Status   string         `json:"status"`
-	Desc     string         `json:"desc,omitempty"`
-	Children []SubAgentInfo `json:"children,omitempty"`
+	Role       string         `json:"role"`
+	Instance   string         `json:"instance,omitempty"`
+	SessionKey string         `json:"session_key,omitempty"`
+	Status     string         `json:"status"`
+	Desc       string         `json:"desc,omitempty"`
+	Children   []SubAgentInfo `json:"children,omitempty"`
 }
 
 // TokenUsage represents a token usage snapshot.
@@ -155,6 +156,20 @@ type PerModelConfig struct {
 	Enabled bool `json:"enabled,omitempty"`
 }
 
+// ContextUsage is the authoritative context snapshot for one session.
+// UsagePercent is nil until the model API has returned an exact prompt token
+// count. It is intentionally not capped at 100.
+type ContextUsage struct {
+	Available        bool     `json:"available"`
+	PromptTokens     int64    `json:"prompt_tokens"`
+	CompletionTokens int64    `json:"completion_tokens"`
+	MaxContextTokens int      `json:"max_context_tokens"`
+	UsagePercent     *float64 `json:"usage_percent"`
+	Model            string   `json:"model"`
+	SubscriptionID   string   `json:"subscription_id"`
+	SubscriptionName string   `json:"subscription_name"`
+}
+
 // ModelEntry is a selectable model paired with the subscription that provides it.
 // Used by the model picker (ListAllModelEntries) so the UI can show "订阅名 · 模型名"
 // and disambiguate models served by different subscriptions. System-default models
@@ -239,13 +254,14 @@ func (AskUserEvent) EventVersion() int { return 1 }
 // Action values: "busy", "idle", "created", "deleted", "renamed",
 // "subagent_started", "subagent_stopped".
 type SessionEvent struct {
-	Channel  string `json:"channel"`
-	ChatID   string `json:"chat_id"`
-	Action   string `json:"action"`
-	Label    string `json:"label,omitempty"`
-	Role     string `json:"role,omitempty"`
-	Instance string `json:"instance,omitempty"`
-	ParentID string `json:"parent_id,omitempty"`
+	Channel    string `json:"channel"`
+	ChatID     string `json:"chat_id"`
+	Action     string `json:"action"`
+	Label      string `json:"label,omitempty"`
+	Role       string `json:"role,omitempty"`
+	Instance   string `json:"instance,omitempty"`
+	SessionKey string `json:"session_key,omitempty"`
+	ParentID   string `json:"parent_id,omitempty"`
 }
 
 func (SessionEvent) EventType() string { return "session" }

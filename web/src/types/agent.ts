@@ -42,6 +42,12 @@ export const COLLAPSE_LEVEL_STORAGE_KEY = 'xbot-collapse-level'
 export const DEFAULT_COLLAPSE_LEVEL: CollapseLevel = 'all'
 export const COLLAPSE_LEVELS: CollapseLevel[] = ['all', 'minimal', 'none']
 
+/** Merge-tools toggle persisted at localStorage key `xbot-merge-tools`.
+ *  Orthogonal to CollapseLevel — controls whether consecutive tool calls
+ *  are merged into a compact row. Default: true. */
+export const MERGE_TOOLS_STORAGE_KEY = 'xbot-merge-tools'
+export const DEFAULT_MERGE_TOOLS = true
+
 /** A single tool snapshot inside an iteration (agent/engine.go IterationToolSnapshot). */
 export interface IterationTool {
   name: string
@@ -113,6 +119,7 @@ export const EMPTY_LIVE_PROGRESS: LiveProgress = {
   lastReasoning: '',
   todos: [],
   subAgents: [],
+  tokenUsage: null,
 }
 
 /** Status badge kind for a tool, derived from its status string. */

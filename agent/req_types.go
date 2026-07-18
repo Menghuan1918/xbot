@@ -60,6 +60,7 @@ const (
 	MethodGetSessionSubscription       = "get_session_subscription"
 	MethodGetHistory                   = "get_history"
 	MethodGetTokenState                = "get_token_state"
+	MethodGetContextUsage              = "get_context_usage"
 	MethodTrimHistory                  = "trim_history"
 	MethodResetTokenState              = "reset_token_state"
 	MethodGetChannelConfig             = "get_channel_config"
@@ -75,7 +76,6 @@ const (
 	MethodGetAgentSessionDump          = "get_agent_session_dump"
 	MethodGetAgentSessionDumpByFullKey = "get_agent_session_dump_by_full_key"
 	MethodListTenants                  = "list_tenants"
-	MethodGetEffectiveMaxContext       = "get_effective_max_context"
 	MethodSetMaxIterations             = "set_max_iterations"
 	MethodSetMaxConcurrency            = "set_max_concurrency"
 	MethodSetCompressionThreshold      = "set_compression_threshold"
@@ -315,6 +315,11 @@ type getTokenStateReq struct {
 	ChatID  string `json:"chat_id"`
 }
 
+type getContextUsageReq struct {
+	Channel string `json:"channel"`
+	ChatID  string `json:"chat_id"`
+}
+
 type trimHistoryReq struct {
 	Channel string `json:"channel"`
 	ChatID  string `json:"chat_id"`
@@ -387,11 +392,6 @@ type getAgentSessionDumpReq struct {
 
 type getAgentSessionDumpByFullKeyReq struct {
 	FullKey string `json:"full_key"`
-}
-
-type getEffectiveMaxContextReq struct {
-	SenderID string `json:"sender_id"`
-	ChatID   string `json:"chat_id"`
 }
 
 type applyRuntimeSettingsReq struct {

@@ -1,10 +1,12 @@
 package serverapp
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,7 +16,9 @@ import (
 	"xbot/channel/web"
 	"xbot/config"
 	llm "xbot/llm"
+	"xbot/protocol"
 	"xbot/storage/sqlite"
+	"xbot/tools"
 )
 
 func newTestConfig() *config.Config {
@@ -52,6 +56,34 @@ func TestSessionKeyOwnerUsesLastSlashForCLIAbsolutePaths(t *testing.T) {
 		if got := sessionKeyOwner(tc.key); got != tc.want {
 			t.Fatalf("sessionKeyOwner(%q) = %q, want %q", tc.key, got, tc.want)
 		}
+	}
+}
+
+func TestKillBackgroundTaskRejectsForeignRootSession(t *testing.T) {
+	manager := tools.NewBackgroundTaskManager()
+	task := manager.Start("web:web-foreign", "web-foreign", "wait", func(ctx context.Context, output func(string)) (int, error) {
+		<-ctx.Done()
+		return -1, ctx.Err()
+	})
+	t.Cleanup(func() { _ = manager.Kill(task.ID) })
+
+	ag := &agent.Agent{}
+	ag.SetBgTaskManager(manager)
+	table := BuildRPCTable(&config.Config{}, ag, nil, nil, nil)
+	params, err := json.Marshal(map[string]string{"task_id": task.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithRPCCtxResolved(context.Background(), "web-2", "web-2", 2, "user")
+	if _, err := table.Dispatch(ctx, "kill_bg_task", params); err == nil || err.Error() != "access denied" {
+		t.Fatalf("kill_bg_task error = %v, want access denied", err)
+	}
+	status, err := manager.Status(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != tools.BgTaskRunning {
+		t.Fatalf("foreign task status = %s, want %s", status.Status, tools.BgTaskRunning)
 	}
 }
 
@@ -1641,6 +1673,125 @@ func TestSelectModelRPC_UsesRequestedChannel(t *testing.T) {
 	}
 }
 
+func TestGetContextUsageRPC_ExactSnapshotFallbackAndAuthorization(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XBOT_HOME", dir)
+	ag, err := agent.New(agent.Config{
+		LLM:            &llm.MockLLM{},
+		Model:          "default-model",
+		WorkDir:        dir,
+		DBPath:         dir + "/xbot.db",
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	defer ag.Close()
+
+	db := ag.MultiSession().DB()
+	subSvc := ag.LLMFactory().GetSubscriptionSvc()
+	tenantSvc := sqlite.NewTenantService(db)
+	sub := &sqlite.LLMSubscription{
+		ID: "sub-context", SenderID: "cli_user", Name: "Context Sub", Provider: "openai",
+		BaseURL: "https://api.example/v1", APIKey: "sk-test", Model: "context-model",
+		PerModelConfigs: map[string]sqlite.PerModelConfig{"context-model": {MaxContext: 100000}},
+	}
+	if err := subSvc.Add(sub); err != nil {
+		t.Fatalf("add subscription: %v", err)
+	}
+	if err := tenantSvc.SetTenantSubscription("web", "chat-context", sub.ID, "context-model"); err != nil {
+		t.Fatalf("set tenant subscription: %v", err)
+	}
+	tenantID, err := tenantSvc.GetTenantIDByChannelChatID("web", "chat-context")
+	if err != nil || tenantID == 0 {
+		t.Fatalf("get tenant: id=%d err=%v", tenantID, err)
+	}
+	if _, err := db.Conn().Exec(
+		"INSERT INTO session_messages (tenant_id, role, content, context_tokens) VALUES (?, 'user', 'hello', 120000)",
+		tenantID,
+	); err != nil {
+		t.Fatalf("insert user message: %v", err)
+	}
+	if err := sqlite.NewMemoryService(db).SetTokenState(context.Background(), tenantID, 50000, 1000); err != nil {
+		t.Fatalf("set fallback token state: %v", err)
+	}
+
+	aCfg := &config.Config{Agent: config.AgentConfig{MaxContextTokens: 200000}}
+	table := BuildRPCTable(aCfg, ag, nil, nil, nil)
+	params, _ := json.Marshal(map[string]string{"channel": "web", "chat_id": "chat-context"})
+	raw, err := HandleCLIRPC(table, agent.MethodGetContextUsage, params, "admin")
+	if err != nil {
+		t.Fatalf("get_context_usage: %v", err)
+	}
+	var usage protocol.ContextUsage
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		t.Fatalf("unmarshal usage: %v", err)
+	}
+	if !usage.Available || usage.PromptTokens != 120000 || usage.CompletionTokens != 1000 || usage.MaxContextTokens != 100000 {
+		t.Fatalf("usage=%+v", usage)
+	}
+	if usage.UsagePercent == nil || *usage.UsagePercent != 120 {
+		t.Fatalf("usage percent=%v, want 120", usage.UsagePercent)
+	}
+	if usage.Model != "context-model" || usage.SubscriptionID != sub.ID || usage.SubscriptionName != sub.Name {
+		t.Fatalf("model metadata=%+v", usage)
+	}
+
+	if _, err := db.Conn().Exec("UPDATE session_messages SET context_tokens = 0 WHERE tenant_id = ?", tenantID); err != nil {
+		t.Fatalf("clear message context: %v", err)
+	}
+	raw, err = HandleCLIRPC(table, agent.MethodGetContextUsage, params, "admin")
+	if err != nil {
+		t.Fatalf("get fallback context usage: %v", err)
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		t.Fatalf("unmarshal fallback usage: %v", err)
+	}
+	if usage.PromptTokens != 50000 || usage.CompletionTokens != 1000 {
+		t.Fatalf("fallback usage=%+v", usage)
+	}
+
+	if err := tenantSvc.SetTenantSubscription("web", "chat-context", sub.ID, "unconfigured-model"); err != nil {
+		t.Fatalf("switch to unconfigured model: %v", err)
+	}
+	raw, err = HandleCLIRPC(table, agent.MethodGetContextUsage, params, "admin")
+	if err != nil {
+		t.Fatalf("get no-data context usage: %v", err)
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil {
+		t.Fatalf("unmarshal no-data usage: %v", err)
+	}
+	if usage.Available || usage.PromptTokens != 0 || usage.CompletionTokens != 0 || usage.UsagePercent != nil {
+		t.Fatalf("no-data usage=%+v", usage)
+	}
+	if usage.Model != "unconfigured-model" || usage.MaxContextTokens != 200000 {
+		t.Fatalf("global context fallback=%+v", usage)
+	}
+
+	if _, err := db.Conn().Exec(
+		"INSERT INTO user_chats (channel, sender_id, chat_id, label, user_id) VALUES ('web', 'web-2', 'chat-context', 'legacy', 0)",
+	); err != nil {
+		t.Fatalf("seed legacy web chat ownership: %v", err)
+	}
+	legacyOwner := WithRPCCtxResolved(context.Background(), "web-2", "web-2", 2, "user")
+	if _, err := table.Dispatch(legacyOwner, agent.MethodGetContextUsage, params); err != nil {
+		t.Fatalf("legacy Web owner get_context_usage: %v", err)
+	}
+
+	unauthorized := WithRPCCtxResolved(context.Background(), "web-3", "web-3", 3, "user")
+	if _, err := table.Dispatch(unauthorized, agent.MethodGetContextUsage, params); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("cross-user get_context_usage error=%v", err)
+	}
+	if err := tenantSvc.SetTenantSubscription("cli", "web-3", sub.ID, "context-model"); err != nil {
+		t.Fatalf("seed same-chat-id cross-channel tenant: %v", err)
+	}
+	crossChannelParams, _ := json.Marshal(map[string]string{"channel": "cli", "chat_id": "web-3"})
+	if _, err := table.Dispatch(unauthorized, agent.MethodGetContextUsage, crossChannelParams); err == nil || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("cross-channel same-chat-id error=%v", err)
+	}
+}
+
 // TestHandleCLIRPCGetSessionSubscription verifies the get_session_subscription RPC.
 // Tests the fallback path (LLMFactory cache) since MultiSession is not wired in this test.
 func TestHandleCLIRPCGetSessionSubscription(t *testing.T) {
@@ -1721,6 +1872,347 @@ func TestHandleCLIRPCGetSessionSubscription_Empty(t *testing.T) {
 		t.Errorf("subscription_id should be empty for unknown session, got %q", res["subscription_id"])
 	}
 	// Model from LLMFactory fallback is expected; we just verify subscription_id is empty.
+}
+
+func TestSetCWDAllowsOwnedGeneratedWebChat(t *testing.T) {
+	dir := t.TempDir()
+	ag, err := agent.New(agent.Config{
+		WorkDir:        dir,
+		DBPath:         filepath.Join(dir, "xbot.db"),
+		XbotHome:       dir,
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+	ag.SetIdentityResolver(agent.NewIdentityResolver(ag.MultiSession().DB().Conn()))
+
+	const senderID = "web-2"
+	const chatID = "generated-chat"
+	if _, err := ag.MultiSession().DB().Conn().Exec(
+		"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
+		"web", senderID, chatID, "Generated",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	table := BuildRPCTable(&config.Config{}, ag, nil, nil, nil)
+	params, _ := json.Marshal(map[string]string{
+		"channel": "web",
+		"chat_id": chatID,
+		"dir":     dir,
+	})
+	ctx := WithRPCCtxResolved(context.Background(), senderID, senderID, 42, "user")
+	if _, err := table.Dispatch(ctx, "set_cwd", params); err != nil {
+		t.Fatalf("set_cwd for owned generated chat: %v", err)
+	}
+	sess, ok := ag.MultiSession().GetSession("web", chatID)
+	if !ok {
+		t.Fatal("owned generated chat session was not created")
+	}
+	if got := sess.GetCurrentDir(); got != dir {
+		t.Fatalf("session CWD = %q, want %q", got, dir)
+	}
+}
+
+func TestAgentRPCsCheckGeneratedWebChatOwner(t *testing.T) {
+	dir := t.TempDir()
+	ag, err := agent.New(agent.Config{
+		WorkDir:        dir,
+		DBPath:         filepath.Join(dir, "xbot.db"),
+		XbotHome:       dir,
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+
+	for _, chat := range []struct {
+		senderID string
+		chatID   string
+	}{
+		{senderID: "web-2", chatID: "owned-chat"},
+		{senderID: "web-3", chatID: "foreign-chat"},
+	} {
+		if _, err := ag.MultiSession().DB().Conn().Exec(
+			"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
+			"web", chat.senderID, chat.chatID, chat.chatID,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ag.MultiSession().DB().Conn().Exec(
+			"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
+			"agent", "web:"+chat.chatID+"/review:1", time.Now().Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tenant := range []struct {
+		channel     string
+		chatID      string
+		ownerUserID int64
+	}{
+		{channel: "cli", chatID: "web-2", ownerUserID: 99},
+		{channel: "agent", chatID: "cli:web-2/review:1", ownerUserID: 99},
+		{channel: "cli", chatID: "owned-cli", ownerUserID: 42},
+		{channel: "agent", chatID: "cli:owned-cli/review:1", ownerUserID: 42},
+	} {
+		if _, err := ag.MultiSession().DB().Conn().Exec(
+			"INSERT INTO tenants (channel, chat_id, owner_user_id, last_active_at) VALUES (?, ?, ?, ?)",
+			tenant.channel, tenant.chatID, tenant.ownerUserID, time.Now().Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	table := BuildRPCTable(&config.Config{}, ag, nil, nil, nil)
+	ctx := WithRPCCtxResolved(context.Background(), "web-2", "web-2", 42, "user")
+	ownedChatID := "web:owned-chat/review:1"
+	foreignChatID := "web:foreign-chat/review:1"
+	owned, _ := json.Marshal(map[string]string{"channel": "agent", "chat_id": ownedChatID})
+	if _, err := table.Dispatch(ctx, "get_active_progress", owned); err != nil {
+		t.Fatalf("owned agent progress: %v", err)
+	}
+	foreign, _ := json.Marshal(map[string]string{"channel": "agent", "chat_id": foreignChatID})
+	if _, err := table.Dispatch(ctx, "get_active_progress", foreign); err == nil {
+		t.Fatal("foreign agent progress should be denied")
+	}
+
+	ownedDump, _ := json.Marshal(map[string]string{"full_key": ownedChatID})
+	if _, err := table.Dispatch(ctx, "get_agent_session_dump_by_full_key", ownedDump); err != nil {
+		t.Fatalf("owned agent dump: %v", err)
+	}
+	foreignDump, _ := json.Marshal(map[string]string{"full_key": foreignChatID})
+	if _, err := table.Dispatch(ctx, "get_agent_session_dump_by_full_key", foreignDump); err == nil {
+		t.Fatal("foreign agent dump should be denied")
+	}
+
+	for _, method := range []string{"get_session_messages", "get_agent_session_dump"} {
+		ownedParent, _ := json.Marshal(map[string]string{
+			"channel":  "web",
+			"chat_id":  "owned-chat",
+			"role":     "review",
+			"instance": "1",
+		})
+		if _, err := table.Dispatch(ctx, method, ownedParent); err != nil {
+			t.Fatalf("%s for owned generated parent: %v", method, err)
+		}
+		foreignParent, _ := json.Marshal(map[string]string{
+			"channel":  "web",
+			"chat_id":  "foreign-chat",
+			"role":     "review",
+			"instance": "1",
+		})
+		if _, err := table.Dispatch(ctx, method, foreignParent); err == nil {
+			t.Fatalf("%s for foreign generated parent should be denied", method)
+		}
+
+		ownedCLI, _ := json.Marshal(map[string]string{
+			"channel":  "cli",
+			"chat_id":  "owned-cli",
+			"role":     "review",
+			"instance": "1",
+		})
+		if _, err := table.Dispatch(ctx, method, ownedCLI); err != nil {
+			t.Fatalf("%s for canonical-owned CLI parent: %v", method, err)
+		}
+		collidingCLI, _ := json.Marshal(map[string]string{
+			"channel":  "cli",
+			"chat_id":  "web-2",
+			"role":     "review",
+			"instance": "1",
+		})
+		if _, err := table.Dispatch(ctx, method, collidingCLI); err == nil {
+			t.Fatalf("%s for foreign CLI self-ID collision should be denied", method)
+		}
+		emptyCollidingCLI, _ := json.Marshal(map[string]string{
+			"channel": "cli",
+			"chat_id": "",
+			"role":    "review",
+		})
+		if _, err := table.Dispatch(ctx, method, emptyCollidingCLI); err == nil || !strings.Contains(err.Error(), "access denied") {
+			t.Fatalf("%s empty chat ID should default then deny foreign CLI collision, got %v", method, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		method string
+		params map[string]any
+	}{
+		{method: "clear_memory", params: map[string]any{"target_type": "all"}},
+		{method: "get_memory_stats", params: map[string]any{}},
+		{method: "count_interactive_sessions", params: map[string]any{}},
+		{method: "list_interactive_sessions", params: map[string]any{}},
+		{method: "inspect_interactive_session", params: map[string]any{"role": "review"}},
+		{method: "get_history", params: map[string]any{}},
+		{method: "delete_chat", params: map[string]any{}},
+		{method: "rename_chat", params: map[string]any{"new_name": "forbidden"}},
+		{method: "get_token_state", params: map[string]any{}},
+		{method: "trim_history", params: map[string]any{"cutoff": int64(0)}},
+		{method: "is_processing", params: map[string]any{}},
+		{method: "get_active_progress", params: map[string]any{}},
+		{method: "get_pending_ask_user", params: map[string]any{}},
+		{method: "get_todos", params: map[string]any{}},
+	} {
+		t.Run("deny CLI self-ID collision/"+tc.method, func(t *testing.T) {
+			tc.params["channel"] = "cli"
+			tc.params["chat_id"] = "web-2"
+			params, err := json.Marshal(tc.params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := table.Dispatch(ctx, tc.method, params); err == nil || !strings.Contains(err.Error(), "access denied") {
+				t.Fatalf("foreign CLI self-ID collision should be denied, got %v", err)
+			}
+		})
+	}
+
+	ownedCLIChild, _ := json.Marshal(map[string]string{"full_key": "cli:owned-cli/review:1"})
+	if _, err := table.Dispatch(ctx, "get_agent_session_dump_by_full_key", ownedCLIChild); err != nil {
+		t.Fatalf("canonical-owned CLI-rooted agent dump: %v", err)
+	}
+	collidingCLIChild, _ := json.Marshal(map[string]string{"full_key": "cli:web-2/review:1"})
+	if _, err := table.Dispatch(ctx, "get_agent_session_dump_by_full_key", collidingCLIChild); err == nil {
+		t.Fatal("foreign CLI-rooted agent with colliding parent ID should be denied")
+	}
+}
+
+func TestWebChatCRUDCallbacksKeepChannelsIsolated(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XBOT_HOME", dir)
+	const chatID = "/repo/project:Agent-main"
+	sessionsDir := filepath.Join(dir, "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	localSessions, err := json.Marshal(map[string]any{
+		"dir": "/repo/project",
+		"sessions": []map[string]any{
+			{"name": "Agent-main", "chat_id": chatID, "created_at": "2026-07-02T00:00:00Z"},
+			{"name": "keep", "chat_id": "/repo/project:keep", "created_at": "2026-07-01T00:00:00Z", "model": "model-a"},
+		},
+		"last_active": chatID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionsDir, "project.json"), localSessions, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ag, err := agent.New(agent.Config{
+		WorkDir:        dir,
+		DBPath:         filepath.Join(dir, "xbot.db"),
+		XbotHome:       dir,
+		SandboxMode:    "none",
+		MemoryProvider: "flat",
+	})
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	t.Cleanup(func() { _ = ag.Close() })
+	db := ag.MultiSession().DB()
+	for _, channelName := range []string{"web", "cli"} {
+		if _, err := db.Conn().Exec(
+			"INSERT INTO tenants (channel, chat_id, last_active_at) VALUES (?, ?, ?)",
+			channelName, chatID, time.Now().Format(time.RFC3339),
+		); err != nil {
+			t.Fatal(err)
+		}
+		senderID := "web-1"
+		if channelName == "cli" {
+			senderID = "cli_user"
+		}
+		if _, err := db.Conn().Exec(
+			"INSERT INTO user_chats (channel, sender_id, chat_id, label) VALUES (?, ?, ?, ?)",
+			channelName, senderID, chatID, channelName+" label",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callbacks := buildWebCallbacks(&config.Config{}, ag, db)
+	if err := callbacks.ChatRename("web-1", "cli", chatID, "renamed cli"); err != nil {
+		t.Fatalf("rename CLI session: %v", err)
+	}
+
+	labels := make(map[string]string)
+	for _, channelName := range []string{"web", "cli"} {
+		rows, err := listTenantsByChannel(db.Conn(), channelName, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s rows = %#v", channelName, rows)
+		}
+		labels[channelName] = rows[0].Label
+	}
+	if labels["web"] != "web label" || labels["cli"] != "renamed cli" {
+		t.Fatalf("cross-channel labels = %#v", labels)
+	}
+
+	if err := callbacks.ChatDelete("web-1", "cli", chatID); err != nil {
+		t.Fatalf("delete CLI session: %v", err)
+	}
+	for channelName, want := range map[string]int{"web": 1, "cli": 0} {
+		var count int
+		if err := db.Conn().QueryRow(
+			"SELECT COUNT(*) FROM tenants WHERE channel = ? AND chat_id = ?",
+			channelName, chatID,
+		).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("%s tenant count = %d, want %d", channelName, count, want)
+		}
+	}
+	var cliLabels int
+	if err := db.Conn().QueryRow(
+		"SELECT COUNT(*) FROM user_chats WHERE channel = ? AND chat_id = ?",
+		"cli", chatID,
+	).Scan(&cliLabels); err != nil {
+		t.Fatal(err)
+	}
+	if cliLabels != 0 {
+		t.Fatalf("deleted CLI label rows = %d, want 0", cliLabels)
+	}
+	cliRows, err := listCLIChatSessions(db.Conn(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range cliRows {
+		if row.ChatID == chatID {
+			t.Fatalf("deleted CLI session reappeared from local store: %#v", cliRows)
+		}
+	}
+	const localOnlyChatID = "/repo/project:keep"
+	if callbacks.LocalSessionExists == nil || !callbacks.LocalSessionExists("cli", localOnlyChatID) {
+		t.Fatal("local-only CLI session was not exposed to Web authorization")
+	}
+	if err := callbacks.ChatRename("web-1", "cli", localOnlyChatID, "renamed-local"); err != nil {
+		t.Fatalf("rename local-only CLI session: %v", err)
+	}
+	cliRows, err = listCLIChatSessions(db.Conn(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRenamed := false
+	for _, row := range cliRows {
+		if row.ChatID == localOnlyChatID && row.Label == "renamed-local" {
+			foundRenamed = true
+		}
+	}
+	if !foundRenamed {
+		t.Fatalf("renamed local-only CLI session was not relisted: %#v", cliRows)
+	}
+	if err := callbacks.ChatDelete("web-1", "cli", localOnlyChatID); err != nil {
+		t.Fatalf("delete local-only CLI session: %v", err)
+	}
+	if callbacks.LocalSessionExists("cli", localOnlyChatID) {
+		t.Fatal("local-only CLI session metadata survived deletion")
+	}
 }
 
 // TestSetDefaultSubscription_GlobalSwitch_PreservesPerSession verifies that a global

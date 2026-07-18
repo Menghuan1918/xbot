@@ -64,17 +64,54 @@ export function parseAgentChatID(chatID: string): ParsedAgentChatID | null {
 /** Bucket a single session into one group key for the active category. */
 export function sessionGroupKey(s: SessionInfo, category: SessionCategory): string {
   switch (category) {
-    case 'all':
-      return 'all'
     case 'time':
       return timeBucket(s.lastActive)
     case 'status':
       return s.status
+    case 'path':
+      return pathBucket(s)
   }
 }
 
+/**
+ * Return the full work directory used as the stable `path` grouping key.
+ *
+ * CLI sessions have chatID like `/path/to/workdir:session-name`.
+ * Older servers are supported by parsing CLI-style chat IDs.
+ */
+export function pathBucket(s: SessionInfo): string {
+  const explicit = normalizeWorkDir(s.workDir || '')
+  if (explicit) return explicit
+  // For SubAgent sessions, inherit the parent's path group
+  if (s.parentChatID && s.parentChannel) {
+    return pathBucket({ ...s, chatID: s.parentChatID, channel: s.parentChannel, parentChatID: undefined, parentChannel: undefined })
+  }
+  if (s.channel === 'cli') {
+    const workDir = extractWorkDir(s.chatID)
+    if (workDir) return normalizeWorkDir(workDir)
+  }
+  return '__unset__'
+}
+
+/** Extract the workDir from a CLI-style chatID: `/path/to/workdir:session-name`. */
+function extractWorkDir(chatID: string): string {
+  const idx = chatID.lastIndexOf(':')
+  const candidate = idx > 1 && idx < chatID.length - 1 ? chatID.slice(0, idx) : chatID
+  // Must look like a path (starts with / or drive letter or ~)
+  if (candidate.startsWith('/') || /^[A-Za-z]:[\\/]/.test(candidate) || candidate.startsWith('~')) {
+    return candidate
+  }
+  return ''
+}
+
+function normalizeWorkDir(path: string): string {
+  const trimmed = path.trim()
+  if (trimmed === '/' || /^[A-Za-z]:[\\/]$/.test(trimmed)) return trimmed
+  return trimmed.replace(/[\\/]+$/, '')
+}
+
 /** Ordered status groups (UI iterates this for stable ordering). */
-export const STATUS_ORDER: SessionStatus[] = ['running', 'waiting_input', 'pending', 'idle', 'error']
+export const STATUS_ORDER: SessionStatus[] = ['running', 'waiting_input', 'pending', 'unread', 'idle', 'error']
 
 /** Ordered time buckets. */
 export const TIME_BUCKETS = ['today', 'yesterday', 'earlier'] as const
@@ -117,7 +154,7 @@ export interface SessionGroup {
  * Group + sort sessions for a category. Group order:
  *   - time:    today → yesterday → earlier
  *   - status:  STATUS_ORDER
- *   - all:     single group keyed 'all'
+ *   - path:    sorted by full directory, sessions without a directory last
  *
  * Within each group the full sort (starred-first, lastActive-desc) applies,
  * so starred items float to the top of their group too.
@@ -128,9 +165,6 @@ export function groupSessions(
   starredIds: string[],
 ): SessionGroup[] {
   const sorted = sortSessions(sessions, starredIds)
-  if (category === 'all') {
-    return [{ key: 'all', sessions: sorted }]
-  }
   const map = new Map<string, SessionInfo[]>()
   for (const s of sorted) {
     const key = sessionGroupKey(s, category)
@@ -144,7 +178,12 @@ export function groupSessions(
   } else if (category === 'time') {
     keys = TIME_BUCKETS.filter((k) => map.has(k))
   } else {
-    keys = [...map.keys()]
+    // path: sort alphabetically, with the unset bucket last
+    keys = [...map.keys()].sort((a, b) => {
+      if (a === '__unset__') return 1
+      if (b === '__unset__') return -1
+      return a.localeCompare(b)
+    })
   }
   return keys.map((key) => ({ key, sessions: map.get(key)! }))
 }

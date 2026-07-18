@@ -3,7 +3,6 @@
 package web
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -102,8 +101,7 @@ func (wc *WebChannel) handleCloudUpload(w http.ResponseWriter, r *http.Request, 
 		"provider": wc.ossProvider.Name(),
 	}).Info("File uploaded to cloud OSS")
 
-	json.NewEncoder(w).Encode(map[string]any{
-		"ok":         true,
+	writeJSON(w, http.StatusOK, map[string]any{
 		"upload_key": key,
 		"name":       filename,
 		"size":       len(data),

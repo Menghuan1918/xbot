@@ -1,8 +1,91 @@
 package sqlite
 
 import (
+	"context"
+	"fmt"
 	"testing"
 )
+
+func createCanonicalIdentity(t *testing.T, db *DB, channel, senderID string) int64 {
+	t.Helper()
+	result, err := db.Conn().Exec(
+		"INSERT INTO users (display_name, role) VALUES (?, 'user')",
+		fmt.Sprintf("%s-%s", channel, senderID),
+	)
+	if err != nil {
+		t.Fatalf("insert user: %v", err)
+	}
+	userID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("get user id: %v", err)
+	}
+	if _, err := db.Conn().Exec(
+		"INSERT INTO user_identities (user_id, channel, channel_user_id) VALUES (?, ?, ?)",
+		userID, channel, senderID,
+	); err != nil {
+		t.Fatalf("insert identity: %v", err)
+	}
+	return userID
+}
+
+func TestChatAndTenantOwnership_BackfillsCanonicalUser(t *testing.T) {
+	db, err := Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+
+	const senderID = "web-owner"
+	userID := createCanonicalIdentity(t, db, "web", senderID)
+	chatSvc := NewChatService(db)
+	chatID, err := chatSvc.CreateChat("web", senderID, "owned chat")
+	if err != nil {
+		t.Fatalf("create chat: %v", err)
+	}
+
+	var chatUserID int64
+	if err := db.Conn().QueryRow(
+		"SELECT COALESCE(user_id, 0) FROM user_chats WHERE channel = 'web' AND chat_id = ?",
+		chatID,
+	).Scan(&chatUserID); err != nil {
+		t.Fatalf("read chat owner: %v", err)
+	}
+	if chatUserID != userID {
+		t.Fatalf("chat user_id=%d, want %d", chatUserID, userID)
+	}
+
+	// Simulate a pre-canonical row and verify normal session loading repairs it.
+	if _, err := db.Conn().Exec(
+		"UPDATE user_chats SET user_id = 0 WHERE channel = 'web' AND chat_id = ?",
+		chatID,
+	); err != nil {
+		t.Fatalf("clear legacy chat owner: %v", err)
+	}
+	tenantID, err := NewTenantService(db).GetOrCreateTenantID("web", chatID)
+	if err != nil {
+		t.Fatalf("get or create tenant: %v", err)
+	}
+
+	var ownerUserID int64
+	if err := db.Conn().QueryRow(
+		"SELECT COALESCE(owner_user_id, 0) FROM tenants WHERE id = ?",
+		tenantID,
+	).Scan(&ownerUserID); err != nil {
+		t.Fatalf("read tenant owner: %v", err)
+	}
+	if ownerUserID != userID {
+		t.Fatalf("tenant owner_user_id=%d, want %d", ownerUserID, userID)
+	}
+	if err := db.Conn().QueryRow(
+		"SELECT COALESCE(user_id, 0) FROM user_chats WHERE channel = 'web' AND chat_id = ?",
+		chatID,
+	).Scan(&chatUserID); err != nil {
+		t.Fatalf("read repaired chat owner: %v", err)
+	}
+	if chatUserID != userID {
+		t.Fatalf("repaired chat user_id=%d, want %d", chatUserID, userID)
+	}
+}
 
 func TestTenantService_GetOrCreateTenantID(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
@@ -285,5 +368,57 @@ func TestTenantService_ListTenants_IncludesSubscription(t *testing.T) {
 	}
 	if b, ok := subs["/chat-b"]; !ok || b.SubscriptionID != "sub-2" || b.Model != "claude-3" {
 		t.Errorf("/chat-b: got sub=%q model=%q", b.SubscriptionID, b.Model)
+	}
+}
+
+func TestTenantService_SetTenantSubscription_ClearsTokenSnapshotOnlyOnChange(t *testing.T) {
+	db, err := Open(t.TempDir() + "/test.db")
+	if err != nil {
+		t.Fatalf("open database: %v", err)
+	}
+	defer db.Close()
+
+	tenantSvc := NewTenantService(db)
+	if err := tenantSvc.SetTenantSubscription("web", "chat-1", "sub-1", "model-1"); err != nil {
+		t.Fatalf("set initial subscription: %v", err)
+	}
+	tenantID, err := tenantSvc.GetTenantIDByChannelChatID("web", "chat-1")
+	if err != nil || tenantID == 0 {
+		t.Fatalf("get tenant: id=%d err=%v", tenantID, err)
+	}
+	if _, err := db.Conn().Exec(
+		"INSERT INTO session_messages (tenant_id, role, content, context_tokens) VALUES (?, 'user', 'hello', 12345)",
+		tenantID,
+	); err != nil {
+		t.Fatalf("insert user message: %v", err)
+	}
+	memSvc := NewMemoryService(db)
+	if err := memSvc.SetTokenState(context.Background(), tenantID, 12345, 678); err != nil {
+		t.Fatalf("set token state: %v", err)
+	}
+
+	if err := tenantSvc.SetTenantSubscription("web", "chat-1", "sub-1", "model-1"); err != nil {
+		t.Fatalf("repeat same subscription: %v", err)
+	}
+	assertTenantTokenSnapshot(t, db, tenantID, 12345, 678, 12345)
+
+	if err := tenantSvc.SetTenantSubscription("web", "chat-1", "sub-1", "model-2"); err != nil {
+		t.Fatalf("switch model: %v", err)
+	}
+	assertTenantTokenSnapshot(t, db, tenantID, 0, 0, 0)
+}
+
+func assertTenantTokenSnapshot(t *testing.T, db *DB, tenantID, wantPrompt, wantCompletion, wantContext int64) {
+	t.Helper()
+	prompt, completion, err := NewMemoryService(db).GetTokenState(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("get token state: %v", err)
+	}
+	contextTokens, err := NewSessionService(db).GetLastUserMessageContextTokens(tenantID)
+	if err != nil {
+		t.Fatalf("get user context tokens: %v", err)
+	}
+	if prompt != wantPrompt || completion != wantCompletion || contextTokens != wantContext {
+		t.Fatalf("snapshot=(%d,%d,%d), want (%d,%d,%d)", prompt, completion, contextTokens, wantPrompt, wantCompletion, wantContext)
 	}
 }

@@ -1,9 +1,53 @@
 package cli
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestRemoveStoredSessionByChatIDPreservesOtherSessionMetadata(t *testing.T) {
+	t.Setenv("XBOT_HOME", t.TempDir())
+	workDir := filepath.Join(t.TempDir(), "repo")
+	target := workDir + ":remove-me"
+	keep := workDir + ":keep-me"
+	ds := &dirSessions{
+		Dir:        workDir,
+		LastActive: target,
+		Sessions: []dirSession{
+			{Name: "remove-me", ChatID: target, CreatedAt: flexTime(time.Now())},
+			{Name: "keep-me", ChatID: keep, CreatedAt: flexTime(time.Now()), CWD: "/tmp/worktree", Model: "model-a"},
+		},
+	}
+	if err := ds.save(); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := RemoveStoredSessionByChatID(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !removed || StoredSessionExists(target) {
+		t.Fatalf("removed = %v, still exists = %v", removed, StoredSessionExists(target))
+	}
+
+	data, err := os.ReadFile(filepath.Join(sessionsDir(), sessionDirHash(workDir)+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored dirSessions
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.LastActive != "" || len(stored.Sessions) != 1 {
+		t.Fatalf("stored sessions = %#v", stored)
+	}
+	if got := stored.Sessions[0]; got.ChatID != keep || got.CWD != "/tmp/worktree" || got.Model != "model-a" {
+		t.Fatalf("retained session metadata = %#v", got)
+	}
+}
 
 func TestIsWorkDirPath(t *testing.T) {
 	tests := []struct {
@@ -165,6 +209,7 @@ func TestParseChatID_WindowsRoundTrip(t *testing.T) {
 }
 
 func TestSaveSessionLLMState_SkipBackendFields(t *testing.T) {
+	t.Setenv("XBOT_HOME", t.TempDir())
 	workDir := t.TempDir()
 	chatID := workDir + ":test-session"
 	// Create session directory
@@ -200,6 +245,7 @@ func TestSaveSessionLLMState_SkipBackendFields(t *testing.T) {
 
 func TestSaveSessionLLMState_DefaultBehavior(t *testing.T) {
 	// Without skipBackendFields, should save all fields (backward compatible)
+	t.Setenv("XBOT_HOME", t.TempDir())
 	workDir := t.TempDir()
 	chatID := workDir + ":test-backcompat"
 	ds, _ := LoadDirSessions(workDir)

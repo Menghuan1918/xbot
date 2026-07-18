@@ -185,6 +185,57 @@ func (f *LLMFactory) GetEffectiveMaxContext(senderID, chatID string) int {
 	return mc
 }
 
+// ResolveContextConfig resolves context usage metadata without creating an LLM
+// client or binding a session. Resolution is session selection, user last-used
+// model, then the system subscription.
+func (f *LLMFactory) ResolveContextConfig(senderID, chatID, channel string, defaultMaxContext int) (subID, subName, model string, maxContext int) {
+	if f.subscriptionSvc == nil {
+		return "", "", "", defaultMaxContext
+	}
+
+	resolve := func(id, selectedModel string) (*sqlite.LLMSubscription, string) {
+		if id == "" || selectedModel == "" {
+			return nil, ""
+		}
+		sub := f.lookupSub(id)
+		if sub == nil {
+			return nil, ""
+		}
+		return sub, selectedModel
+	}
+
+	var sub *sqlite.LLMSubscription
+	if chatID != "" && f.tenantSvc != nil {
+		id, selectedModel, _ := f.tenantSvc.GetTenantSubscription(channel, chatID)
+		sub, model = resolve(id, selectedModel)
+	}
+	if sub == nil {
+		if selected, err := f.subscriptionSvc.GetUserDefaultModel(senderID); err == nil && selected != nil {
+			sub, model = resolve(selected.SubscriptionID, selected.Model)
+		}
+	}
+	if sub == nil {
+		if systemSub, err := f.subscriptionSvc.GetSystemSubscription(); err == nil && systemSub != nil {
+			f.mu.RLock()
+			defaultModel := f.defaultModel
+			f.mu.RUnlock()
+			if defaultModel == "" {
+				defaultModel = systemSub.Model
+			}
+			sub, model = resolve(systemSub.ID, defaultModel)
+		}
+	}
+	if sub == nil {
+		return "", "", "", defaultMaxContext
+	}
+
+	maxContext = f.resolveSubContextFor(sub.ID, model)
+	if maxContext <= 0 {
+		maxContext = defaultMaxContext
+	}
+	return sub.ID, sub.Name, model, maxContext
+}
+
 // ─── Primary LLM resolution ──────────────────────────────
 
 func chatKey(senderID, chatID string) string { return senderID + ":" + chatID }
