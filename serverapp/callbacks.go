@@ -246,7 +246,6 @@ func buildRunnerConnectCmdFromToken(cfg *config.Config, senderID, token, mode, d
 // buildWebCallbacks creates WebCallbacks using shared callback builders.
 func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) web.WebCallbacks {
 	rc := runnerCallbacks(cfg)
-	regc := registryCallbacks(ag)
 	llmc := llmCallbacks(ag)
 
 	callbacks := web.WebCallbacks{
@@ -259,14 +258,6 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) we
 		RunnerDelete:        rc.RunnerDelete,
 		RunnerGetActive:     rc.RunnerGetActive,
 		RunnerSetActive:     rc.RunnerSetActive,
-
-		// Registry callbacks
-		RegistryBrowse:    regc.RegistryBrowse,
-		RegistryInstall:   regc.RegistryInstall,
-		RegistryListMy:    regc.RegistryListMy,
-		RegistryPublish:   regc.RegistryPublish,
-		RegistryUnpublish: regc.RegistryUnpublish,
-		RegistryUninstall: regc.RegistryUninstall,
 
 		// LLM callbacks (Web channel exposes only basic model/max-context via HTTP API;
 		// ThinkingMode/MaxOutputTokens/PersonalConcurrency are CLI-only via RPC.)
@@ -315,6 +306,7 @@ func buildWebCallbacks(cfg *config.Config, ag *agent.Agent, webDB *sqlite.DB) we
 	callbacks.GetPendingAskUser = func(channel, chatID string) *protocol.ProgressEvent {
 		return ag.GetPendingAskUser(channel, chatID)
 	}
+	callbacks.WithPendingAskUser = ag.WithPendingAskUser
 	callbacks.HistorySnapshot = func(senderID string, sel web.SessionSelector) (web.HistorySnapshot, error) {
 		if ag.MultiSession() == nil {
 			return web.HistorySnapshot{}, fmt.Errorf("multi-session not available")
